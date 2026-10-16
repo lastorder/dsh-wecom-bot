@@ -38,6 +38,20 @@ function flattenQuote(quote: unknown): string | undefined {
   return undefined;
 }
 
+// A group message is only ever delivered to this Bot when it was @-mentioned
+// (WeCom never forwards a group message otherwise), and WeCom leaves that
+// mention as literal "@DisplayName " text wherever the sender's cursor was —
+// most people mention the Bot first, then type. One or more such tokens at
+// the very start are addressing, not content: stripped so a command typed
+// right after "@Bot" still parses, and so DSH is not handed stray "@Bot "
+// text as if the sender had written it. A mid-message mention is left
+// alone — it was clearly meant as part of what was said.
+const LEADING_MENTIONS_RE = /^(?:@\S+\s*)+/;
+
+function stripLeadingMentions(text: string): string {
+  return text.replace(LEADING_MENTIONS_RE, '');
+}
+
 export function parseInbound(frame: WsFrame | undefined, botId: string): InboundMessage | null {
   if (frame?.cmd !== 'aibot_msg_callback' || !validIdentifier(frame.headers?.req_id, 512)) return null;
   const body = frame.body as Record<string, unknown> | undefined;
@@ -48,7 +62,8 @@ export function parseInbound(frame: WsFrame | undefined, botId: string): Inbound
   if (!validIdentifier(user)) return null;
   const chat = body.chattype === 'group' ? body.chatid : user;
   if (!validIdentifier(chat)) return null;
-  const text = body.msgtype === 'text' ? (body.text as { content?: unknown } | undefined)?.content : undefined;
+  const rawText = body.msgtype === 'text' ? (body.text as { content?: unknown } | undefined)?.content : undefined;
+  const text = typeof rawText === 'string' && body.chattype === 'group' ? stripLeadingMentions(rawText) : rawText;
   const quotedText = flattenQuote(body.quote);
   return {
     frame,

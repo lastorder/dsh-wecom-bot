@@ -100,6 +100,41 @@ test('/use then a plain message queues a prompt once; replays are ignored; /canc
   h.stop();
 });
 
+test('a leading @mention in a group message does not block command parsing, and is stripped from prompt content', async () => {
+  const h = harness({ sessionIds: ['s1', 's2'] });
+  // WeCom only delivers a group message when it @-mentions this Bot, and
+  // leaves that mention as literal text wherever the sender's cursor was —
+  // commonly right at the front, before they typed anything else.
+  await h.send('@DSH /use s2', { chat: 'group1', user: 'alice' });
+  assert.match(lastReply(h), /Beta 任务/, 'the command still parses with a leading mention');
+  await h.send('@DSH 继续工作吧', { chat: 'group1', user: 'alice' });
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 's2');
+  assert.deepEqual(h.ctx.prompts.at(-1).content, [{ type: 'text', text: '继续工作吧' }],
+    'the leading mention never reaches DSH as if the sender had typed it');
+  h.stop();
+});
+
+test('a mid-message mention is left alone, and single-chat text is never touched', async () => {
+  const h = harness({ sessionIds: ['s1'] });
+  await h.send('@DSH /use s1', { chat: 'group1', user: 'alice' });
+  await h.send('帮我看看 @DSH 这个问题', { chat: 'group1', user: 'alice' });
+  assert.deepEqual(h.ctx.prompts.at(-1).content, [{ type: 'text', text: '帮我看看 @DSH 这个问题' }],
+    'a mention placed mid-sentence is part of what was actually said');
+  await h.send('/use s1');
+  await h.send('@alice 你好', { chat: 'alice', user: 'alice' });
+  assert.deepEqual(h.ctx.prompts.at(-1).content, [{ type: 'text', text: '@alice 你好' }],
+    'single chats have no @-mention requirement to begin with');
+  h.stop();
+});
+
+test('a group message that is only a mention has nothing left after stripping', async () => {
+  const h = harness({ sessionIds: ['s1'] });
+  await h.send('@DSH /use s1', { chat: 'group1', user: 'alice' });
+  await h.send('@DSH', { chat: 'group1', user: 'alice' });
+  assert.match(lastReply(h), /消息内容为空/);
+  h.stop();
+});
+
 test('/sessions groups by Workspace, shows titles first, hides archived/subagent/blank, and /use accepts the index', async () => {
   const h = harness({}, {
     sessions: [
