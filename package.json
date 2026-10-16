@@ -1,0 +1,47 @@
+{
+  "name": "@local/dsh-wecom-bot",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "DeepSeek Harness WeCom AI Bot session bridge",
+  "exports": {
+    ".": "./dist/host/index.js",
+    "./client": "./dist/client.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  },
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json",
+    "build:host": "tsc -p tsconfig.json",
+    "build:client": "tsc -p tsconfig.client.json && node scripts/build-client.mjs",
+    "build": "pnpm run clean && pnpm run build:host && pnpm run build:client",
+    "test": "pnpm run build && node --test --disable-warning=ExperimentalWarning test/*.test.js",
+    "preview": "pnpm run build && node scripts/preview.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "~3.18.4",
+    "@wecom/aibot-node-sdk": "1.0.7"
+  },
+  "devDependencies": {
+    "@types/node": "~24.10.1",
+    "@types/react": "~18.3.31",
+    "esbuild": "~0.25.12",
+    "react": "~18.3.1",
+    "react-dom": "~18.3.1",
+    "react-test-renderer": "~18.3.1",
+    "typescript": "~5.9.3"
+  }
+}

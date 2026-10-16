@@ -1,0 +1,4 @@
+- insert:
+    - id: wecom-bot
+      name: '@local/dsh-wecom-bot'
+      config: {}
