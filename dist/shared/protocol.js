@@ -5,7 +5,7 @@
  * the Host through NodeNext (`../shared/protocol.js`) and the browser bundle
  * through esbuild (`../shared/protocol.ts`).
  */
-export const PACKAGE_NAME = '@local/dsh-wecom-bot';
+export const PACKAGE_NAME = 'dsh-wecom-bot';
 /** Loader entry id from cordis.patch.yml; also the Config form namespace. */
 export const CONFIG_NAMESPACE = 'wecom-bot';
 export const DEFAULT_SECRET_REF = 'WECOM_BOT_SECRET';

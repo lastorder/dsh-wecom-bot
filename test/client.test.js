@@ -133,9 +133,9 @@ const buttonWithText = (root, label) => root.find(node => node.type === 'button'
 
 test('registers on the bundle homepage slot with the static module format', () => {
   const harness = mount();
-  assert.equal(harness.entry.id, '@local/dsh-wecom-bot');
+  assert.equal(harness.entry.id, 'dsh-wecom-bot');
   assert.deepEqual([...harness.plugin.inject], ['slots', 'configForms', 'remote', 'remote.credentials']);
-  assert.deepEqual({ ...harness.registration.options }, { name: 'plugins.bundle.config', key: '@local/dsh-wecom-bot' });
+  assert.deepEqual({ ...harness.registration.options }, { name: 'plugins.bundle.config', key: 'dsh-wecom-bot' });
   assert.equal(harness.registration.component({ view: 'summary' }), null);
   assert.equal(harness.style.length, 1, 'stylesheet inserted once');
 });

@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-	id: "@local/dsh-wecom-bot",
+	id: "dsh-wecom-bot",
 	factory: (require) => {
 		var module = { exports: {} };
 		var exports = module.exports;
@@ -31,7 +31,7 @@ window.__ModuleLoader__.load({
 		module.exports = __toCommonJS(index_exports);
 
 		// src/shared/protocol.ts
-		var PACKAGE_NAME = "@local/dsh-wecom-bot";
+		var PACKAGE_NAME = "dsh-wecom-bot";
 		var CONFIG_NAMESPACE = "wecom-bot";
 		var DEFAULT_SECRET_REF = "WECOM_BOT_SECRET";
 		var STATE_ROUTE = "/api/wecom-bot/state";

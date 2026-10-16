@@ -15,13 +15,13 @@ pnpm install          # esbuild 的安装脚本不需要运行（见 pnpm-worksp
 pnpm test             # 清理 → 构建 Host 与浏览器包 → 运行全部测试
 ```
 
-DSH 加载 `dist/` 中的构建产物：Host 入口 `dist/host/index.js`，浏览器入口 `dist/client.js`。在 DSH「插件」中以本目录绝对路径安装 bundle `@local/dsh-wecom-bot`（bundle patch 会插入 `wecom-bot` 条目）。
+DSH 加载 `dist/` 中的构建产物：Host 入口 `dist/host/index.js`，浏览器入口 `dist/client.js`。已发布到 npm 后可直接安装 [`dsh-wecom-bot`](https://www.npmjs.com/package/dsh-wecom-bot)；本地开发时在 DSH「插件」中以本目录绝对路径安装 bundle（bundle patch 会插入 `wecom-bot` 条目）。
 
 **修改代码并重新构建后，需要重启 DSH 应用**：桌面版 profile 未开启 Host 源码热重载，禁用/启用插件不会替换已缓存的 Host 模块。接口已在 DSH `0.2.0-rc.2` 上核对。
 
 ## 在插件主页配置
 
-打开 **设置 → 插件 → `@local/dsh-wecom-bot`** 的 bundle 主页。页面自上而下：
+打开 **设置 → 插件 → `dsh-wecom-bot`** 的 bundle 主页。页面自上而下：
 
 1. **状态栏**：连接状态（在线 / 连接中 / 认证失败 / 被其他连接替换…）与本次启动以来的消息、拒绝、提交、推送计数。
 2. **访问范围提示**：任一白名单留空都会醒目提示其含义。

@@ -1,12 +1,43 @@
 {
-  "name": "@local/dsh-wecom-bot",
+  "name": "dsh-wecom-bot",
   "version": "0.2.0",
-  "private": true,
   "type": "module",
-  "description": "DeepSeek Harness WeCom AI Bot session bridge",
+  "description": "Bridge a WeCom (企业微信) smart bot to DeepSeek Harness Sessions: get notified when a Session finishes or needs input, and drive Sessions from WeCom chat.",
+  "license": "MIT",
+  "icon": "./icon.svg",
+  "main": "./dist/host/index.js",
   "exports": {
     ".": "./dist/host/index.js",
-    "./client": "./dist/client.js"
+    "./client": "./dist/client.js",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lastorder/dsh-wecom-bot.git"
+  },
+  "homepage": "https://github.com/lastorder/dsh-wecom-bot#readme",
+  "bugs": {
+    "url": "https://github.com/lastorder/dsh-wecom-bot/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "plugin",
+    "wecom",
+    "企业微信"
+  ],
+  "engines": {
+    "node": ">=22"
   },
   "dsh": {
     "bundle": {
@@ -29,6 +60,8 @@
     "build:client": "tsc -p tsconfig.client.json && node scripts/build-client.mjs",
     "build": "pnpm run clean && pnpm run build:host && pnpm run build:client",
     "test": "pnpm run build && node --test --disable-warning=ExperimentalWarning test/*.test.js",
+    "verify": "pnpm run build && pnpm run typecheck && node --test --disable-warning=ExperimentalWarning test/*.test.js",
+    "prepublishOnly": "pnpm run verify",
     "preview": "pnpm run build && node scripts/preview.mjs"
   },
   "dependencies": {
