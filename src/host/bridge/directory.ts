@@ -1,21 +1,26 @@
-import type { CatalogService, SessionCatalog } from '../catalog.js';
-import type { HiddenSelection } from '../../shared/protocol.js';
-import type { AccessPolicy } from './policy.js';
+import type { CatalogEntry, CatalogService, SessionCatalog } from '../catalog.js';
+import type { HiddenSelection, ModelSelection } from '../../shared/protocol.js';
 
 /**
- * The Sessions a WeCom user may operate: the visible DSH catalog (no
- * archived, subagent or blank Sessions) intersected with the Session
- * allowlist. When the catalog cannot be read, only an explicitly
- * allowlisted Session stays operable (fail closed for "allow all").
+ * The Sessions an *administrator* may operate: the visible DSH catalog (no
+ * archived, subagent or blank Sessions) filtered by the administrator's
+ * Workspace scope. Ordinary users never consult this module — they are
+ * always routed to the Session their own binding owns.
+ *
+ * When the catalog cannot be read, an explicitly requested Session stays
+ * operable so a transient DSH read failure does not block an administrator
+ * who already switched to it.
  */
 
 export interface OperableSession {
   readonly sessionId: string;
   readonly title: string | null;
   readonly workspace: string;
+  readonly workspacePath: string;
   readonly groupKey: string;
   readonly running: boolean;
   readonly pinned: boolean;
+  readonly model?: ModelSelection;
 }
 
 export interface OperableGroup {
@@ -27,22 +32,37 @@ export type ResolveResult =
   | { readonly ok: true; readonly session: OperableSession }
   | { readonly ok: false; readonly reason: 'not-found' | 'ambiguous' | 'forbidden' | 'unavailable'; readonly hidden?: HiddenSelection['reason'] };
 
+export interface SessionDescription {
+  readonly title: string | null;
+  readonly workspace?: string;
+  readonly workspacePath?: string;
+  readonly running?: boolean;
+  readonly model?: ModelSelection;
+}
+
 export interface SessionDirectory {
   /** Grouped by Workspace in DSH sidebar order. */
   groups(): Promise<readonly OperableGroup[]>;
   /** `token`: 1-based index into `listing`, a full Session id, or a unique id prefix (≥ 6 chars). */
   resolve(token: string, listing?: readonly string[]): Promise<ResolveResult>;
   permitted(sessionId: string): Promise<boolean>;
-  describe(sessionId: string): Promise<{ readonly title: string | null; readonly workspace?: string }>;
+  describe(sessionId: string): Promise<SessionDescription>;
 }
 
-export function createSessionDirectory(catalogs: CatalogService, policy: AccessPolicy): SessionDirectory {
+export interface SessionDirectoryOptions {
+  /** Whether an administrator scope covers this catalog entry's Workspace. */
+  allow(entry: CatalogEntry): boolean;
+}
+
+export function createSessionDirectory(catalogs: CatalogService, options: SessionDirectoryOptions): SessionDirectory {
   function operable(catalog: SessionCatalog): OperableSession[] {
     return catalog.entries
-      .filter(entry => policy.sessionListed(entry.sessionId))
+      .filter(entry => options.allow(entry))
       .map(entry => ({
-        sessionId: entry.sessionId, title: entry.title, workspace: entry.group.title, groupKey: entry.group.key,
+        sessionId: entry.sessionId, title: entry.title, workspace: entry.group.title,
+        workspacePath: entry.group.path ?? '', groupKey: entry.group.key,
         running: entry.running, pinned: entry.pinned,
+        ...(entry.model ? { model: entry.model } : {}),
       }));
   }
 
@@ -84,23 +104,32 @@ export function createSessionDirectory(catalogs: CatalogService, policy: AccessP
       }
       if (candidates.length === 1) return { ok: true, session: candidates[0]! };
       if (candidates.length > 1) return { ok: false, reason: 'ambiguous' };
-      if (!policy.sessionListed(value) && catalog.get(value)) return { ok: false, reason: 'forbidden' };
+      const entry = catalog.get(value);
+      if (entry && !options.allow(entry)) return { ok: false, reason: 'forbidden' };
       const hidden = catalog.hiddenReason(value);
       return { ok: false, reason: 'not-found', ...(hidden && hidden !== 'missing' ? { hidden } : {}) };
     },
     async permitted(sessionId) {
-      if (!policy.sessionListed(sessionId)) return false;
       try {
-        return Boolean((await lookup(sessionId)).get(sessionId));
+        const catalog = await lookup(sessionId);
+        const entry = catalog.get(sessionId);
+        return Boolean(entry) && options.allow(entry!);
       } catch {
-        return policy.sessionIds.has(sessionId);
+        return false;
       }
     },
     async describe(sessionId) {
       try {
         const catalog = await catalogs.load();
         const entry = catalog.get(sessionId);
-        return entry ? { title: entry.title, workspace: entry.group.title } : { title: catalog.titleOf(sessionId) };
+        if (!entry) return { title: catalog.titleOf(sessionId) };
+        return {
+          title: entry.title,
+          workspace: entry.group.title,
+          workspacePath: entry.group.path ?? '',
+          running: entry.running,
+          ...(entry.model ? { model: entry.model } : {}),
+        };
       } catch {
         return { title: null };
       }

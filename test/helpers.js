@@ -1,10 +1,13 @@
 // Shared fakes for the Host tests. They mirror only what the plugin uses.
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, realpathSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { sanitize } from '../dist/host/journal.js';
 
 export const tick = () => new Promise(resolve => setImmediate(resolve));
 
-export async function settle(rounds = 5) {
+export async function settle(rounds = 12) {
   for (let i = 0; i < rounds; i++) await tick();
 }
 
@@ -35,32 +38,116 @@ export function fakeClient() {
   return client;
 }
 
+/** One workspace directory per test run; the binding store writes a real file. */
+export const scratchRoot = realpathSync(mkdtempSync(join(tmpdir(), 'wecom-bot-test-')));
+let scratchCounter = 0;
+export function scratchDirectory() {
+  return join(scratchRoot, `case-${++scratchCounter}`);
+}
+
+export const TEST_WORKSPACE_PATH = join(scratchRoot, 'workspace');
+
+/** Catalog payload DSH's `sessionController.modelCatalog()` answers with. */
+export const fakeModelCatalog = {
+  default: { provider: 'deepseek-account', model: 'deepseek-chat' },
+  routableProviders: ['deepseek-account'],
+  groups: [
+    {
+      id: 'deepseek-account', name: 'DeepSeek',
+      models: [
+        { id: 'deepseek-chat', name: 'DeepSeek Chat' },
+        { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner', reasoning: { efforts: [{ id: 'low', name: '低' }, { id: 'high', name: '高' }], defaultEffort: 'high' } },
+      ],
+    },
+  ],
+  failures: [],
+};
+
+export function fakeWorkspaceRegistry(workspaces = []) {
+  const rows = workspaces.map(workspace => ({ sessionIds: [], ...workspace }));
+  return {
+    rows,
+    list: () => rows,
+    get: id => rows.find(row => row.id === id),
+    async create(path, title) {
+      const found = rows.find(row => row.path === path);
+      if (found) return found;
+      const created = { id: `w${rows.length + 1}`, path, title: title ?? path.split('/').pop(), sessionIds: [] };
+      rows.push(created);
+      return created;
+    },
+    async resolveByPath(path) { return rows.find(row => row.path === path); },
+    archivedSessionIds: [],
+    pinnedSessionIds: [],
+  };
+}
+
 /**
  * Host context with a Session list, an optional Workspace registry and
- * captured listeners. `sessions` rows follow sessionController.list.
+ * captured listeners. `sessions` rows follow sessionController.list; created
+ * Sessions are appended (and attached to their Workspace) so the catalog sees
+ * them exactly like the real registry would.
  */
-export function fakeHost({ sessions, workspaces, archived = [], pinned = [] } = {}) {
+export function fakeHost({ sessions, workspaces, archived = [], pinned = [], defaultModel } = {}) {
   const handlers = new Map();
   const prompts = [];
   const cancels = [];
   const listCalls = [];
+  const creates = [];
+  const selections = [];
+  const defaultSaves = [];
+  let currentDefault = defaultModel ?? { provider: 'deepseek-account', model: 'deepseek-chat' };
   const rows = sessions ?? [
     { sessionId: 's1', updatedAt: 200, running: false, blank: false, cwd: '/w/alpha', projections: { values: { title: 'Alpha 任务' } } },
     { sessionId: 's2', updatedAt: 100, running: true, blank: false, cwd: '/w/beta', projections: { values: { title: 'Beta 任务' } } },
   ];
-  const registry = workspaces === undefined ? undefined : {
-    list: () => workspaces,
-    archivedSessionIds: archived,
-    pinnedSessionIds: pinned,
+  const registry = workspaces === undefined ? undefined : fakeWorkspaceRegistry(workspaces);
+  const defaultModelService = {
+    currentSelection: () => ({ ...currentDefault }),
+    async saveSelection(next) { defaultSaves.push({ ...next }); currentDefault = { ...next }; },
   };
   const ctx = {
-    handlers, prompts, cancels, listCalls, rows, registry,
+    handlers, prompts, cancels, listCalls, creates, selections, defaultSaves,
+    rows, registry, defaultModelService,
     on(name, fn) { handlers.set(name, fn); return () => { if (handlers.get(name) === fn) handlers.delete(name); }; },
-    get(name) { return name === 'workspaceRegistry' ? registry : undefined; },
+    get(name) {
+      if (name === 'workspaceRegistry') return registry;
+      if (name === 'agentDefaultModel') return defaultModelService;
+      return undefined;
+    },
     sessionController: {
-      async prompt(request) { prompts.push(request); return { accepted: true }; },
+      async prompt(request) {
+        prompts.push(request);
+        const row = rows.find(item => item.sessionId === request.sessionId);
+        if (row) row.blank = false;
+        return { accepted: true };
+      },
       cancel(request) { cancels.push(request); return { accepted: true }; },
       async list(request, signal) { listCalls.push({ request, signal }); return { items: rows }; },
+      async create(request) {
+        creates.push(request);
+        const workspace = request.workspaceId ? registry?.get(request.workspaceId) : undefined;
+        const cwd = workspace?.path ?? request.cwd;
+        const sessionId = `session-created-${creates.length}`;
+        rows.push({ sessionId, updatedAt: Date.now(), running: false, blank: true, cwd, projections: { values: { title: null } } });
+        if (workspace) workspace.sessionIds.push(sessionId);
+        return { sessionId };
+      },
+      async selectModel(request) {
+        selections.push(request);
+        const selected = {
+          provider: request.provider, model: request.model,
+          ...(request.reasoningEffort ? { reasoningEffort: request.reasoningEffort } : {}),
+        };
+        // DSH records the selection as a durable projection; the plugin reads it back.
+        const row = rows.find(item => item.sessionId === request.sessionId);
+        if (row) {
+          row.projections ??= { values: {} };
+          row.projections.values.modelSelection = { lastUsed: null, next: selected };
+        }
+        return { selected };
+      },
+      async modelCatalog() { return fakeModelCatalog; },
     },
   };
   return ctx;
@@ -101,6 +188,8 @@ export function finishedSession(id, { turn = 1, text = '完成', reason = 'compl
 
 export const baseSettings = {
   botId: 'bot', secretRef: 'WECOM_BOT_SECRET', wsUrl: '',
-  chatIds: [], sessionIds: [], allowedUserIds: [],
+  chatIds: [], allowedUserIds: [],
+  defaultWorkspace: '', defaultProvider: '', defaultModel: '', defaultReasoningEffort: '',
+  adminUserIds: [], adminWorkspaces: [],
   questionTimeoutMs: 1000, remoteApprovals: false,
 };

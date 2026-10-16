@@ -2,7 +2,10 @@
  * Pure state helpers for the settings page: drafts, diffs, validation and
  * list filtering. No React and no DOM, so they are unit-tested directly.
  */
-import type { CatalogGroup, CatalogSession, ObservedIdentity } from '../shared/protocol.ts';
+import type {
+  BindingOp, BindingView, BindingsView, CatalogGroup, CatalogSession, ModelCatalogView,
+  ModelChoice, ModelSelection, ObservedIdentity,
+} from '../shared/protocol.ts';
 import { DEFAULT_SECRET_REF } from '../shared/protocol.ts';
 import type { FormOperation, StoredConfig } from './types.ts';
 
@@ -10,8 +13,13 @@ export const DEFAULTS: StoredConfig = {
   botId: '',
   secretEnv: DEFAULT_SECRET_REF,
   chatIds: [],
-  sessionIds: [],
   allowedUserIds: [],
+  defaultWorkspace: '',
+  defaultProvider: '',
+  defaultModel: '',
+  defaultReasoningEffort: '',
+  adminUserIds: [],
+  adminWorkspaces: [],
   wsUrl: '',
   questionTimeoutMs: 60000,
   remoteApprovals: false,
@@ -25,22 +33,34 @@ export interface Draft extends StoredConfig {
   readonly secret: string;
 }
 
-const LIST_KEYS = ['chatIds', 'sessionIds', 'allowedUserIds'] as const;
-const SCALAR_KEYS = ['botId', 'wsUrl', 'questionTimeoutMs', 'remoteApprovals', 'logEnabled', 'logRetentionDays'] as const;
+const LIST_KEYS = ['chatIds', 'allowedUserIds', 'adminUserIds', 'adminWorkspaces'] as const;
+const SCALAR_KEYS = [
+  'botId', 'wsUrl', 'questionTimeoutMs', 'remoteApprovals', 'logEnabled', 'logRetentionDays',
+  'defaultWorkspace', 'defaultProvider', 'defaultModel', 'defaultReasoningEffort',
+] as const;
 
 function list(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
 }
 
+function text(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
 export function storedFrom(value: Partial<StoredConfig> | undefined): StoredConfig {
   const v = value ?? {};
   return {
-    botId: typeof v.botId === 'string' ? v.botId : DEFAULTS.botId,
-    secretEnv: typeof v.secretEnv === 'string' && v.secretEnv.trim() ? v.secretEnv : DEFAULTS.secretEnv,
+    botId: text(v.botId),
+    secretEnv: text(v.secretEnv).trim() || DEFAULTS.secretEnv,
     chatIds: list(v.chatIds),
-    sessionIds: list(v.sessionIds),
     allowedUserIds: list(v.allowedUserIds),
-    wsUrl: typeof v.wsUrl === 'string' ? v.wsUrl : DEFAULTS.wsUrl,
+    defaultWorkspace: text(v.defaultWorkspace),
+    defaultProvider: text(v.defaultProvider),
+    defaultModel: text(v.defaultModel),
+    defaultReasoningEffort: text(v.defaultReasoningEffort),
+    adminUserIds: list(v.adminUserIds),
+    adminWorkspaces: list(v.adminWorkspaces),
+    wsUrl: text(v.wsUrl),
     questionTimeoutMs: typeof v.questionTimeoutMs === 'number' ? v.questionTimeoutMs : DEFAULTS.questionTimeoutMs,
     remoteApprovals: v.remoteApprovals === true,
     logEnabled: v.logEnabled !== false,
@@ -49,7 +69,14 @@ export function storedFrom(value: Partial<StoredConfig> | undefined): StoredConf
 }
 
 export function draftFrom(stored: StoredConfig): Draft {
-  return { ...stored, chatIds: [...stored.chatIds], sessionIds: [...stored.sessionIds], allowedUserIds: [...stored.allowedUserIds], secret: '' };
+  return {
+    ...stored,
+    chatIds: [...stored.chatIds],
+    allowedUserIds: [...stored.allowedUserIds],
+    adminUserIds: [...stored.adminUserIds],
+    adminWorkspaces: [...stored.adminWorkspaces],
+    secret: '',
+  };
 }
 
 function normalizedList(values: readonly string[]): string[] {
@@ -84,7 +111,15 @@ export function isDirty(draft: Draft, base: StoredConfig): boolean {
   return Boolean(draft.secret.trim()) || changedOperations(draft, base).length > 0;
 }
 
-export type FieldErrors = Partial<Record<'botId' | 'secret' | 'wsUrl' | 'questionTimeoutMs' | 'logRetentionDays', string>>;
+export type FieldErrors = Partial<Record<
+  'botId' | 'secret' | 'wsUrl' | 'questionTimeoutMs' | 'logRetentionDays' | 'defaultWorkspace' | 'defaultModel',
+  string
+>>;
+
+/** Absolute path in either POSIX or Windows spelling. */
+export function isAbsolutePath(value: string): boolean {
+  return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\');
+}
 
 export function validate(draft: Draft, secretConfigured: boolean): FieldErrors {
   const errors: FieldErrors = {};
@@ -105,23 +140,27 @@ export function validate(draft: Draft, secretConfigured: boolean): FieldErrors {
   if (!Number.isInteger(draft.logRetentionDays) || draft.logRetentionDays < 1 || draft.logRetentionDays > 365) {
     errors.logRetentionDays = '请输入 1–365 的整数天数。';
   }
+  const workspace = draft.defaultWorkspace.trim();
+  if (workspace && !isAbsolutePath(workspace)) errors.defaultWorkspace = '请填写绝对路径（留空 = 使用插件目录下的 workspace）。';
+  const provider = draft.defaultProvider.trim();
+  const model = draft.defaultModel.trim();
+  if (Boolean(provider) !== Boolean(model)) errors.defaultModel = '请同时选择服务商与模型，或都留空以跟随 DSH 默认模型。';
   return errors;
 }
 
-export type AccessDimension = 'sessions' | 'chats' | 'users';
+export type AccessDimension = 'chats' | 'users';
 
 export interface AccessSummary {
-  /** `open`: nothing restricted; `partial`: some lists empty; `restricted`: all three set. */
+  /** `open`: nothing restricted; `partial`: one list empty; `restricted`: both set. */
   readonly level: 'open' | 'partial' | 'restricted';
   readonly unrestricted: readonly AccessDimension[];
 }
 
-export function accessSummary(draft: Pick<StoredConfig, 'sessionIds' | 'chatIds' | 'allowedUserIds'>): AccessSummary {
+export function accessSummary(draft: Pick<StoredConfig, 'chatIds' | 'allowedUserIds'>): AccessSummary {
   const unrestricted: AccessDimension[] = [];
-  if (!normalizedList(draft.sessionIds).length) unrestricted.push('sessions');
   if (!normalizedList(draft.chatIds).length) unrestricted.push('chats');
   if (!normalizedList(draft.allowedUserIds).length) unrestricted.push('users');
-  return { level: unrestricted.length === 3 ? 'open' : unrestricted.length ? 'partial' : 'restricted', unrestricted };
+  return { level: unrestricted.length === 2 ? 'open' : unrestricted.length ? 'partial' : 'restricted', unrestricted };
 }
 
 export function toggle(values: readonly string[], id: string, on?: boolean): string[] {
@@ -137,25 +176,6 @@ export function setAll(values: readonly string[], ids: readonly string[], on: bo
   return values.filter(value => !remove.has(value));
 }
 
-function matches(session: CatalogSession, group: CatalogGroup, needle: string): boolean {
-  return [session.title ?? '', session.sessionId, group.title, group.path ?? '']
-    .some(text => text.toLowerCase().includes(needle));
-}
-
-/** Filter by title, id, Workspace title or path; optionally keep only selected rows. */
-export function filterGroups(
-  groups: readonly CatalogGroup[], query: string, selected?: ReadonlySet<string>,
-): CatalogGroup[] {
-  const needle = query.trim().toLowerCase();
-  return groups
-    .map(group => ({
-      ...group,
-      sessions: group.sessions.filter(session =>
-        (!needle || matches(session, group, needle)) && (!selected || selected.has(session.sessionId))),
-    }))
-    .filter(group => group.sessions.length > 0);
-}
-
 /** Observed identities plus configured IDs that were not observed recently. */
 export function identityRows(observed: readonly ObservedIdentity[], configured: readonly string[]): { id: string; observed?: ObservedIdentity }[] {
   const rows: { id: string; observed?: ObservedIdentity }[] = observed.map(entry => ({ id: entry.id, observed: entry }));
@@ -163,6 +183,104 @@ export function identityRows(observed: readonly ObservedIdentity[], configured: 
   for (const id of configured) if (!known.has(id)) rows.push({ id });
   return rows;
 }
+
+/* ------------------------------- models ------------------------------- */
+
+/** A provider/model pair as it is stored in one `<option value>`. */
+export function modelKey(provider: string, model: string): string {
+  return provider && model ? `${provider}\u0000${model}` : '';
+}
+
+export function parseModelKey(key: string): { provider: string; model: string } {
+  const [provider = '', model = ''] = key.split('\u0000');
+  return { provider, model };
+}
+
+export function choiceLabel(choice: ModelChoice): string {
+  return choice.name === choice.model ? choice.model : `${choice.name}（${choice.model}）`;
+}
+
+/** Reasoning efforts offered by one provider/model pair. */
+export function effortsFor(
+  catalog: ModelCatalogView | null | undefined, provider: string, model: string,
+): readonly { id: string; name: string }[] {
+  const choice = catalog?.choices.find(item => item.provider === provider && item.model === model);
+  return choice?.efforts ?? [];
+}
+
+export function modelLabel(catalog: ModelCatalogView | null | undefined, selection: ModelSelection | undefined): string {
+  if (!selection) return '';
+  const choice = catalog?.choices.find(item => item.provider === selection.provider && item.model === selection.model);
+  return choice ? choiceLabel(choice) : `${selection.provider}/${selection.model}`;
+}
+
+export function dshDefaultLabel(catalog: ModelCatalogView | null | undefined): string {
+  const value = catalog?.dshDefault;
+  if (!value) return '跟随 DSH 默认模型';
+  return `跟随 DSH 默认模型（${modelLabel(catalog, value)}）`;
+}
+
+/* ------------------------------ bindings ------------------------------ */
+
+export const BINDING_KIND_LABEL = { user: '个人', group: '群聊' } as const;
+
+export const SESSION_STATE_LABEL: Record<BindingView['sessionState'], string> = {
+  bound: '已绑定',
+  auto: '待创建',
+  blank: '待使用',
+  missing: '会话不存在',
+  archived: '会话已归档',
+  unusable: '会话不可用',
+};
+
+export interface BindingGroup {
+  readonly key: string;
+  readonly title: string;
+  readonly path: string;
+  readonly rows: readonly BindingView[];
+}
+
+/** Bindings grouped by their effective Workspace, filtered by one search string. */
+export function bindingGroups(view: BindingsView | null | undefined, query: string): BindingGroup[] {
+  const needle = query.trim().toLowerCase();
+  const groups = new Map<string, { title: string; path: string; rows: BindingView[] }>();
+  for (const binding of view?.items ?? []) {
+    const haystack = [
+      binding.id, binding.note ?? '', binding.sessionTitle ?? '', binding.sessionId,
+      binding.workspaceTitle, binding.workspacePath,
+      binding.provider && binding.model ? `${binding.provider}/${binding.model}` : '',
+      binding.sessionModel ? `${binding.sessionModel.provider}/${binding.sessionModel.model}` : '',
+    ].join(' ').toLowerCase();
+    if (needle && !haystack.includes(needle)) continue;
+    const key = binding.workspacePath || binding.workspaceTitle;
+    const group = groups.get(key) ?? { title: binding.workspaceTitle, path: binding.workspacePath, rows: [] };
+    group.rows.push(binding);
+    groups.set(key, group);
+  }
+  return [...groups.entries()]
+    .map(([key, group]) => ({ key, title: group.title, path: group.path, rows: group.rows }))
+    .sort((left, right) => left.title.localeCompare(right.title));
+}
+
+export interface SessionOption {
+  readonly sessionId: string;
+  readonly title: string | null;
+  /** True when the Session is not part of the current catalog. */
+  readonly stale?: boolean;
+}
+
+/** Sessions the page may offer for one binding: its Workspace's, plus its own. */
+export function sessionOptions(binding: BindingView, groups: readonly CatalogGroup[] | undefined): SessionOption[] {
+  const found = (groups ?? []).find(group => (group.path ?? '') === binding.workspacePath);
+  const options: SessionOption[] = (found?.sessions ?? [])
+    .map((session: CatalogSession) => ({ sessionId: session.sessionId, title: session.title }));
+  if (binding.sessionId && !options.some(option => option.sessionId === binding.sessionId)) {
+    options.unshift({ sessionId: binding.sessionId, title: binding.sessionTitle, stale: true });
+  }
+  return options;
+}
+
+/* ------------------------------- display ------------------------------ */
 
 /** Shorten a home-directory prefix for display: /Users/me/x → ~/x. */
 export function displayPath(path: string | undefined): string {
@@ -177,4 +295,18 @@ export function relativeTime(at: number | undefined, now = Date.now()): string {
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
   if (diff < 30 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
   return new Date(at).toLocaleDateString();
+}
+
+/* --------------------------- binding operations ------------------------ */
+
+export function setBindingWorkspace(key: string, workspace: string): BindingOp {
+  return { op: 'set', key, patch: { workspace } };
+}
+
+export function setBindingSession(key: string, sessionId: string): BindingOp {
+  return { op: 'set', key, patch: { sessionId } };
+}
+
+export function setBindingModel(key: string, provider: string, model: string, reasoningEffort: string): BindingOp {
+  return { op: 'set', key, patch: { provider, model, reasoningEffort } };
 }

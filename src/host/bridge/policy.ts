@@ -1,33 +1,41 @@
 import type { RejectionReason } from '../../shared/protocol.js';
-import type { BridgeSettings } from '../config.js';
+import { pathListed, type BridgeSettings } from '../config.js';
 
 /**
- * Access policy. Each list is an independent allowlist; an empty list allows
- * everything in that dimension. A message is accepted only when both its
- * conversation and its sender pass; a Session must pass the Session list.
+ * Access policy. Two independent allowlists gate who may talk to the Bot at
+ * all; an empty list allows everything in that dimension. Routing is not
+ * decided here: which Session a conversation reaches comes from its binding,
+ * and only administrators may leave their own binding.
  */
 export interface AccessPolicy {
   readonly chatIds: ReadonlySet<string>;
   readonly userIds: ReadonlySet<string>;
-  readonly sessionIds: ReadonlySet<string>;
+  readonly adminUserIds: ReadonlySet<string>;
+  readonly adminWorkspaces: readonly string[];
   chatAllowed(chat: string): boolean;
   userAllowed(user: string): boolean;
-  /** Session allowlist only; visibility (archived, subagent) is checked by the directory. */
-  sessionListed(sessionId: string): boolean;
+  /** Administrators may switch Sessions and receive Workspace-scoped notices. */
+  isAdmin(user: string): boolean;
+  /** Whether an administrator scope covers one Workspace directory. */
+  adminWorkspaceAllowed(path: string | undefined): boolean;
   evaluate(chat: string, user: string): { readonly accepted: true } | { readonly accepted: false; readonly reason: RejectionReason };
 }
 
-export function createAccessPolicy(settings: Pick<BridgeSettings, 'chatIds' | 'allowedUserIds' | 'sessionIds'>): AccessPolicy {
+export function createAccessPolicy(
+  settings: Pick<BridgeSettings, 'chatIds' | 'allowedUserIds' | 'adminUserIds' | 'adminWorkspaces'>,
+): AccessPolicy {
   const chatIds = new Set(settings.chatIds);
   const userIds = new Set(settings.allowedUserIds);
-  const sessionIds = new Set(settings.sessionIds);
+  const adminUserIds = new Set(settings.adminUserIds);
+  const adminWorkspaces = settings.adminWorkspaces;
   const chatAllowed = (chat: string) => !chatIds.size || chatIds.has(chat);
   const userAllowed = (user: string) => !userIds.size || userIds.has(user);
   return {
-    chatIds, userIds, sessionIds,
+    chatIds, userIds, adminUserIds, adminWorkspaces,
     chatAllowed,
     userAllowed,
-    sessionListed: id => !sessionIds.size || sessionIds.has(id),
+    isAdmin: user => adminUserIds.has(user),
+    adminWorkspaceAllowed: (path: string | undefined) => pathListed(adminWorkspaces, path),
     evaluate(chat, user) {
       const chatOk = chatAllowed(chat);
       const userOk = userAllowed(user);

@@ -17,7 +17,7 @@ const read = path => readFile(resolve(root, path), 'utf8');
 
 const now = Date.now();
 const state = {
-  version: 1,
+  version: 2,
   connection: empty ? { phase: 'unconfigured', since: now - 30_000, detail: '缺少 Bot ID' } : { phase: 'online', since: now - 25 * 60_000 },
   traffic: empty ? { since: now, received: 0, rejected: 0, prompts: 0, notifications: 0, failures: 0 }
     : { since: now - 3_600_000, received: 18, rejected: 2, prompts: 9, notifications: 11, failures: 0, lastMessageAt: now - 90_000 },
@@ -34,28 +34,94 @@ const state = {
   sessions: {
     groups: [
       { key: 'w1', kind: 'workspace', title: 'dsh-wecom-bot', path: '/Users/me/Workspace/learn/dsh-wecom-bot', sessions: [
-        { sessionId: '0dd82b7f-516c-41dc-b0a0-ac95e596a05a', title: '企业微信 Bot 插件开发', running: true, pinned: true, updatedAt: now - 60_000 },
+        { sessionId: '0dd82b7f-516c-41dc-b0a0-ac95e596a05a', title: '企业微信 Bot 插件开发', running: true, pinned: true, updatedAt: now - 60_000, model: { provider: 'deepseek-account', model: 'deepseek-reasoner' } },
         { sessionId: 'fa761602-210c-4653-8dc6-9d74e1f71507', title: '配置页重构与日志', running: false, pinned: false, updatedAt: now - 3 * 3_600_000 },
         { sessionId: '8e05784f-03c2-41a7-b675-7a60b64efa01', title: null, running: false, pinned: false, updatedAt: now - 2 * 86_400_000 },
       ] },
       { key: 'w2', kind: 'workspace', title: 'dsh-mattermost', path: '/Users/me/Workspace/learn/dsh-mattermost', sessions: [
         { sessionId: 'c5a3f106-dd91-49a8-bd42-4d9fca1b60f8', title: 'Mattermost 通知桥', running: false, pinned: false, updatedAt: now - 86_400_000 },
       ] },
-      { key: 'w3', kind: 'workspace', title: '默认工作区', path: '/Users/me/Documents/deepseek-harness/default-workspace', sessions: [
+      { key: 'w3', kind: 'workspace', title: '企业微信', path: '/Users/me/.dsh/wecom-bot/workspace', sessions: [
         { sessionId: '934bf135-e3e5-4c8e-9784-45ddc1457c05', title: '周报整理', running: false, pinned: false, updatedAt: now - 5 * 86_400_000 },
+        { sessionId: '5b19e0f2-6d3a-4a1e-9d3f-1a2b3c4d5e6f', title: '群里的运维问答', running: false, pinned: false, updatedAt: now - 2 * 86_400_000 },
       ] },
       { key: 'ungrouped', kind: 'ungrouped', title: '未分组', sessions: [
         { sessionId: 'db3af9bd-edb8-4c11-8869-9e63c4174f9c', title: '临时问题', running: false, pinned: false, updatedAt: now - 9 * 86_400_000 },
       ] },
     ],
-    total: 6, archived: 7, generatedAt: now - 2000,
-    hiddenSelections: empty ? [] : [{ sessionId: '71d26f38-0650-4a43-967d-13388b83ab61', title: '旧的测试会话', reason: 'archived' }],
+    total: 7, archived: 7, generatedAt: now - 2000,
+    hiddenSelections: [],
   },
+  bindings: empty ? { items: [], total: 0, full: false } : {
+    total: 4,
+    full: false,
+    items: [
+      {
+        key: 'user:ZhangSan', kind: 'user', id: 'ZhangSan', admin: true,
+        workspace: '', workspaceTitle: '企业微信', workspacePath: '/Users/me/.dsh/wecom-bot/workspace',
+        sessionId: '934bf135-e3e5-4c8e-9784-45ddc1457c05', sessionTitle: '周报整理', sessionState: 'bound', sessionRunning: false,
+        provider: '', model: '', effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-reasoner',
+        sessionModel: { provider: 'deepseek-account', model: 'deepseek-reasoner' },
+        messages: 14, lastSeenAt: now - 90_000, createdAt: now - 3_600_000, updatedAt: now - 90_000,
+      },
+      {
+        key: 'user:LiSi', kind: 'user', id: 'LiSi',
+        admin: false,
+        workspace: '', workspaceTitle: '企业微信', workspacePath: '/Users/me/.dsh/wecom-bot/workspace',
+        sessionId: '', sessionTitle: null, sessionState: 'auto', sessionRunning: false,
+        provider: '', model: '', effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-reasoner',
+        messages: 2, lastSeenAt: now - 600_000, createdAt: now - 1_800_000, updatedAt: now - 600_000,
+      },
+      {
+        key: 'group:wrOgAAAAAAAAexample', kind: 'group', id: 'wrOgAAAAAAAAexample', admin: false,
+        workspace: '', workspaceTitle: '企业微信', workspacePath: '/Users/me/.dsh/wecom-bot/workspace',
+        sessionId: '5b19e0f2-6d3a-4a1e-9d3f-1a2b3c4d5e6f', sessionTitle: '群里的运维问答', sessionState: 'bound', sessionRunning: true,
+        provider: 'deepseek-account', model: 'deepseek-chat',
+        effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-chat',
+        sessionModel: { provider: 'deepseek-account', model: 'deepseek-chat' },
+        messages: 4, lastSeenAt: now - 600_000, createdAt: now - 1_800_000, updatedAt: now - 600_000,
+      },
+      {
+        key: 'group:wrOgBBBBBBBBother', kind: 'group', id: 'wrOgBBBBBBBBother', admin: false,
+        workspace: '/Users/me/Workspace/learn/dsh-wecom-bot', workspaceTitle: 'dsh-wecom-bot',
+        workspacePath: '/Users/me/Workspace/learn/dsh-wecom-bot',
+        sessionId: '0dd82b7f-516c-41dc-b0a0-ac95e596a05a', sessionTitle: '企业微信 Bot 插件开发', sessionState: 'bound', sessionRunning: true,
+        provider: '', model: '', effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-reasoner',
+        sessionModel: { provider: 'deepseek-account', model: 'deepseek-reasoner' },
+        messages: 0, createdAt: now - 86_400_000, updatedAt: now - 86_400_000,
+      },
+    ],
+  },
+  models: {
+    choices: [
+      { provider: 'deepseek-account', providerName: 'DeepSeek', model: 'deepseek-chat', name: 'DeepSeek Chat' },
+      { provider: 'deepseek-account', providerName: 'DeepSeek', model: 'deepseek-reasoner', name: 'DeepSeek Reasoner', efforts: [{ id: 'low', name: '低' }, { id: 'high', name: '高' }], defaultEffort: 'high' },
+      { provider: 'pi-ai', providerName: 'Pi AI', model: 'gpt-5', name: 'GPT-5' },
+    ],
+    dshDefault: { provider: 'deepseek-account', model: 'deepseek-chat' },
+    failures: [], fetchedAt: now - 12_000,
+  },
+  workspaces: [
+    { id: 'w1', path: '/Users/me/Workspace/learn/dsh-wecom-bot', title: 'dsh-wecom-bot', pluginOwned: false, sessionCount: 3 },
+    { id: 'w3', path: '/Users/me/.dsh/wecom-bot/workspace', title: '企业微信', pluginOwned: true, sessionCount: 2 },
+    { id: 'w2', path: '/Users/me/Workspace/learn/dsh-mattermost', title: 'dsh-mattermost', pluginOwned: false, sessionCount: 1 },
+  ],
+  defaults: {
+    workspace: '', workspacePath: '/Users/me/.dsh/wecom-bot/workspace', workspaceTitle: '企业微信',
+    provider: 'deepseek-account', model: 'deepseek-reasoner',
+  },
+  admins: empty ? [] : ['ZhangSan'],
+  adminWorkspaces: empty ? [] : ['/Users/me/.dsh/wecom-bot/workspace'],
+  notices: empty ? [] : [],
   journal: { enabled: true, directory: '/Users/me/.dsh/wecom-bot/logs', file: '/Users/me/.dsh/wecom-bot/logs/2026-10-16.jsonl', retentionDays: 14 },
 };
 const stored = empty
-  ? { botId: '', chatIds: [], sessionIds: [], allowedUserIds: [] }
-  : { botId: 'aibAbCdEfGh123456', chatIds: ['ZhangSan'], sessionIds: ['0dd82b7f-516c-41dc-b0a0-ac95e596a05a', '71d26f38-0650-4a43-967d-13388b83ab61'], allowedUserIds: [] };
+  ? { botId: '', chatIds: [], allowedUserIds: [], defaultWorkspace: '', defaultProvider: '', defaultModel: '', adminUserIds: [], adminWorkspaces: [] }
+  : {
+    botId: 'aibAbCdEfGh123456', chatIds: ['ZhangSan'], allowedUserIds: [],
+    defaultWorkspace: '', defaultProvider: 'deepseek-account', defaultModel: 'deepseek-reasoner',
+    adminUserIds: ['ZhangSan'], adminWorkspaces: ['/Users/me/.dsh/wecom-bot/workspace'],
+  };
 
 // Light/dark values of the DSH tokens the page and the primitives read.
 const TOKENS = {
@@ -115,6 +181,13 @@ const html = `<!doctype html>
 <script>${await read('node_modules/react-dom/umd/react-dom.development.js')}</script>
 </head><body><div id="root"></div>
 <script>
+// A failed render must be visible in the screenshot instead of a blank page.
+window.addEventListener('error', event => {
+  const detail = (event.error && event.error.stack) || event.message || 'unknown error';
+  document.body.insertAdjacentHTML('afterbegin', '<pre style="color:#c00;padding:16px;white-space:pre-wrap">' + detail + '</pre>');
+});
+</script>
+<script>
 const STATE = ${JSON.stringify(state)};
 const h = React.createElement;
 const jsx = (type, props, key) => h(type, key === undefined ? props : { ...props, key });
@@ -132,6 +205,7 @@ const icons = {
   IconWarningTriangleOutlineRegular: icon('M8 2 14.5 13.5h-13ZM8 6.5v3.5M8 11.8v.2'),
   IconCheckCircleOutlineRegular: icon('M8 14.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13ZM5 8l2 2 4-4'),
   IconCopyOutlineRegular: icon('M5.5 5.5h8v8h-8ZM10.5 5.5v-3h-8v8h3'),
+  IconTrashOutlineRegular: icon('M2.5 4.5h11M6 4.5V2.5h4v2M4 4.5l.8 9h6.4l.8-9M6.5 7v4M9.5 7v4'),
   IconPlusOutlineRegular: icon('M8 2.5v11M2.5 8h11'),
 };
 const primitives = {
@@ -146,7 +220,10 @@ const primitives = {
 const modules = { react: React, 'react/jsx-runtime': runtime, '@deepseek-ai/dsh-client-ui-primitives': primitives };
 let entry;
 window.__ModuleLoader__ = { load(value) { entry = value; } };
-window.fetch = async () => ({ ok: true, status: 200, json: async () => STATE });
+window.fetch = async (url, options) => {
+  const body = options && options.method === 'POST' ? { ok: true, bindings: STATE.bindings } : STATE;
+  return { ok: true, status: 200, json: async () => body };
+};
 </script>
 <script>${await read('dist/client.js')}</script>
 <script>
@@ -181,6 +258,6 @@ const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 if (existsSync(chrome)) {
   const png = resolve(out, `settings${dark ? '-dark' : ''}${empty ? '-empty' : ''}${advanced ? '-advanced' : ''}.png`);
   execFileSync(chrome, ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1',
-    '--virtual-time-budget=3000', `--window-size=1100,${empty ? 1700 : advanced ? 2600 : 2000}`, `--screenshot=${png}`, pathToFileURL(file).href], { stdio: 'ignore' });
+    '--virtual-time-budget=3000', `--window-size=1100,${empty ? 1900 : advanced ? 3400 : 2950}`, `--screenshot=${png}`, pathToFileURL(file).href], { stdio: 'ignore' });
   console.log(png);
 }

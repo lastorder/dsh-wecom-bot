@@ -7,11 +7,13 @@ import {
 } from '../model.ts';
 import type { ClientRemote, ConfigFormScope, FormSnapshot } from '../types.ts';
 import { AccessBanner } from './AccessBanner.tsx';
+import { AdminCard } from './AdminCard.tsx';
 import { AdvancedCard } from './AdvancedCard.tsx';
+import { BindingsCard } from './BindingsCard.tsx';
 import { CredentialsCard } from './CredentialsCard.tsx';
 import { IdentityPicker } from './IdentityPicker.tsx';
-import { SessionPicker } from './SessionPicker.tsx';
 import { StatusHeader } from './StatusHeader.tsx';
+import { WorkspaceCard } from './WorkspaceCard.tsx';
 
 /** Plugin homepage (`plugins.bundle.config`, view `page`). */
 export function SettingsPage({ scope, remote }: { scope: ConfigFormScope; remote?: ClientRemote }) {
@@ -43,9 +45,10 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
   const secret = useSecretStatus(remote, base.secretEnv);
   const writable = snapshot.writable !== false;
   const busy = save.phase === 'saving';
+  const state = bridge.data;
 
-  // Follow edits made elsewhere (another window, the raw Config editor)
-  // unless the user has unsaved changes here.
+  // Follow edits made elsewhere (another window, a Host write, the raw Config
+  // editor) unless the user has unsaved changes here.
   useEffect(() => {
     const previous = baseRef.current;
     baseRef.current = base;
@@ -61,14 +64,26 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
     if (save.phase !== 'saving') setSave({ phase: 'idle' });
   };
 
+  /**
+   * Write the Config diff. A revision conflict means something else wrote the
+   * namespace (the Host re-reading its own settings, another window): re-read
+   * and rebase the same diff onto the newest revision instead of giving up.
+   */
+  async function persist(): Promise<void> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const latest = scope.getSnapshot();
+      const ops = changedOperations(draft, storedFrom(latest.value));
+      if (!ops.length) return;
+      if (await scope.mutate(ops, latest.revision)) return;
+    }
+    throw new Error('配置已在别处被修改，请刷新页面后重试。');
+  }
+
   async function onSave(): Promise<void> {
     if (invalid) { setShowErrors(true); return; }
     setSave({ phase: 'saving' });
     try {
-      const ops = changedOperations(draft, base);
-      if (ops.length && !(await scope.mutate(ops, snapshot.revision))) {
-        throw new Error('配置已在别处被修改，请刷新页面后重试。');
-      }
+      await persist();
       if (draft.secret.trim()) {
         try {
           await storeCredential(remote?.credentials, base.secretEnv, draft.secret.trim());
@@ -80,8 +95,7 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
       }
       setShowErrors(false);
       setSave({ phase: 'saved' });
-      setTimeout(() => bridge.refresh(true), 800);
-    } catch (error) {
+      setTimeout(() => bridge.refresh(true), 800);    } catch (error) {
       setSave({ phase: 'error', message: error instanceof Error ? error.message : String(error) });
     }
   }
@@ -91,14 +105,24 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
     : save.phase === 'error' ? { tone: 'error', text: save.message }
     : showErrors && invalid ? { tone: 'error', text: '请先修正标红的字段。' }
     : busy ? { tone: '', text: '正在保存…' }
-    : dirty ? { tone: 'dirty', text: '有未保存的更改' }
+    : dirty ? { tone: 'dirty', text: '有未保存的更改（会话绑定除外，它即时生效）' }
     : save.phase === 'saved' ? { tone: 'success', text: '已保存，机器人会按新配置重新连接。' }
     : { tone: '', text: '所有更改均已保存。' };
 
   return (
     <div className="wcb-page">
-      <StatusHeader state={bridge.data} error={bridge.error} />
-      <AccessBanner summary={summary} />
+      <StatusHeader state={state} error={bridge.error} />
+      {state?.notices.map(notice => (
+        <div className="wcb-banner" data-tone="warning" role="status" key={notice}>
+          <div><div className="wcb-banner-body">{notice}</div></div>
+        </div>
+      ))}
+      <AccessBanner
+        summary={summary}
+        admins={state?.admins ?? draft.adminUserIds}
+        adminWorkspaces={state?.adminWorkspaces ?? draft.adminWorkspaces}
+        workspace={state?.defaults.workspacePath || (draft.defaultWorkspace || undefined)}
+      />
       <CredentialsCard
         draft={draft}
         errors={visibleErrors}
@@ -106,28 +130,40 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
         disabled={!writable || busy}
         onChange={update}
       />
-      <SessionPicker
-        catalog={bridge.data?.sessions}
-        error={bridge.data?.sessionsError ?? bridge.error}
-        loading={bridge.loading}
-        refreshing={bridge.refreshing}
-        selected={draft.sessionIds}
+      <WorkspaceCard
+        draft={draft}
+        errors={visibleErrors}
+        state={state}
         disabled={!writable || busy}
-        onChange={sessionIds => update({ sessionIds })}
+        onChange={update}
+      />
+      <BindingsCard
+        state={state}
+        error={bridge.error}
+        disabled={!writable}
+        refreshing={bridge.refreshing}
         onRefresh={() => bridge.refresh(true)}
+        onChanged={() => bridge.refresh(true)}
       />
       <IdentityPicker
-        observed={bridge.data?.observed}
+        observed={state?.observed}
         chatIds={draft.chatIds}
         userIds={draft.allowedUserIds}
         disabled={!writable || busy}
-        connected={bridge.data?.connection.phase === 'online'}
+        connected={state?.connection.phase === 'online'}
+        onChange={patch => update(patch)}
+      />
+      <AdminCard
+        draft={draft}
+        observed={state?.observed}
+        workspaces={state?.workspaces ?? []}
+        disabled={!writable || busy}
         onChange={patch => update(patch)}
       />
       <AdvancedCard
         draft={draft}
         errors={visibleErrors}
-        journal={bridge.data?.journal}
+        journal={state?.journal}
         disabled={!writable || busy}
         onChange={update}
       />

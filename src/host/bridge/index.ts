@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { WSClient, WsFrame } from '@wecom/aibot-node-sdk';
 import { createCatalogService, type CatalogService } from '../catalog.js';
 import type { BridgeSettings } from '../config.js';
+import { bindingKey, bindingKeyFor } from '../bindings.js';
 import type {
   ApprovalOutcome, ApprovalRequest, HostContext, Logger, QuestionAnswer, QuestionRequest,
   SessionEvent, SessionHandle,
@@ -11,13 +12,14 @@ import { createObservationStore, type ObservationStore } from '../observation.js
 import { createRoundTracker, type Round, type RoundTracker } from '../rounds.js';
 import { createStatusTracker, type StatusTracker } from '../status.js';
 import type { TurnSummary } from '../turns.js';
-import { parseCommand, runCommand, type CommandServices } from './commands.js';
+import type { Router } from '../routing.js';
+import { parseCommand, runCommand, type CommandServices, type TargetInfo } from './commands.js';
 import { createSessionDirectory, type SessionDirectory } from './directory.js';
 import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, displayTitle, extractSessionPointer, oneLine } from './format.js';
 import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.js';
 import { createInteractionRegistry } from './interactions.js';
 import {
-  approvalNotice, promptFailedNotice, questionNotice, reviewNotice, sessionListText, turnCompleteNotice,
+  approvalNotice, promptFailedNotice, questionNotice, reviewNotice, turnCompleteNotice,
 } from './notices.js';
 import { ackSummary, createOutbox, type NoticeKind } from './outbox.js';
 import { createAccessPolicy } from './policy.js';
@@ -27,9 +29,14 @@ import { createSelectionStore } from './selection.js';
  * One live WeCom connection bound to one settings snapshot.
  *
  * The bridge owns the socket listeners, the access policy, the notification
- * queue and pending WeCom answers. Host-lifetime state — observed IDs,
- * rounds, the Session catalog and status — is injected so a Config change
- * can replace the bridge without losing it.
+ * queue and pending WeCom answers. Routing itself — which Session a
+ * conversation owns — belongs to the Host-lifetime router, so replacing the
+ * bridge (a Config change) never loses a binding or a pending round.
+ *
+ * Notification recipients are the conversations bound to the Session plus
+ * every administrator whose Workspace scope covers it: unlike the previous
+ * release this no longer depends on who has messaged the Bot since the
+ * process started.
  */
 
 export type BridgeClient = Pick<WSClient, 'on' | 'connect' | 'disconnect' | 'removeAllListeners' | 'sendMessage' | 'replyStream'>;
@@ -38,6 +45,7 @@ export interface BridgeDeps {
   readonly ctx: Pick<HostContext, 'on' | 'sessionController'>;
   readonly client: BridgeClient;
   readonly settings: BridgeSettings;
+  readonly router: Router;
   readonly log?: Logger;
   readonly journal?: Journal;
   readonly observations?: ObservationStore;
@@ -61,7 +69,7 @@ export interface Bridge {
 }
 
 export function createBridge(deps: BridgeDeps): Bridge {
-  const { ctx, client, settings } = deps;
+  const { ctx, client, settings, router } = deps;
   const log = deps.log ?? console;
   const journal = deps.journal ?? nullJournal;
   const observations = deps.observations ?? createObservationStore();
@@ -74,7 +82,9 @@ export function createBridge(deps: BridgeDeps): Bridge {
   });
 
   const policy = createAccessPolicy(settings);
-  const directory = createSessionDirectory(catalogs, policy);
+  const directory = createSessionDirectory(catalogs, {
+    allow: entry => policy.adminWorkspaceAllowed(entry.group.path),
+  });
   const selection = createSelectionStore();
   const interactions = createInteractionRegistry();
   const outbox = createOutbox({ client, journal, log, status });
@@ -86,63 +96,71 @@ export function createBridge(deps: BridgeDeps): Bridge {
   let generation = 0;
 
   const stale = (ticket: number) => closed || ticket !== generation;
+  const parts = (message: InboundMessage) => ({ chat: message.chat, user: message.user, chatType: message.chatType });
 
-  function target(message: InboundMessage): string | undefined {
-    const choice = selection.get(message.chat, message.user);
-    if (choice && policy.sessionListed(choice)) return choice;
-    return policy.sessionIds.size === 1 ? [...policy.sessionIds][0] : undefined;
-  }
-
-  /**
-   * Quoting (replying to) one of this Bot's own per-Session notices carries
-   * that notice's embedded `/use <token>` hint back on `quotedText`, even
-   * though the WeCom callback never echoes the quoted message's id. When
-   * the token resolves to an operable Session, this message (and any
-   * command inside it: `/status`, `/cancel`, a plain reply, …) is routed
-   * there — overriding whatever was selected before, exactly as `/use`
-   * would. An unresolved or missing quote changes nothing.
-   */
-  async function applyQuotedSession(message: InboundMessage, round: Round): Promise<void> {
-    if (!message.quotedText) return;
-    const hint = extractSessionPointer(message.quotedText);
-    if (!hint) return;
-    const resolved = await directory.resolve(hint);
-    if (!resolved.ok) {
-      journal.write({
-        event: 'wecom.quote', level: 'debug', roundId: round.id,
-        chatId: message.chat, userId: message.user, hint, outcome: resolved.reason,
-      });
-      return;
+  /** The Session a sender talks to right now, without creating anything. */
+  async function currentTarget(message: InboundMessage): Promise<TargetInfo> {
+    if (policy.isAdmin(message.user)) {
+      const choice = selection.get(message.chat, message.user);
+      if (choice) {
+        if (await directory.permitted(choice)) return { sessionId: choice, switched: true };
+        selection.clear(message.chat, message.user);
+      }
     }
-    selection.set(message.chat, message.user, resolved.session.sessionId);
-    journal.write({
-      event: 'wecom.quote', roundId: round.id, chatId: message.chat, userId: message.user,
-      hint, sessionId: resolved.session.sessionId,
-    });
+    const binding = router.store.get(bindingKeyFor(parts(message)));
+    return {
+      ...(binding?.sessionId ? { sessionId: binding.sessionId } : {}),
+      ...(binding ? { binding } : {}),
+      switched: false,
+    };
+  }
+
+  /** The Session a prompt must go to; creates the binding's Session when needed. */
+  async function routeTarget(message: InboundMessage): Promise<
+    { readonly ok: true; readonly sessionId: string } | { readonly ok: false; readonly message: string }
+  > {
+    const switched = await currentTarget(message);
+    if (switched.switched && switched.sessionId) return { ok: true, sessionId: switched.sessionId };
+    const routed = await router.route(parts(message));
+    if (!routed.ok || !routed.sessionId) {
+      return { ok: false, message: routed.message ?? '无法为你创建专属会话，请稍后重试。' };
+    }
+    if (routed.created) {
+      journal.write({
+        event: 'session.created', chatId: message.chat, userId: message.user,
+        sessionId: routed.sessionId, binding: routed.binding ? bindingKey(routed.binding.kind, routed.binding.id) : undefined,
+      });
+    }
+    return { ok: true, sessionId: routed.sessionId };
+  }
+
+  /** Single chats are the only place a tool call may be authorized. */
+  function isPrivateChat(chat: string): boolean {
+    const binding = router.store.get(bindingKey('user', chat));
+    if (binding) return true;
+    return observations.snapshot().chats.some(entry => entry.id === chat && entry.chatType === 'single');
   }
 
   /**
-   * Conversations that may receive automatic messages about this Session.
-   * `reason` only labels the {@link journal} warning emitted when the
-   * Session is allowed to notify but nobody currently qualifies — typically
-   * because the eligible-sender list was just reset (a plugin reload or a
-   * Host restart both clear it) and nobody has messaged this Bot since. The
-   * caller then has nothing to notify and no error to show either, so this
-   * is the only trace of a silently skipped notification.
+   * Conversations that may receive automatic messages about this Session:
+   * every binding pointing at it, plus the administrators whose Workspace
+   * scope covers it. `reason` only labels the {@link journal} warning emitted
+   * when nobody qualifies, which is the only trace of a skipped notice.
    */
   async function recipients(sessionId: string, reason: NoticeKind): Promise<string[]> {
-    if (!(await directory.permitted(sessionId))) return [];
-    if (policy.chatIds.size) return [...policy.chatIds];
-    // "Any conversation" still means only conversations that passed the
-    // policy before: a rejected sender never starts receiving notifications.
-    const chats = observations.eligibleSources()
-      .filter(source => policy.chatAllowed(source.chat) && policy.userAllowed(source.user))
-      .map(source => source.chat);
-    const unique = [...new Set(chats)];
+    const chats = new Set<string>();
+    for (const binding of router.forSession(sessionId)) chats.add(binding.id);
+    if (settings.adminUserIds.length) {
+      const info = await directory.describe(sessionId);
+      if (info.workspacePath && policy.adminWorkspaceAllowed(info.workspacePath)) {
+        for (const admin of settings.adminUserIds) chats.add(admin);
+      }
+    }
+    const unique = [...chats];
     if (!unique.length) {
       journal.write({
         event: 'wecom.notify.skipped', level: 'warn', sessionId, reason,
-        detail: 'no eligible WeCom recipient knows this Session; a plugin reload or Host restart just cleared that list and nobody has messaged this Bot since',
+        detail: 'no binding points at this Session and no administrator scope covers its Workspace',
       });
     }
     return unique;
@@ -172,38 +190,34 @@ export function createBridge(deps: BridgeDeps): Bridge {
   const commandServices: CommandServices = {
     policy, directory, selection, interactions, journal,
     sessionController: ctx.sessionController,
-    target,
+    current: currentTarget,
+    async reset(message) {
+      selection.clear(message.chat, message.user);
+      const binding = router.store.get(bindingKeyFor(parts(message)));
+      if (!binding) {
+        await router.ensure(parts(message));
+        return;
+      }
+      if (binding.sessionId) await router.store.update(bindingKey(binding.kind, binding.id), { sessionId: '' });
+      journal.write({ event: 'binding.session.reset', binding: bindingKey(binding.kind, binding.id), sessionId: binding.sessionId });
+    },
     stale,
     ticket: () => generation,
   };
 
   async function submitPrompt(message: InboundMessage, round: Round, content: string): Promise<void> {
     const ticket = generation;
-    const sessionId = target(message);
-    if (!sessionId) {
-      let text = '还没有选择会话。';
-      try {
-        const listed = sessionListText(await directory.groups(), undefined);
-        selection.setListing(message.chat, message.user, listed.listing);
-        text = `${text}\n${listed.text}`;
-      } catch {
-        text = `${text}发送 /sessions 查看可操作的会话，再用 /use 选择。`;
-      }
-      if (stale(ticket)) return;
-      await reply(message, round, text);
-      rounds.complete(round, 'blocked', { response: { reason: 'no-session-selected' } });
+    const target = await routeTarget(message);
+    if (stale(ticket)) return;
+    if (!target.ok) {
+      await reply(message, round, target.message);
+      rounds.complete(round, 'blocked', { response: { reason: 'route-failed' } });
       return;
     }
+    const sessionId = target.sessionId;
     if (interactions.questions.has(sessionId)) {
       await reply(message, round, '该会话正在等待回答提问，请用 /answer <验证码> … 作答；普通消息不会被当作答案。');
       rounds.complete(round, 'blocked', { response: { reason: 'question-pending' } });
-      return;
-    }
-    const permitted = await directory.permitted(sessionId);
-    if (stale(ticket)) return;
-    if (!permitted) {
-      await reply(message, round, '当前选择的会话已归档或不再允许操作，请发送 /sessions 重新选择。');
-      rounds.complete(round, 'blocked', { response: { reason: 'session-not-permitted' } });
       return;
     }
     const info = await directory.describe(sessionId);
@@ -212,8 +226,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
     if (info.workspace) round.workspace = info.workspace;
     // The callback req_id is short-lived: acknowledge before activating the Session.
     await reply(message, round, `已提交到《${oneLine(displayTitle(info.title))}》，本轮完成后会通知你。`);
-    if (stale(ticket) || lifetime.signal.aborted || !policy.evaluate(message.chat, message.user).accepted
-      || target(message) !== sessionId) {
+    if (stale(ticket) || lifetime.signal.aborted || !policy.evaluate(message.chat, message.user).accepted) {
       rounds.complete(round, 'interrupted');
       return;
     }
@@ -237,6 +250,39 @@ export function createBridge(deps: BridgeDeps): Bridge {
         outbox.enqueue({ chat: message.chat, text: promptFailedNotice(sessionId, info.title), kind: 'prompt-failed', sessionId, roundIds: [round.id] });
       }
     }
+  }
+
+  /**
+   * Quoting (replying to) one of this Bot's own per-Session notices carries
+   * that notice's embedded `/use <token>` hint back on `quotedText`, even
+   * though the WeCom callback never echoes the quoted message's id. Only an
+   * administrator may act on it: for everyone else the message keeps going to
+   * their own Session. An unresolved or missing quote changes nothing.
+   */
+  async function applyQuotedSession(message: InboundMessage, round: Round): Promise<void> {
+    if (!message.quotedText) return;
+    const hint = extractSessionPointer(message.quotedText);
+    if (!hint) return;
+    if (!policy.isAdmin(message.user)) {
+      journal.write({
+        event: 'wecom.quote', roundId: round.id, chatId: message.chat, userId: message.user,
+        hint, outcome: 'not-admin',
+      });
+      return;
+    }
+    const resolved = await directory.resolve(hint);
+    if (!resolved.ok) {
+      journal.write({
+        event: 'wecom.quote', level: 'debug', roundId: round.id,
+        chatId: message.chat, userId: message.user, hint, outcome: resolved.reason,
+      });
+      return;
+    }
+    selection.set(message.chat, message.user, resolved.session.sessionId);
+    journal.write({
+      event: 'wecom.quote', roundId: round.id, chatId: message.chat, userId: message.user,
+      hint, sessionId: resolved.session.sessionId,
+    });
   }
 
   async function handleFrame(frame: WsFrame): Promise<void> {
@@ -274,6 +320,17 @@ export function createBridge(deps: BridgeDeps): Bridge {
       return;
     }
     observations.markEligible(message.chat, message.user);
+    const ticket = generation;
+    try {
+      // First contact creates the conversation's binding; it decides routing later.
+      await router.ensure(parts(message));
+    } catch (error) {
+      journal.write({ event: 'binding.error', level: 'warn', chatId: message.chat, userId: message.user, error });
+      await reply(message, round, '本插件的会话绑定数量已达上限，请在配置页清理后再试。');
+      rounds.complete(round, 'blocked', { response: { reason: 'binding-limit' } });
+      return;
+    }
+    if (stale(ticket)) return;
     if (message.msgtype !== 'text') {
       await reply(message, round, '目前只支持文本消息。');
       rounds.complete(round, 'unsupported');
@@ -291,6 +348,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       return;
     }
     await applyQuotedSession(message, round);
+    if (stale(ticket)) return;
     const command = parseCommand(content);
     if (command) {
       round.command = command.name;
@@ -342,11 +400,9 @@ export function createBridge(deps: BridgeDeps): Bridge {
     const chats = await recipients(sessionId, 'approval');
     if (closed || !chats.length) return next();
     const info = await directory.describe(sessionId);
-    // Only a single chat with an allowlisted (or previously accepted) person
-    // may authorize a tool call; group members never can.
-    const eligible = observations.eligibleSources();
-    const privateChats = chats.filter(chat => policy.userAllowed(chat)
-      && (policy.userIds.has(chat) || eligible.some(source => source.chat === chat && source.user === chat)));
+    // Only a single chat with an allowlisted person may authorize a tool call;
+    // group members never can.
+    const privateChats = chats.filter(chat => policy.userAllowed(chat) && isPrivateChat(chat));
     const meta = { sessionId, toolName: request.toolName, ...(request.callId ? { callId: request.callId } : {}) };
     if (!settings.remoteApprovals || !privateChats.length) {
       journal.write({ event: 'dsh.approval', ...meta, remote: false, chats });

@@ -93,13 +93,66 @@ export interface SessionSummary {
   readonly origin?: string;
   readonly parentSessionId?: string;
   readonly cwd?: string;
-  readonly projections?: { readonly values?: { readonly title?: string | null; readonly [key: string]: unknown } };
+  readonly projections?: {
+    readonly values?: {
+      readonly title?: string | null;
+      readonly modelSelection?: { readonly lastUsed?: unknown; readonly next?: unknown } | null;
+      readonly [key: string]: unknown;
+    };
+  };
+}
+
+export interface ModelSelectionValue {
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort?: string;
+}
+
+export interface DiscoveredModel {
+  readonly id: string;
+  readonly name: string;
+  readonly description?: string;
+  readonly reasoning?: {
+    readonly efforts: readonly { readonly id: string; readonly name: string; readonly description?: string }[];
+    readonly defaultEffort?: string;
+  };
+}
+
+export interface ModelProviderGroup {
+  readonly id: string;
+  readonly name: string;
+  readonly models: readonly DiscoveredModel[];
+}
+
+export interface ModelCatalog {
+  readonly default: ModelSelectionValue;
+  readonly routableProviders: readonly string[];
+  readonly groups: readonly ModelProviderGroup[];
+  readonly failures: readonly { readonly id: string; readonly name: string; readonly message: string }[];
+}
+
+export interface SessionCreateRequest {
+  readonly workspaceId?: string;
+  readonly cwd?: string;
+  readonly sessionId?: string;
 }
 
 export interface SessionController {
   prompt(request: PromptRequest, signal: AbortSignal): Promise<unknown>;
   cancel(request: { readonly sessionId: string }): unknown;
   list(request: Record<string, never>, signal: AbortSignal): Promise<{ readonly items: readonly SessionSummary[] }>;
+  /** Create (or idempotently adopt) one ordinary Session. */
+  create(request: SessionCreateRequest): Promise<{ readonly sessionId: string; readonly agentPreset?: string }>;
+  /** Install a Session-local model; also saves the deployment default. */
+  selectModel(request: ModelSelectionValue & { readonly sessionId: string }): Promise<{ readonly selected: ModelSelectionValue }>;
+  /** Every currently routable provider/model pair. */
+  modelCatalog(): Promise<ModelCatalog>;
+}
+
+/** `ctx.agentDefaultModel`: the deployment-wide default model selection. */
+export interface AgentDefaultModel {
+  currentSelection(): ModelSelectionValue;
+  saveSelection(next: ModelSelectionValue): Promise<void>;
 }
 
 export interface WorkspaceEntity {
@@ -111,6 +164,11 @@ export interface WorkspaceEntity {
 
 export interface WorkspaceRegistry {
   list(): readonly WorkspaceEntity[];
+  get(id: string): WorkspaceEntity | undefined;
+  /** Register (or reuse) the Workspace owning an existing directory. */
+  create(path: string, title?: string): Promise<WorkspaceEntity>;
+  /** The registered Workspace owning a canonical path, when one exists. */
+  resolveByPath(path: string): Promise<WorkspaceEntity | undefined>;
   readonly archivedSessionIds: readonly string[];
   readonly pinnedSessionIds: readonly string[];
 }

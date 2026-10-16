@@ -203,6 +203,37 @@ export const STYLES = /* css */ `
 .wcb-footer-msg[data-tone="error"] { color: var(--wcb-err); }
 .wcb-footer-msg[data-tone="success"] { color: var(--wcb-ok); }
 .wcb-footer-msg[data-tone="dirty"] { color: var(--wcb-warn); }
+
+/* Selects and inline text */
+.wcb-select {
+  min-width: 0; max-width: 100%; height: 32px; padding: 0 8px;
+  border: .5px solid var(--wcb-line-2); border-radius: 8px;
+  background: var(--wcb-surface); color: var(--wcb-text); font: inherit; font-size: 13px;
+  cursor: pointer; appearance: auto;
+}
+.wcb-select:disabled { opacity: .55; cursor: not-allowed; }
+.wcb-muted { color: var(--wcb-text-3); }
+.wcb-inline-error { color: var(--wcb-err); }
+.wcb-link {
+  border: none; background: none; padding: 0; cursor: pointer;
+  color: var(--wcb-brand); font: inherit; font-size: 12px; text-decoration: underline;
+}
+.wcb-link:disabled { color: var(--wcb-text-3); cursor: not-allowed; text-decoration: none; }
+.wcb-banner-foot { margin-top: 6px; color: var(--wcb-text-3); font-size: 12px; }
+.wcb-row-meta-inner { display: inline-flex; align-items: center; gap: 6px; }
+
+/* Binding rows */
+.wcb-binding { border-top: .5px solid var(--wcb-line); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.wcb-binding:first-child { border-top: none; }
+.wcb-binding-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wcb-binding-icon { color: var(--wcb-text-2); display: inline-flex; }
+.wcb-binding-controls { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) minmax(0, 1.2fr); gap: 8px; }
+.wcb-binding-controls:has(.wcb-binding-field-narrow) { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) minmax(0, 1.2fr) minmax(0, .7fr); }
+@media (max-width: 820px) { .wcb-binding-controls, .wcb-binding-controls:has(.wcb-binding-field-narrow) { grid-template-columns: 1fr; } }
+.wcb-binding-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.wcb-binding-label { color: var(--wcb-text-3); font-size: 11.5px; }
+.wcb-binding-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--wcb-text-3); font-size: 12px; }
+.wcb-binding-foot .wcb-row-sub { align-items: center; }
 `;
 
 export function insertStyles(doc: Document = document): () => void {

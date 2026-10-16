@@ -1,9 +1,9 @@
 {
   "name": "dsh-wecom-bot",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "type": "module",
   "packageManager": "pnpm@11.22.0",
-  "description": "Bridge a WeCom (企业微信) smart bot to DeepSeek Harness Sessions: get notified when a Session finishes or needs input, and drive Sessions from WeCom chat.",
+  "description": "Bridge a WeCom (企业微信) smart bot to DeepSeek Harness Sessions: per-user and per-group Sessions with their own Workspace and model, notifications routed back to the bound chat, plus administrator-only Session switching.",
   "license": "MIT",
   "icon": "./icon.svg",
   "main": "./dist/host/index.js",

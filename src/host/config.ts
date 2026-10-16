@@ -2,9 +2,12 @@ import z from '@deepseek-ai/schemastery';
 import { DEFAULT_SECRET_REF } from '../shared/protocol.js';
 
 /**
- * Plugin Config. Only Bot ID and the Secret are required to connect; every
- * list left empty means "allow all" for that dimension. The Secret itself
- * never lives here: `secretEnv` names a DSH credential reference.
+ * Plugin Config. Only Bot ID and the Secret are required to connect.
+ *
+ * This is *policy*: who may talk to the Bot, which Workspace and model new
+ * Sessions use, and who the administrators are. Per-conversation routing
+ * (which Session a chat owns) is runtime state and lives in the binding
+ * store, not here — see `bindings.ts`.
  */
 export const Config = z.object({
   botId: z.string().default('').volatile()
@@ -13,10 +16,20 @@ export const Config = z.object({
     .description('Bot Secret 在 DSH 凭据库中的引用名；Secret 本身不写入配置。'),
   chatIds: z.array(z.string()).default([]).volatile()
     .description('允许的企微会话（单聊为 userid，群聊为 chatid）。留空 = 全部允许。'),
-  sessionIds: z.array(z.string()).default([]).volatile()
-    .description('允许操作的 DSH Session。留空 = 全部未归档 Session。'),
   allowedUserIds: z.array(z.string()).default([]).volatile()
     .description('允许操作的企微 userid。留空 = 任何人。'),
+  defaultWorkspace: z.string().default('').volatile()
+    .description('新会话使用的 Workspace 绝对路径；留空 = 在 DSH home 的 wecom-bot/workspace 自动创建。'),
+  defaultProvider: z.string().default('').volatile()
+    .description('新会话默认模型的服务商 id；留空 = 使用 DSH 当前默认模型。'),
+  defaultModel: z.string().default('').volatile()
+    .description('新会话默认模型的 id；留空 = 使用 DSH 当前默认模型。'),
+  defaultReasoningEffort: z.string().default('').volatile()
+    .description('新会话默认模型的思考强度；留空 = 使用模型默认值。'),
+  adminUserIds: z.array(z.string()).default([]).volatile()
+    .description('管理员 userid：可切换会话，并按 Workspace 接收通知。'),
+  adminWorkspaces: z.array(z.string()).default([]).volatile()
+    .description('管理员可操作/接收通知的 Workspace 路径。留空 = 全部 Workspace。'),
   wsUrl: z.string().default('').volatile()
     .description('自定义 WebSocket 地址，仅接受 wss://；留空使用 SDK 默认地址。'),
   questionTimeoutMs: z.number().min(1000).max(300000).default(60000).volatile()
@@ -35,8 +48,13 @@ export interface PluginConfig {
   readonly botId: Volatile<string>;
   readonly secretEnv: Volatile<string>;
   readonly chatIds: Volatile<string[]>;
-  readonly sessionIds: Volatile<string[]>;
   readonly allowedUserIds: Volatile<string[]>;
+  readonly defaultWorkspace: Volatile<string>;
+  readonly defaultProvider: Volatile<string>;
+  readonly defaultModel: Volatile<string>;
+  readonly defaultReasoningEffort: Volatile<string>;
+  readonly adminUserIds: Volatile<string[]>;
+  readonly adminWorkspaces: Volatile<string[]>;
   readonly wsUrl: Volatile<string>;
   readonly questionTimeoutMs: Volatile<number>;
   readonly remoteApprovals: Volatile<boolean>;
@@ -51,8 +69,16 @@ export interface BridgeSettings {
   /** Empty for the SDK default endpoint. */
   readonly wsUrl: string;
   readonly chatIds: readonly string[];
-  readonly sessionIds: readonly string[];
   readonly allowedUserIds: readonly string[];
+  /** Empty means the plugin's own Workspace under the DSH home. */
+  readonly defaultWorkspace: string;
+  /** Empty provider/model mean "use the DSH default model". */
+  readonly defaultProvider: string;
+  readonly defaultModel: string;
+  readonly defaultReasoningEffort: string;
+  readonly adminUserIds: readonly string[];
+  /** Empty means every Workspace. */
+  readonly adminWorkspaces: readonly string[];
   readonly questionTimeoutMs: number;
   readonly remoteApprovals: boolean;
 }
@@ -92,8 +118,13 @@ export function readBridgeSettings(config: PluginConfig): BridgeSettings {
     secretRef: config.secretEnv.get().trim(),
     wsUrl: config.wsUrl.get().trim(),
     chatIds: uniqueIds(config.chatIds.get()),
-    sessionIds: uniqueIds(config.sessionIds.get()),
     allowedUserIds: uniqueIds(config.allowedUserIds.get()),
+    defaultWorkspace: config.defaultWorkspace.get().trim(),
+    defaultProvider: config.defaultProvider.get().trim(),
+    defaultModel: config.defaultModel.get().trim(),
+    defaultReasoningEffort: config.defaultReasoningEffort.get().trim(),
+    adminUserIds: uniqueIds(config.adminUserIds.get()),
+    adminWorkspaces: uniqueIds(config.adminWorkspaces.get()),
     questionTimeoutMs: clamp(config.questionTimeoutMs.get(), 1000, 300000, 60000),
     remoteApprovals: config.remoteApprovals.get() === true,
   };
@@ -104,4 +135,20 @@ export function readJournalSettings(config: PluginConfig): JournalSettings {
     enabled: config.logEnabled.get() !== false,
     retentionDays: clamp(config.logRetentionDays.get(), 1, 365, 14),
   };
+}
+
+/** Trailing separators and redundant `.` segments make two spellings of one path differ. */
+export function normalizePath(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  const collapsed = trimmed.replace(/[/\\]+$/, '');
+  return collapsed || trimmed;
+}
+
+/** Whether a path lies in a configured workspace list; an empty list is every path. */
+export function pathListed(values: readonly string[], path: string | undefined): boolean {
+  if (!values.length) return true;
+  if (!path) return false;
+  const target = normalizePath(path);
+  return values.some(value => normalizePath(value) === target);
 }

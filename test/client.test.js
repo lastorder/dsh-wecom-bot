@@ -26,7 +26,7 @@ const primitives = new Proxy({
 }, { get: (target, key) => target[key] ?? (() => null) });
 
 const STATE = {
-  version: 1,
+  version: 2,
   connection: { phase: 'online', since: Date.now() - 60_000 },
   traffic: { since: 0, received: 3, rejected: 1, prompts: 1, notifications: 2, failures: 0 },
   observed: {
@@ -39,20 +39,59 @@ const STATE = {
   sessions: {
     groups: [
       { key: 'w1', kind: 'workspace', title: 'dsh-wecom-bot', path: '/Users/me/dsh-wecom-bot', sessions: [
-        { sessionId: 'session-aaaa', title: '企业微信插件开发', running: true, pinned: true, updatedAt: Date.now() },
+        { sessionId: 'session-aaaa', title: '企业微信插件开发', running: true, pinned: true, updatedAt: Date.now(), model: { provider: 'deepseek-account', model: 'deepseek-chat' } },
         { sessionId: 'session-bbbb', title: null, running: false, pinned: false, updatedAt: Date.now() - 3_600_000 },
       ] },
       { key: 'ungrouped', kind: 'ungrouped', title: '未分组', sessions: [
         { sessionId: 'session-cccc', title: '零散任务', running: false, pinned: false, updatedAt: 1 },
       ] },
     ],
-    total: 3, archived: 4, generatedAt: Date.now(),
-    hiddenSelections: [{ sessionId: 'session-old', title: '旧会话', reason: 'archived' }],
+    total: 3, archived: 4, generatedAt: Date.now(), hiddenSelections: [],
   },
+  bindings: {
+    total: 2,
+    full: false,
+    items: [
+      {
+        key: 'user:alice', kind: 'user', id: 'alice', admin: false,
+        workspace: '', workspaceTitle: '企业微信', workspacePath: '/Users/me/.dsh/wecom-bot/workspace',
+        sessionId: 'session-aaaa', sessionTitle: '企业微信插件开发', sessionState: 'bound', sessionRunning: true,
+        provider: '', model: '', effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-chat',
+        sessionModel: { provider: 'deepseek-account', model: 'deepseek-chat' },
+        messages: 2, lastSeenAt: Date.now(), createdAt: 1, updatedAt: 2,
+      },
+      {
+        key: 'group:wrOgAAAA', kind: 'group', id: 'wrOgAAAA', admin: false,
+        workspace: '/Users/me/dsh-wecom-bot', workspaceTitle: 'dsh-wecom-bot', workspacePath: '/Users/me/dsh-wecom-bot',
+        sessionId: '', sessionTitle: null, sessionState: 'auto', sessionRunning: false,
+        provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high',
+        effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-reasoner',
+        messages: 0, createdAt: 1, updatedAt: 2,
+      },
+    ],
+  },
+  models: {
+    choices: [
+      { provider: 'deepseek-account', providerName: 'DeepSeek', model: 'deepseek-chat', name: 'DeepSeek Chat' },
+      { provider: 'deepseek-account', providerName: 'DeepSeek', model: 'deepseek-reasoner', name: 'DeepSeek Reasoner', efforts: [{ id: 'low', name: '低' }, { id: 'high', name: '高' }], defaultEffort: 'high' },
+    ],
+    dshDefault: { provider: 'deepseek-account', model: 'deepseek-chat' },
+    failures: [], fetchedAt: Date.now(),
+  },
+  workspaces: [
+    { id: 'w1', path: '/Users/me/dsh-wecom-bot', title: 'dsh-wecom-bot', pluginOwned: false, sessionCount: 2 },
+  ],
+  defaults: {
+    workspace: '', workspacePath: '/Users/me/.dsh/wecom-bot/workspace', workspaceTitle: '企业微信',
+    provider: '', model: '',
+  },
+  admins: ['alice'],
+  adminWorkspaces: [],
+  notices: [],
   journal: { enabled: true, directory: '/Users/me/.dsh/wecom-bot/logs', file: '/Users/me/.dsh/wecom-bot/logs/2026-10-16.jsonl', retentionDays: 14 },
 };
 
-function mount({ stored = {}, secretConfigured = true } = {}) {
+function mount({ stored = {}, secretConfigured = true, state = STATE } = {}) {
   let entry;
   const fetches = [];
   const intervals = [];
@@ -64,7 +103,11 @@ function mount({ stored = {}, secretConfigured = true } = {}) {
       head: { appendChild(node) { style.push(node); } },
       createElement: () => ({ setAttribute() {}, remove() { style.pop(); }, textContent: '' }),
     },
-    async fetch(url, options) { fetches.push({ url, options }); return { ok: true, status: 200, json: async () => STATE }; },
+    async fetch(url, options) {
+      fetches.push({ url, options });
+      const body = options?.method === 'POST' ? { ok: true, bindings: state.bindings } : state;
+      return { ok: true, status: 200, json: async () => body };
+    },
     setInterval(fn) { intervals.push(fn); return intervals.length; },
     clearInterval() {},
     setTimeout, clearTimeout, AbortController, URL, console,
@@ -78,7 +121,10 @@ function mount({ stored = {}, secretConfigured = true } = {}) {
     return modules[name];
   });
 
-  let snapshot = { status: 'ready', revision: 1, writable: true, value: { botId: '', chatIds: [], sessionIds: ['session-old'], allowedUserIds: [], ...stored } };
+  let snapshot = {
+    status: 'ready', revision: 1, writable: true,
+    value: { botId: '', chatIds: [], allowedUserIds: [], ...stored },
+  };
   const listeners = new Set();
   const mutations = [];
   const scope = {
@@ -128,8 +174,9 @@ async function render(harness) {
 }
 
 const text = node => (typeof node === 'string' ? node : (node.children ?? []).map(text).join(''));
-const byLabel = (root, label) => root.find(node => node.type === 'input' && node.props['aria-label'] === label);
+const byLabel = (root, label) => root.find(node => (node.type === 'input' || node.type === 'select') && node.props['aria-label'] === label);
 const buttonWithText = (root, label) => root.find(node => node.type === 'button' && text(node).includes(label));
+const flush = async () => { await act(async () => { await new Promise(resolve => setImmediate(resolve)); }); };
 
 test('registers on the bundle homepage slot with the static module format', () => {
   const harness = mount();
@@ -140,31 +187,36 @@ test('registers on the bundle homepage slot with the static module format', () =
   assert.equal(harness.style.length, 1, 'stylesheet inserted once');
 });
 
-test('sessions are grouped by Workspace with titles before ids; archived ones are not listed', async () => {
+test('the page renders the Workspace, bindings, access and admin sections from the state route', async () => {
   const harness = mount();
   const renderer = await render(harness);
   const root = renderer.root;
   assert.ok(harness.fetches.some(call => call.url === 'api/wecom-bot/state?refresh=1'));
-  const all = text(renderer.toJSON().children ? { children: [renderer.toJSON()] } : renderer.toJSON());
-  assert.ok(all.indexOf('dsh-wecom-bot') < all.indexOf('企业微信插件开发'));
-  assert.ok(all.indexOf('企业微信插件开发') < all.indexOf('session-aaaa'), 'title before id');
-  assert.ok(all.includes('未命名会话'));
-  assert.ok(all.includes('已隐藏 4 个已归档会话'));
-  assert.ok(all.includes('已勾选但当前不可操作'));
-  assert.ok(all.includes('上次被拒绝'), 'rejected IDs are listed');
-  assert.ok(all.includes('安全风险') === false, 'one allowlist is set, so the banner is a warning, not the open-risk alert');
-  assert.ok(all.includes('部分范围未限制'));
-  assert.ok(byLabel(root, '选择会话 企业微信插件开发'));
-  assert.ok(byLabel(root, '允许用户 mallory'));
+  const all = text(renderer.toJSON());
+  assert.ok(all.includes('默认 Workspace 与模型'));
+  assert.ok(all.includes('会话绑定'));
+  assert.ok(all.includes('管理员'));
+  assert.ok(all.includes('访问范围'));
+  assert.ok(all.includes('alice'), 'the private binding id is listed');
+  assert.ok(all.includes('wrOgAAAA'), 'the group binding id is listed');
+  assert.ok(all.includes('企业微信插件开发'), 'the bound Session title is shown');
+  assert.ok(all.includes('dsh-wecom-bot'), 'the Workspace group title is shown');
+  assert.ok(byLabel(root, 'alice 的会话'));
+  assert.ok(byLabel(root, 'wrOgAAAA 的模型'));
+  assert.ok(byLabel(root, '默认 Workspace'));
+  assert.ok(byLabel(root, '默认模型'));
+  assert.ok(byLabel(root, '管理员接收 dsh-wecom-bot 的通知'));
+  // Both access lists are empty in the stored config: the open-risk alert shows.
+  assert.ok(all.includes('安全风险：尚未设置任何访问范围'));
+  assert.ok(all.includes('1 位管理员可以切换会话'));
   renderer.unmount();
 });
 
 test('only Bot ID and Secret are required; nothing is saved until they are present', async () => {
-  const harness = mount({ stored: { sessionIds: [] }, secretConfigured: false });
+  const harness = mount({ stored: { allowedUserIds: [] }, secretConfigured: false });
   const renderer = await render(harness);
   const root = renderer.root;
-  assert.ok(text(renderer.toJSON()).includes('安全风险：尚未设置任何白名单'));
-  await act(async () => { byLabel(root, '选择会话 零散任务').props.onChange({ target: { checked: true } }); });
+  await act(async () => { byLabel(root, '允许用户 mallory').props.onChange({ target: { checked: true } }); });
   await act(async () => { buttonWithText(root, '保存配置').props.onClick(); });
   assert.equal(harness.mutations.length, 0);
   assert.ok(text(renderer.toJSON()).includes('请填写企业微信 Bot ID'));
@@ -172,28 +224,91 @@ test('only Bot ID and Secret are required; nothing is saved until they are prese
   await act(async () => { byLabel(root, 'Bot ID').props.onChange({ target: { value: 'aib-123' } }); });
   await act(async () => { byLabel(root, 'Bot Secret').props.onChange({ target: { value: 's3cr3t' } }); });
   await act(async () => { await buttonWithText(root, '保存配置').props.onClick(); });
-  await act(async () => { await new Promise(resolve => setImmediate(resolve)); });
+  await flush();
   assert.equal(harness.mutations.length, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(harness.mutations[0].ops)), [
     { op: 'set', path: ['botId'], value: 'aib-123' },
-    { op: 'set', path: ['sessionIds'], value: ['session-cccc'] },
+    { op: 'set', path: ['allowedUserIds'], value: ['mallory'] },
   ]);
   assert.equal(JSON.stringify(harness.mutations).includes('s3cr3t'), false, 'the Secret never enters Config');
   assert.deepEqual(harness.credentialWrites, [{ ref: 'WECOM_BOT_SECRET', value: 's3cr3t' }]);
-  assert.equal(byLabel(root, 'Bot Secret').props.value, '', 'the Secret field is cleared after saving');
   renderer.unmount();
 });
 
-test('selecting a Workspace group selects all of its Sessions, and identities can be allowlisted', async () => {
-  const harness = mount({ stored: { botId: 'bot', sessionIds: [] } });
+test('the default model and admin Workspace scope save as Config fields', async () => {
+  const harness = mount({ stored: { botId: 'bot' } });
   const renderer = await render(harness);
   const root = renderer.root;
-  await act(async () => { byLabel(root, '选择工作区 dsh-wecom-bot 的全部会话').props.onChange({ target: { checked: true } }); });
-  await act(async () => { byLabel(root, '允许用户 alice').props.onChange({ target: { checked: true } }); });
+  await act(async () => {
+    byLabel(root, '默认模型').props.onChange({ target: { value: 'deepseek-account\u0000deepseek-reasoner' } });
+  });
+  await act(async () => { byLabel(root, '管理员接收 dsh-wecom-bot 的通知').props.onChange({ target: { checked: true } }); });
+  await flush();
   await act(async () => { await buttonWithText(root, '保存配置').props.onClick(); });
   const ops = JSON.parse(JSON.stringify(harness.mutations[0].ops));
-  assert.deepEqual(ops.find(op => op.path[0] === 'sessionIds').value, ['session-aaaa', 'session-bbbb']);
-  assert.deepEqual(ops.find(op => op.path[0] === 'allowedUserIds').value, ['alice']);
-  assert.equal(harness.credentialWrites.length, 0, 'a stored Secret is kept when the field is empty');
+  assert.equal(ops.find(op => op.path[0] === 'defaultProvider').value, 'deepseek-account');
+  assert.equal(ops.find(op => op.path[0] === 'defaultModel').value, 'deepseek-reasoner');
+  assert.deepEqual(ops.find(op => op.path[0] === 'adminWorkspaces').value, ['/Users/me/dsh-wecom-bot']);
+  renderer.unmount();
+});
+
+test('binding edits are posted immediately, without touching the Config form', async () => {
+  const harness = mount({ stored: { botId: 'bot' } });
+  const renderer = await render(harness);
+  const root = renderer.root;
+  await act(async () => {
+    byLabel(root, 'alice 的模型').props.onChange({ target: { value: 'deepseek-account\u0000deepseek-reasoner' } });
+  });
+  await flush();
+  const post = harness.fetches.find(call => call.options?.method === 'POST');
+  assert.ok(post, 'the edit reached the Host');
+  assert.equal(post.url, 'api/wecom-bot/bindings');
+  assert.deepEqual(JSON.parse(post.options.body), {
+    ops: [{ op: 'set', key: 'user:alice', patch: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: '' } }],
+  });
+  assert.equal(harness.mutations.length, 0, 'bindings never go through the Config form');
+  assert.ok(text(renderer.toJSON()).includes('模型已生效'));
+
+  // Switching the Workspace also drops the Session that belonged to the old one.
+  await act(async () => {
+    byLabel(root, 'alice 的 Workspace').props.onChange({ target: { value: '/Users/me/dsh-wecom-bot' } });
+  });
+  await flush();
+  const last = harness.fetches.filter(call => call.options?.method === 'POST').at(-1);
+  assert.deepEqual(JSON.parse(last.options.body).ops, [
+    { op: 'set', key: 'user:alice', patch: { workspace: '/Users/me/dsh-wecom-bot' } },
+    { op: 'set', key: 'user:alice', patch: { sessionId: '' } },
+  ]);
+  renderer.unmount();
+});
+
+test('deleting a binding asks once, then posts the delete op', async () => {
+  const harness = mount({ stored: { botId: 'bot' } });
+  const renderer = await render(harness);
+  const root = renderer.root;
+  const row = root.findAll(node => node.props?.className === 'wcb-binding')
+    .find(node => text(node).includes('alice'));
+  assert.ok(row, 'the private binding row is rendered');
+  const deletes = row.findAll(node => node.type === 'button' && text(node) === '删除');
+  assert.equal(deletes.length, 1);
+  await act(async () => { deletes[0].props.onClick(); });
+  await act(async () => { await buttonWithText(root, '确认删除').props.onClick(); });
+  await flush();
+  const post = harness.fetches.filter(call => call.options?.method === 'POST').at(-1);
+  assert.deepEqual(JSON.parse(post.options.body).ops, [{ op: 'delete', key: 'user:alice' }]);
+  renderer.unmount();
+});
+
+test('notice banners and a failing Workspace are surfaced on the page', async () => {
+  const state = {
+    ...STATE,
+    notices: ['已配置管理员但未限定 Workspace：管理员会收到所有 Workspace 的会话通知。'],
+    defaults: { ...STATE.defaults, workspaceError: 'Workspace 目录不存在或不是目录：/nope' },
+  };
+  const harness = mount({ state });
+  const renderer = await render(harness);
+  const all = text(renderer.toJSON());
+  assert.ok(all.includes('管理员会收到所有 Workspace 的会话通知'));
+  assert.ok(all.includes('Workspace 目录不存在或不是目录：/nope'));
   renderer.unmount();
 });

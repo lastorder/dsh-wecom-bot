@@ -1,12 +1,15 @@
 /**
- * Per (conversation, sender) state: the selected Session and the numbered
- * listing from the latest `/sessions`, so `/use 3` refers to what that
- * person just saw. A selection never widens access: every use re-checks
- * the current policy and catalog.
+ * Per (conversation, sender) state for administrators: the Session they
+ * switched to and the numbered listing from the latest `/sessions`, so
+ * `/use 3` refers to what that person just saw. Ordinary users never have a
+ * selection — their binding owns the Session. A selection never widens
+ * access: every use re-checks the administrator's Workspace scope and the
+ * catalog, and `/reset` drops it.
  */
 export interface SelectionStore {
   get(chat: string, user: string): string | undefined;
   set(chat: string, user: string, sessionId: string): void;
+  clear(chat: string, user: string): void;
   listing(chat: string, user: string): readonly string[] | undefined;
   setListing(chat: string, user: string, sessionIds: readonly string[]): void;
 }
@@ -23,6 +26,7 @@ export function createSelectionStore(maxEntries = 500): SelectionStore {
   return {
     get: (chat, user) => selected.get(key(chat, user)),
     set: (chat, user, sessionId) => put(selected, key(chat, user), sessionId),
+    clear: (chat, user) => { selected.delete(key(chat, user)); },
     listing: (chat, user) => listings.get(key(chat, user)),
     setListing: (chat, user, ids) => put(listings, key(chat, user), [...ids]),
   };

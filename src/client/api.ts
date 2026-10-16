@@ -1,9 +1,12 @@
 /** Network helpers: the plugin's state route and DSH credential Remotes. */
-import { STATE_ROUTE, type BridgeStateView } from '../shared/protocol.ts';
+import {
+  BINDINGS_ROUTE, STATE_ROUTE, type BindingOp, type BindingsResponse, type BridgeStateView,
+} from '../shared/protocol.ts';
 import type { CredentialInfo, CredentialsRemote, RemoteEnvelope } from './types.ts';
 
 /** Document-relative, so it follows whatever base path serves the DSH GUI. */
 export const STATE_URL = STATE_ROUTE.replace(/^\//, '');
+export const BINDINGS_URL = BINDINGS_ROUTE.replace(/^\//, '');
 
 export async function fetchState(refresh: boolean, signal?: AbortSignal): Promise<BridgeStateView> {
   const response = await fetch(`${STATE_URL}${refresh ? '?refresh=1' : ''}`, {
@@ -13,6 +16,32 @@ export async function fetchState(refresh: boolean, signal?: AbortSignal): Promis
   if (response.status === 404) throw new Error('插件后台尚未加载新版本，请重启 DSH 后再试。');
   if (!response.ok) throw new Error(`插件状态读取失败（HTTP ${response.status}）。`);
   return await response.json() as BridgeStateView;
+}
+
+/** Apply binding edits immediately; the Host answers with the fresh table. */
+export async function postBindings(ops: readonly BindingOp[]): Promise<BindingsResponse> {
+  let response: Response;
+  try {
+    response = await fetch(BINDINGS_URL, {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ops }),
+    });
+  } catch {
+    throw new Error('无法连接插件后台，请确认 DSH 仍在运行。');
+  }
+  if (response.status === 401 || response.status === 403) throw new Error('DSH 登录已失效，请刷新页面。');
+  if (response.status === 404) throw new Error('插件后台尚未加载新版本，请重启 DSH 后再试。');
+  let body: BindingsResponse | undefined;
+  try {
+    body = await response.json() as BindingsResponse;
+  } catch {
+    throw new Error(`绑定修改失败（HTTP ${response.status}）。`);
+  }
+  if (!body.ok) throw new Error(body.error ?? `绑定修改失败（HTTP ${response.status}）。`);
+  return body;
 }
 
 function unwrap<T>(result: T | RemoteEnvelope<T>): T | undefined {

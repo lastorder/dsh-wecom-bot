@@ -1,25 +1,35 @@
 import { WSClient } from '@wecom/aibot-node-sdk';
 import { createBridge, type Bridge, type BridgeClient } from './bridge/index.js';
+import { createAccessPolicy } from './bridge/policy.js';
+import { createBindingStore, type BindingStore } from './bindings.js';
+import { applyBindingOps, buildBindingsView, type BindingOpResult } from './bindings-view.js';
 import { catalogView, createCatalogService, type CatalogService } from './catalog.js';
 import {
   isTrustedWsUrl, readBridgeSettings, type BridgeSettings, type PluginConfig,
 } from './config.js';
-import type { HostContext, Logger, SessionEvent, SessionHandle, WorkspaceRegistry } from './dsh.js';
-import type { Journal } from './journal.js';
+import type { AgentDefaultModel, HostContext, Logger, SessionEvent, SessionHandle, WorkspaceRegistry } from './dsh.js';
+import { pluginHome, type Journal } from './journal.js';
+import { createModelService, type ModelService } from './models.js';
 import { createObservationStore, type ObservationStore } from './observation.js';
 import { createRoundTracker, type RoundTracker } from './rounds.js';
+import { createRouter, type Router } from './routing.js';
+import { createSessionProvisioner, type ModelDefaults, type SessionProvisioner } from './sessions.js';
 import { createStatusTracker, type StatusTracker } from './status.js';
 import { summarizeTurn, type TurnSummary } from './turns.js';
-import type { BridgeStateView } from '../shared/protocol.js';
+import { createWorkspaceService, pluginWorkspacePath, type WorkspaceService } from './workspaces.js';
+import { join } from 'node:path';
+import type {
+  BindingOp, BindingsView, BridgeStateView, ModelCatalogView, PluginDefaultsView,
+} from '../shared/protocol.js';
 
 /**
  * Host-lifetime orchestration.
  *
- * Owns everything that must survive a reconnect (observed IDs, rounds, the
- * Session catalog, status counters) and rebuilds the WeCom bridge whenever
- * the Config or the Bot Secret changes. It also owns the single
- * `session/event` listener, so turns that end while the bridge is being
- * replaced still complete their rounds.
+ * Owns everything that must survive a reconnect — observed IDs, rounds, the
+ * Session catalog, routing bindings, status counters — and rebuilds the WeCom
+ * bridge whenever the Config changes. It also owns the single `session/event`
+ * listener, so turns that end while the bridge is being replaced still
+ * complete their rounds.
  */
 
 export interface ClientOptions {
@@ -41,12 +51,17 @@ export interface Runtime {
   start(): Promise<void>;
   stop(): Promise<void>;
   state(options?: { readonly refresh?: boolean }): Promise<BridgeStateView>;
+  /** The bindings table for the settings page. */
+  bindingsView(options?: { readonly refresh?: boolean }): Promise<BindingsView>;
+  /** Apply settings-page binding edits. */
+  applyBindings(ops: readonly BindingOp[]): Promise<BindingOpResult>;
   /** Values the journal must scrub (the resolved Bot Secret). */
   secrets(): readonly string[];
   readonly observations: ObservationStore;
   readonly rounds: RoundTracker;
   readonly status: StatusTracker;
   readonly catalogs: CatalogService;
+  readonly bindings: BindingStore;
   current(): Bridge | undefined;
 }
 
@@ -69,6 +84,47 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       return registry && typeof registry.list === 'function' ? registry : undefined;
     },
   });
+  const bindings = createBindingStore({
+    directory: pluginHome(),
+    onError: (error, stage) => {
+      log.warn(`WeCom binding store ${stage} failed`);
+      journal.write({ event: 'binding.store.error', level: 'warn', stage, error });
+    },
+  });
+  const workspaces = createWorkspaceService({
+    registry: () => {
+      const registry = ctx.get?.('workspaceRegistry') as WorkspaceRegistry | undefined;
+      return registry && typeof registry.list === 'function' ? registry : undefined;
+    },
+    defaultPath: pluginWorkspacePath(pluginHome()),
+    log,
+  });
+  const models: ModelService = createModelService({
+    sessionController: ctx.sessionController,
+    defaults: () => ctx.get?.('agentDefaultModel') as AgentDefaultModel | undefined,
+    log,
+  });
+  const provisioner: SessionProvisioner = createSessionProvisioner({
+    sessionController: ctx.sessionController,
+    models,
+    workspaces,
+    catalogs,
+    bindings,
+    bindingKey: binding => `${binding.kind}:${binding.id}`,
+    journal,
+    log,
+  });
+
+  function modelDefaults(): ModelDefaults {
+    const settings = readBridgeSettings(config);
+    return {
+      provider: settings.defaultProvider,
+      model: settings.defaultModel,
+      reasoningEffort: settings.defaultReasoningEffort,
+    };
+  }
+
+  const router: Router = createRouter({ store: bindings, provisioner, defaults: modelDefaults, log });
 
   let bridge: Bridge | undefined;
   let stopBridge: (() => void) | undefined;
@@ -136,7 +192,11 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       event: 'config.applied',
       botId: settings.botId, secretRef: settings.secretRef, secretConfigured: Boolean(resolved),
       wsUrl: settings.wsUrl || 'sdk-default',
-      chatIds: settings.chatIds, sessionIds: settings.sessionIds, allowedUserIds: settings.allowedUserIds,
+      chatIds: settings.chatIds, allowedUserIds: settings.allowedUserIds,
+      defaultWorkspace: settings.defaultWorkspace || pluginWorkspacePath(pluginHome()),
+      defaultProvider: settings.defaultProvider, defaultModel: settings.defaultModel,
+      defaultReasoningEffort: settings.defaultReasoningEffort,
+      adminUserIds: settings.adminUserIds, adminWorkspaces: settings.adminWorkspaces,
       questionTimeoutMs: settings.questionTimeoutMs, remoteApprovals: settings.remoteApprovals,
     });
     if (!settings.botId || !resolved) {
@@ -148,7 +208,9 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       botId: settings.botId, secret: resolved, logger: sdkLogger(),
       ...(settings.wsUrl ? { wsUrl: settings.wsUrl } : {}),
     });
-    const created = createBridge({ ctx, client, settings, log, journal, observations, rounds, catalogs, status, scrub });
+    const created = createBridge({
+      ctx, client, settings, router, log, journal, observations, rounds, catalogs, status, scrub,
+    });
     stopBridge = created.start();
     bridge = created;
   }
@@ -186,8 +248,56 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     if (event.type === 'turn/end') void onTurnEnd(session, event);
   }
 
+  async function defaultsView(): Promise<PluginDefaultsView> {
+    const settings = readBridgeSettings(config);
+    const base = {
+      workspace: settings.defaultWorkspace,
+      provider: settings.defaultProvider,
+      model: settings.defaultModel,
+      ...(settings.defaultReasoningEffort ? { reasoningEffort: settings.defaultReasoningEffort } : {}),
+    };
+    try {
+      const resolved = await workspaces.describe(settings.defaultWorkspace);
+      return { ...base, workspacePath: resolved.path, workspaceTitle: resolved.title };
+    } catch (error) {
+      return {
+        ...base, workspacePath: '',
+        workspaceTitle: settings.defaultWorkspace || '插件默认 Workspace',
+        workspaceError: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /** Never let a slow model catalog hold up the settings page. */
+  async function modelsView(refresh: boolean): Promise<{ view: ModelCatalogView | null; error?: string }> {
+    const cached = models.snapshot();
+    if (cached && !refresh) return { view: cached };
+    try {
+      if (cached) return { view: await models.load({ refresh: true }) };
+      const loaded = await Promise.race([
+        models.load(),
+        new Promise<undefined>(resolve => { setTimeout(() => resolve(undefined), 2500).unref?.(); }),
+      ]);
+      return { view: loaded ?? models.snapshot() ?? null };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { view: cached ?? null, error: `读取 DSH 模型列表失败：${message}` };
+    }
+  }
+
+  async function bindingsView(options: { readonly refresh?: boolean } = {}): Promise<BindingsView> {
+    await bindings.load();
+    if (options.refresh) catalogs.invalidate();
+    const policy = createAccessPolicy(readBridgeSettings(config));
+    return await buildBindingsView({
+      bindings, provisioner, workspaces, models, catalogs, observations,
+      defaults: modelDefaults,
+      isAdmin: user => policy.isAdmin(user),
+    });
+  }
+
   return {
-    observations, rounds, status, catalogs,
+    observations, rounds, status, catalogs, bindings,
     current: () => bridge,
     secrets: () => (secret ? [secret] : []),
     async start() {
@@ -197,6 +307,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
         ctx.on('session/event', onSessionEvent),
       ];
       for (const dispose of off) if (typeof dispose === 'function') disposers.push(dispose);
+      await bindings.load();
       schedule();
       await queue;
     },
@@ -206,13 +317,22 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       await queue;
       teardown();
       rounds.closeAll('interrupted');
+      await bindings.flush();
+    },
+    bindingsView,
+    async applyBindings(ops) {
+      const result = await applyBindingOps({ bindings, workspaces, models, router, log }, ops);
+      if (result.ok) catalogs.invalidate();
+      return result;
     },
     async state(stateOptions = {}) {
+      const refresh = stateOptions.refresh === true;
       let sessions: BridgeStateView['sessions'] = null;
       let sessionsError: string | undefined;
+      if (refresh) catalogs.invalidate();
       try {
-        const catalog = await catalogs.load({ force: stateOptions.refresh === true });
-        sessions = catalogView(catalog, readBridgeSettings(config).sessionIds);
+        const catalog = await catalogs.load({ force: refresh });
+        sessions = catalogView(catalog, bindings.list().map(record => record.sessionId).filter(Boolean));
         lastCatalogError = '';
       } catch (error) {
         sessionsError = '暂时无法读取 DSH Session 列表';
@@ -220,13 +340,39 @@ export function createRuntime(options: RuntimeOptions): Runtime {
         if (message !== lastCatalogError) journal.write({ event: 'catalog.error', level: 'warn', error });
         lastCatalogError = message;
       }
+      const settings = readBridgeSettings(config);
+      const defaults = await defaultsView();
+      let bindingsState: BindingsView | null = null;
+      let bindingsError: string | undefined;
+      try {
+        bindingsState = await bindingsView({ refresh });
+      } catch (error) {
+        bindingsError = '暂时无法读取绑定信息';
+        journal.write({ event: 'binding.view.error', level: 'warn', error });
+      }
+      const { view: modelView, error: modelsError } = await modelsView(refresh);
+      const notices: string[] = [];
+      if (defaults.workspaceError) notices.push(`默认 Workspace 不可用：${defaults.workspaceError}`);
+      if (settings.adminUserIds.length && !settings.adminWorkspaces.length) {
+        notices.push('已配置管理员但未限定 Workspace：管理员会收到所有 Workspace 的会话通知。');
+      }
+      if (bindingsState?.full) notices.push('会话绑定数量已达上限，新会话不会被记录；请在下方清理。');
       return {
-        version: 1,
+        version: 2,
         connection: status.connection(),
         traffic: status.traffic(),
         observed: observations.snapshot(),
         sessions,
         ...(sessionsError ? { sessionsError } : {}),
+        bindings: bindingsState,
+        ...(bindingsError ? { bindingsError } : {}),
+        models: modelView,
+        ...(modelsError ? { modelsError } : {}),
+        workspaces: workspaces.list(),
+        defaults,
+        admins: settings.adminUserIds,
+        adminWorkspaces: settings.adminWorkspaces,
+        notices,
         journal: journal.info(),
       };
     },

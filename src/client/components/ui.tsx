@@ -1,6 +1,11 @@
 /** Small layout pieces shared by the page sections. */
-import type { ReactNode } from 'react';
+import type { ReactNode, SelectHTMLAttributes } from 'react';
 import { Tag } from '@deepseek-ai/dsh-client-ui-primitives';
+
+/** Native select styled with the page's theme tokens. */
+export function Select({ className, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
+  return <select {...rest} className={['wcb-select', className].filter(Boolean).join(' ')} />;
+}
 
 export function Card(props: {
   step?: string | number;

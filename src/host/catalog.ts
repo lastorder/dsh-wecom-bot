@@ -1,6 +1,6 @@
 import { basename } from 'node:path';
 import type {
-  CatalogGroup, CatalogSession, HiddenSelection, SessionCatalogView,
+  CatalogGroup, CatalogSession, HiddenSelection, ModelSelection, SessionCatalogView,
 } from '../shared/protocol.js';
 import type { SessionSummary, WorkspaceRegistry } from './dsh.js';
 
@@ -47,6 +47,23 @@ export function sessionTitle(summary: SessionSummary | undefined): string | null
   return typeof title === 'string' && title.trim() ? title.trim() : null;
 }
 
+/** Model of the Session's latest request, from the `modelSelection` projection. */
+export function sessionModel(summary: SessionSummary | undefined): ModelSelection | undefined {
+  const value = summary?.projections?.values?.modelSelection as
+    | { readonly lastUsed?: unknown; readonly next?: unknown }
+    | undefined;
+  const pick = (raw: unknown): ModelSelection | undefined => {
+    if (!raw || typeof raw !== 'object') return undefined;
+    const record = raw as Record<string, unknown>;
+    const provider = typeof record.provider === 'string' ? record.provider.trim() : '';
+    const model = typeof record.model === 'string' ? record.model.trim() : '';
+    if (!provider || !model) return undefined;
+    const reasoningEffort = typeof record.reasoningEffort === 'string' ? record.reasoningEffort.trim() : '';
+    return { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) };
+  };
+  return pick(value?.lastUsed) ?? pick(value?.next);
+}
+
 export function buildCatalog(
   items: readonly SessionSummary[], registry: WorkspaceRegistry | undefined, generatedAt = Date.now(),
 ): SessionCatalog {
@@ -62,13 +79,17 @@ export function buildCatalog(
     if (summary.blank === true) return 'blank';
     return undefined;
   }
-  const toSession = (summary: SessionSummary): CatalogSession => ({
-    sessionId: summary.sessionId,
-    title: sessionTitle(summary),
-    running: summary.running === true,
-    pinned: pinned.has(summary.sessionId),
-    updatedAt: summary.updatedAt ?? 0,
-  });
+  const toSession = (summary: SessionSummary): CatalogSession => {
+    const model = sessionModel(summary);
+    return {
+      sessionId: summary.sessionId,
+      title: sessionTitle(summary),
+      running: summary.running === true,
+      pinned: pinned.has(summary.sessionId),
+      updatedAt: summary.updatedAt ?? 0,
+      ...(model ? { model } : {}),
+    };
+  };
   const byDisplayOrder = (a: CatalogSession, b: CatalogSession) =>
     Number(b.pinned) - Number(a.pinned) || b.updatedAt - a.updatedAt;
   const visible = (summary: SessionSummary) => hiddenReason(summary.sessionId) === undefined;

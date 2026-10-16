@@ -39,15 +39,23 @@ export function quotePointer(sessionId: string): string {
 
 export const HELP_TEXT = [
   '可用命令：',
-  '/sessions — 按工作区列出可操作的会话（带序号）',
-  '/use <序号|会话ID前缀> — 选择会话，之后直接发消息即可继续对话',
-  '引用（回复）DSH 发来的某条通知，也会把之后的消息定位到那条通知所属的会话',
-  '/status — 查看当前选择与待处理请求',
-  '/cancel — 停止当前会话正在运行的回合',
+  '/status — 查看你的专属会话、绑定的 Workspace 与模型',
+  '/new — 换一个全新的专属 DSH 会话（旧会话仍保留在 DSH 中）',
+  '/cancel — 停止你的会话正在运行的回合',
   '/answer <验证码> [题目ID] <选项序号或文字> — 回答 DSH 的提问',
   '/approve <验证码>、/deny <验证码> — 单聊审批工具调用（需在插件中开启）',
-  '/whoami — 查看你的 userid 与当前会话 ID',
+  '/whoami — 查看你的 userid、绑定与管理员身份',
+  '引用（回复）DSH 发来的某条通知，也会把之后的消息定位到那条通知所属的会话',
+  '',
+  '管理员命令：',
+  '/sessions — 按工作区列出可切换的会话（带序号）',
+  '/use <序号|会话ID前缀> — 切换自己要操作与接收通知的会话',
+  '/reset — 放弃切换，回到自己的专属会话',
 ].join('\n');
+
+export function adminOnlyText(): string {
+  return '只有插件配置里列出的管理员可以切换会话。你的消息始终路由到自己的专属会话；如需新的会话请发送 /new。';
+}
 
 export function sessionListText(groups: readonly OperableGroup[], selected: string | undefined, limit = 30): { text: string; listing: string[] } {
   const listing: string[] = [];
@@ -63,11 +71,11 @@ export function sessionListText(groups: readonly OperableGroup[], selected: stri
     }
     if (rows.length) lines.push(`📁 ${oneLine(group.title)}`, ...rows);
   }
-  if (!listing.length) return { text: '暂无可操作的会话。请在 DSH 中创建会话，或检查插件的 Session 白名单。', listing };
+  if (!listing.length) return { text: '暂无可切换的会话。请在 DSH 中创建会话，或检查管理员的可操作 Workspace 范围。', listing };
   return {
-    text: [`可操作的会话（共 ${listing.length + truncated} 个）：`, ...lines,
+    text: [`可切换的会话（共 ${listing.length + truncated} 个）：`, ...lines,
       ...(truncated ? [`… 还有 ${truncated} 个未显示`] : []),
-      '', '发送 /use <序号> 选择会话。'].join('\n'),
+      '', '发送 /use <序号> 切换会话；发送 /reset 回到自己的专属会话。'].join('\n'),
     listing,
   };
 }
