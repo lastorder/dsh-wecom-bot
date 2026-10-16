@@ -1,4 +1,4 @@
-import { displayTitle, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, shortId, } from './format.js';
+import { displayTitle, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, sessionToken, shortId, } from './format.js';
 /**
  * Message templates. Untrusted short strings (titles, ids, tool names) go
  * through {@link inline}, which swaps Markdown/HTML metacharacters for
@@ -16,10 +16,20 @@ export function markdownBody(text, maxBytes) {
 export function sessionLabel(title) {
     return `《${inline(displayTitle(title), 120)}》`;
 }
+/**
+ * Appended to every per-Session notice: quoting (reply-to) the message in
+ * WeCom, or typing `/use` with this token, jumps straight to that Session —
+ * overriding whatever was selected before. See
+ * {@link extractSessionPointer} in `format.ts` for the matching parse.
+ */
+export function quotePointer(sessionId) {
+    return `> 引用这条消息，或发送 /use ${sessionToken(sessionId)}，可直接定位到该会话（之后直接发消息即可继续）。`;
+}
 export const HELP_TEXT = [
     '可用命令：',
     '/sessions — 按工作区列出可操作的会话（带序号）',
     '/use <序号|会话ID前缀> — 选择会话，之后直接发消息即可继续对话',
+    '引用（回复）DSH 发来的某条通知，也会把之后的消息定位到那条通知所属的会话',
     '/status — 查看当前选择与待处理请求',
     '/cancel — 停止当前会话正在运行的回合',
     '/answer <验证码> [题目ID] <选项序号或文字> — 回答 DSH 的提问',
@@ -69,10 +79,10 @@ export function turnCompleteNotice(summary, info) {
         '',
         body,
         '',
-        `> 发送 /use ${summary.sessionId.slice(0, 8)} 选择该会话后，直接回复即可继续。`,
+        quotePointer(summary.sessionId),
     ].join('\n');
 }
-export function questionNotice(title, questions, nonce, timeoutMs) {
+export function questionNotice(sessionId, title, questions, nonce, timeoutMs) {
     const single = questions.length === 1;
     const blocks = questions.map((question, index) => {
         const options = (question.options ?? []).map((option, n) => `    ${n + 1}. ${inline(option.label, 200)}${option.description ? ` — ${inline(option.description, 300)}` : ''}`);
@@ -88,12 +98,17 @@ export function questionNotice(title, questions, nonce, timeoutMs) {
         ...blocks,
         '',
         `> ${usage}；${Math.round(timeoutMs / 1000)} 秒内未回答则回到 DSH 页面处理。`,
+        quotePointer(sessionId),
     ].join('\n');
 }
-export function reviewNotice(title) {
-    return `**DSH 等待审阅** · ${sessionLabel(title)}\n> 这是计划审阅或含详细内容的提问，请到 DSH 页面查看并处理；企业微信不能代为确认。`;
+export function reviewNotice(sessionId, title) {
+    return [
+        `**DSH 等待审阅** · ${sessionLabel(title)}`,
+        '> 这是计划审阅或含详细内容的提问，请到 DSH 页面查看并处理；企业微信不能代为确认。',
+        quotePointer(sessionId),
+    ].join('\n');
 }
-export function approvalNotice(title, request, nonce, timeoutMs) {
+export function approvalNotice(sessionId, title, request, nonce, timeoutMs) {
     const reason = request.displayReason?.zh ?? request.displayReason?.en ?? request.reason ?? '';
     const lines = [
         `**DSH 权限请求** · ${sessionLabel(title)}`,
@@ -103,9 +118,14 @@ export function approvalNotice(title, request, nonce, timeoutMs) {
     lines.push(nonce
         ? `\n回复 /approve ${nonce} 允许本次调用，或 /deny ${nonce} 拒绝；${Math.round((timeoutMs ?? 0) / 1000)} 秒后回到 DSH 页面。`
         : '\n请到 DSH 页面审批。');
+    lines.push(quotePointer(sessionId));
     return lines.join('\n');
 }
-export function promptFailedNotice(title) {
-    return `**DSH 提交失败** · ${sessionLabel(title)}\n> DSH 未接受这条消息，请到 DSH 页面查看详情后重试。`;
+export function promptFailedNotice(sessionId, title) {
+    return [
+        `**DSH 提交失败** · ${sessionLabel(title)}`,
+        '> DSH 未接受这条消息，请到 DSH 页面查看详情后重试。',
+        quotePointer(sessionId),
+    ].join('\n');
 }
 //# sourceMappingURL=notices.js.map

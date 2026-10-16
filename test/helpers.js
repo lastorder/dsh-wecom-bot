@@ -67,7 +67,7 @@ export function fakeHost({ sessions, workspaces, archived = [], pinned = [] } = 
 }
 
 let counter = 0;
-export function frame(content, { chat = 'alice', user = 'alice', id, bot = 'bot', msgtype = 'text' } = {}) {
+export function frame(content, { chat = 'alice', user = 'alice', id, bot = 'bot', msgtype = 'text', quote } = {}) {
   const msgid = id ?? `m${++counter}`;
   return {
     cmd: 'aibot_msg_callback',
@@ -79,6 +79,7 @@ export function frame(content, { chat = 'alice', user = 'alice', id, bot = 'bot'
       from: { userid: user },
       response_url: 'https://example.invalid/secret-callback',
       ...(msgtype === 'text' ? { text: { content } } : { image: { url: 'https://example.invalid/img', aeskey: 'k' } }),
+      ...(quote !== undefined ? { quote: { msgtype: 'text', text: { content: quote } } } : {}),
     },
   };
 }

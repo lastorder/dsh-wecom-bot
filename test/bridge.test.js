@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createBridge } from '../dist/host/bridge/index.js';
 import { createCatalogService } from '../dist/host/catalog.js';
+import { extractSessionPointer } from '../dist/host/bridge/format.js';
 import { createObservationStore } from '../dist/host/observation.js';
 import { createRoundTracker } from '../dist/host/rounds.js';
 import { summarizeTurn } from '../dist/host/turns.js';
@@ -51,6 +52,21 @@ test('turn completion is sent only to allowlisted conversations, after authentic
   assert.match(text, /Alpha 任务/, 'notification names the Session title');
   assert.doesNotMatch(text, /private reasoning/);
   assert.equal(h.journal.find('wecom.send').length, 2);
+  h.stop();
+});
+
+test('a completed turn with no eligible recipient logs a warning instead of silently skipping', async () => {
+  // chatIds empty means "allow all", but nobody has ever messaged this Bot,
+  // so there is no eligible sender on record — exactly what a just-reset
+  // observation store (plugin reload, Host restart) looks like.
+  const h = harness({ sessionIds: ['s2'] });
+  const chats = await h.endTurn('s2', { text: '完成' });
+  assert.deepEqual(chats, []);
+  assert.equal(h.client.sends.length, 0, 'nothing is sent: there is nobody to send it to');
+  const warning = h.journal.find('wecom.notify.skipped').at(-1);
+  assert.equal(warning.level, 'warn');
+  assert.equal(warning.sessionId, 's2');
+  assert.equal(warning.reason, 'turn-complete');
   h.stop();
 });
 
@@ -109,6 +125,44 @@ test('/sessions groups by Workspace, shows titles first, hides archived/subagent
   assert.match(lastReply(h), /已归档/);
   await h.send('继续');
   assert.equal(h.ctx.prompts.at(-1).sessionId, 'aaaa1111-0000');
+  h.stop();
+});
+
+test('quoting a Bot notice jumps straight to its Session, overriding the current /use selection', async () => {
+  const h = harness({ sessionIds: ['s1', 's2'] });
+  await h.send('/use s1');
+  assert.match(lastReply(h), /Alpha/);
+  await h.send('看看进展', { quote: '> 引用这条消息，或发送 /use s2，可直接定位到该会话（之后直接发消息即可继续）。' });
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 's2', 'the quoted Session wins over the earlier /use');
+  const logged = h.journal.find('wecom.quote').at(-1);
+  assert.equal(logged.sessionId, 's2');
+  assert.equal(logged.hint, 's2');
+  // The override is sticky, like /use: later plain messages keep following it.
+  await h.send('继续');
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 's2');
+  h.stop();
+});
+
+test('quoting an unresolvable reference leaves the current selection untouched', async () => {
+  const h = harness({ sessionIds: ['s1', 's2'] });
+  await h.send('/use s1');
+  await h.send('看看进展', { quote: '引用一条与 /use 命令无关的旧消息' });
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 's1', 'no /use-shaped hint: nothing changes');
+  await h.send('看看进展', { quote: '> 发送 /use zzzzzz999999 可定位到该会话。' });
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 's1', 'a token that resolves to nothing: selection unchanged');
+  const outcomes = h.journal.find('wecom.quote').map(r => r.outcome);
+  assert.deepEqual(outcomes, ['not-found']);
+  h.stop();
+});
+
+test('every per-Session notice embeds a /use token that actually resolves back to it', async () => {
+  const h = harness({ chatIds: ['alice'], sessionIds: ['s2'] });
+  h.client.emit('authenticated');
+  await h.endTurn('s2', { text: '完成' });
+  const text = h.client.sends.at(-1).body.markdown.content;
+  const token = extractSessionPointer(text);
+  assert.ok(token, 'the notice carries a /use hint');
+  assert.notEqual(token, 'session-', 'the hint is not the old useless literal prefix');
   h.stop();
 });
 

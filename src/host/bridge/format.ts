@@ -40,8 +40,42 @@ export function oneLine(text: string): string {
   return text.replace(/[\r\n]+/g, ' ').trim();
 }
 
+/** DSH Session ids all share this marker, so a naive `slice(0, N)` shows the
+ * same characters for every Session — both helpers below skip it first. */
+const SESSION_ID_PREFIX = 'session-';
+
+function splitSessionId(id: string): { readonly prefix: string; readonly rest: string } {
+  return id.startsWith(SESSION_ID_PREFIX)
+    ? { prefix: SESSION_ID_PREFIX, rest: id.slice(SESSION_ID_PREFIX.length) }
+    : { prefix: '', rest: id };
+}
+
+/** A short, ellipsis-trimmed fragment for display (`/sessions` rows). Not
+ * guaranteed to be a valid {@link SessionDirectory.resolve} prefix. */
 export function shortId(id: string): string {
-  return id.length > 13 ? `${id.slice(0, 8)}…` : id;
+  const { prefix, rest } = splitSessionId(id);
+  return `${prefix}${rest.length > 10 ? `${rest.slice(0, 10)}…` : rest}`;
+}
+
+/** A plain (no ellipsis) Session id prefix long enough to resolve uniquely
+ * through {@link SessionDirectory.resolve} (≥ 6 chars past a shared marker) —
+ * safe to paste after `/use`, and what {@link extractSessionPointer} looks
+ * for inside a WeCom "quote" (reply-to) reference. */
+export function sessionToken(id: string, visibleChars = 12): string {
+  const { prefix, rest } = splitSessionId(id);
+  return `${prefix}${rest.slice(0, visibleChars)}`;
+}
+
+// Session ids use only ASCII letters, digits, "-" and "_"; the class below
+// stops at the first other character (Chinese punctuation included — `\S`
+// alone would swallow it, since it matches any non-whitespace character).
+const SESSION_POINTER_RE = /\/use\s+([\w-]{1,80})/;
+
+/** Recovers the {@link sessionToken} embedded in a notice's "quote this
+ * message to jump back here" hint, from the quoted text WeCom echoes back
+ * on a reply. `undefined` when the quoted text carries no such hint. */
+export function extractSessionPointer(quotedText: string): string | undefined {
+  return SESSION_POINTER_RE.exec(quotedText)?.[1];
 }
 
 export const UNTITLED_SESSION = '未命名会话';

@@ -16,6 +16,26 @@ export interface InboundMessage {
   readonly msgtype: string;
   /** Text content of `text` messages (untrimmed). */
   readonly text?: string;
+  /** Flattened text of a WeCom "quote" (reply-to) reference, when the
+   * sender replied to an earlier message instead of sending a fresh one. */
+  readonly quotedText?: string;
+}
+
+/** WeCom quotes carry the quoted content, not its id — flatten whatever text
+ * it holds (text, or the text items of a mixed message) so the bridge can
+ * look for its own `/use <token>` hint inside it. */
+function flattenQuote(quote: unknown): string | undefined {
+  if (!quote || typeof quote !== 'object') return undefined;
+  const q = quote as { msgtype?: unknown; text?: { content?: unknown }; mixed?: { msg_item?: unknown } };
+  if (q.msgtype === 'text' && typeof q.text?.content === 'string') return q.text.content;
+  if (q.msgtype === 'mixed' && Array.isArray(q.mixed?.msg_item)) {
+    const texts = q.mixed.msg_item
+      .map(item => (item as { msgtype?: unknown; text?: { content?: unknown } } | null))
+      .filter(item => item?.msgtype === 'text' && typeof item.text?.content === 'string')
+      .map(item => item!.text!.content as string);
+    return texts.length ? texts.join('\n') : undefined;
+  }
+  return undefined;
 }
 
 export function parseInbound(frame: WsFrame | undefined, botId: string): InboundMessage | null {
@@ -29,6 +49,7 @@ export function parseInbound(frame: WsFrame | undefined, botId: string): Inbound
   const chat = body.chattype === 'group' ? body.chatid : user;
   if (!validIdentifier(chat)) return null;
   const text = body.msgtype === 'text' ? (body.text as { content?: unknown } | undefined)?.content : undefined;
+  const quotedText = flattenQuote(body.quote);
   return {
     frame,
     reqId: frame.headers.req_id,
@@ -38,6 +59,7 @@ export function parseInbound(frame: WsFrame | undefined, botId: string): Inbound
     chatType: body.chattype,
     msgtype: body.msgtype,
     ...(typeof text === 'string' ? { text } : {}),
+    ...(quotedText !== undefined ? { quotedText } : {}),
   };
 }
 

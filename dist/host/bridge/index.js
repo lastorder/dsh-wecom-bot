@@ -6,7 +6,7 @@ import { createRoundTracker } from '../rounds.js';
 import { createStatusTracker } from '../status.js';
 import { parseCommand, runCommand } from './commands.js';
 import { createSessionDirectory } from './directory.js';
-import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, displayTitle, oneLine } from './format.js';
+import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, displayTitle, extractSessionPointer, oneLine } from './format.js';
 import { createReplayGuard, parseInbound } from './inbound.js';
 import { createInteractionRegistry } from './interactions.js';
 import { approvalNotice, promptFailedNotice, questionNotice, reviewNotice, sessionListText, turnCompleteNotice, } from './notices.js';
@@ -43,8 +43,45 @@ export function createBridge(deps) {
             return choice;
         return policy.sessionIds.size === 1 ? [...policy.sessionIds][0] : undefined;
     }
-    /** Conversations that may receive automatic messages about this Session. */
-    async function recipients(sessionId) {
+    /**
+     * Quoting (replying to) one of this Bot's own per-Session notices carries
+     * that notice's embedded `/use <token>` hint back on `quotedText`, even
+     * though the WeCom callback never echoes the quoted message's id. When
+     * the token resolves to an operable Session, this message (and any
+     * command inside it: `/status`, `/cancel`, a plain reply, …) is routed
+     * there — overriding whatever was selected before, exactly as `/use`
+     * would. An unresolved or missing quote changes nothing.
+     */
+    async function applyQuotedSession(message, round) {
+        if (!message.quotedText)
+            return;
+        const hint = extractSessionPointer(message.quotedText);
+        if (!hint)
+            return;
+        const resolved = await directory.resolve(hint);
+        if (!resolved.ok) {
+            journal.write({
+                event: 'wecom.quote', level: 'debug', roundId: round.id,
+                chatId: message.chat, userId: message.user, hint, outcome: resolved.reason,
+            });
+            return;
+        }
+        selection.set(message.chat, message.user, resolved.session.sessionId);
+        journal.write({
+            event: 'wecom.quote', roundId: round.id, chatId: message.chat, userId: message.user,
+            hint, sessionId: resolved.session.sessionId,
+        });
+    }
+    /**
+     * Conversations that may receive automatic messages about this Session.
+     * `reason` only labels the {@link journal} warning emitted when the
+     * Session is allowed to notify but nobody currently qualifies — typically
+     * because the eligible-sender list was just reset (a plugin reload or a
+     * Host restart both clear it) and nobody has messaged this Bot since. The
+     * caller then has nothing to notify and no error to show either, so this
+     * is the only trace of a silently skipped notification.
+     */
+    async function recipients(sessionId, reason) {
         if (!(await directory.permitted(sessionId)))
             return [];
         if (policy.chatIds.size)
@@ -54,7 +91,14 @@ export function createBridge(deps) {
         const chats = observations.eligibleSources()
             .filter(source => policy.chatAllowed(source.chat) && policy.userAllowed(source.user))
             .map(source => source.chat);
-        return [...new Set(chats)];
+        const unique = [...new Set(chats)];
+        if (!unique.length) {
+            journal.write({
+                event: 'wecom.notify.skipped', level: 'warn', sessionId, reason,
+                detail: 'no eligible WeCom recipient knows this Session; a plugin reload or Host restart just cleared that list and nobody has messaged this Bot since',
+            });
+        }
+        return unique;
     }
     function notify(chats, text, kind, sessionId) {
         for (const chat of chats)
@@ -147,7 +191,7 @@ export function createBridge(deps) {
             journal.write({ event: 'dsh.prompt', level: 'warn', ...meta, request, error, durationMs: Date.now() - startedAt });
             rounds.complete(round, 'prompt-failed', { response: { error } });
             if (!stale(ticket)) {
-                outbox.enqueue({ chat: message.chat, text: promptFailedNotice(info.title), kind: 'prompt-failed', sessionId, roundIds: [round.id] });
+                outbox.enqueue({ chat: message.chat, text: promptFailedNotice(sessionId, info.title), kind: 'prompt-failed', sessionId, roundIds: [round.id] });
             }
         }
     }
@@ -203,6 +247,7 @@ export function createBridge(deps) {
             rounds.complete(round, 'blocked', { response: { reason: 'too-long' } });
             return;
         }
+        await applyQuotedSession(message, round);
         const command = parseCommand(content);
         if (command) {
             round.command = command.name;
@@ -219,7 +264,7 @@ export function createBridge(deps) {
         // Interrupted or failed turns matter only to someone waiting on them.
         if (reason !== 'completed' && !rounds.hasPending(session.id))
             return [];
-        const chats = await recipients(session.id);
+        const chats = await recipients(session.id, 'turn-complete');
         if (closed || !chats.length)
             return [];
         const info = await directory.describe(session.id);
@@ -232,7 +277,7 @@ export function createBridge(deps) {
         const sessionId = request.agent?.id;
         if (closed || !sessionId || !request.questions?.length)
             return next();
-        const chats = await recipients(sessionId);
+        const chats = await recipients(sessionId, 'question');
         if (closed || !chats.length)
             return next();
         const info = await directory.describe(sessionId);
@@ -240,14 +285,14 @@ export function createBridge(deps) {
         // WeCom must not claim these, not even with a free-text answer.
         if (request.questions.some(q => q.intent?.kind === 'plan-review' || Boolean(q.detail))) {
             journal.write({ event: 'dsh.question', sessionId, delegated: 'review', questions: request.questions, chats });
-            notify(chats, reviewNotice(info.title), 'review', sessionId);
+            notify(chats, reviewNotice(sessionId, info.title), 'review', sessionId);
             return next();
         }
         const wait = interactions.waitQuestion(sessionId, request.questions, settings.questionTimeoutMs, request.signal);
         if (!wait)
             return next();
         journal.write({ event: 'dsh.question', sessionId, nonce: wait.nonce, questions: request.questions, chats, timeoutMs: settings.questionTimeoutMs });
-        notify(chats, questionNotice(info.title, request.questions, wait.nonce, settings.questionTimeoutMs), 'question', sessionId);
+        notify(chats, questionNotice(sessionId, info.title, request.questions, wait.nonce, settings.questionTimeoutMs), 'question', sessionId);
         const answer = await wait.result;
         journal.write({ event: 'dsh.question.result', sessionId, nonce: wait.nonce, outcome: answer ? 'answered' : 'fallback', ...(answer ? { answer } : {}) });
         return answer ?? next();
@@ -256,7 +301,7 @@ export function createBridge(deps) {
         const sessionId = request.agent?.id;
         if (closed || !sessionId)
             return next();
-        const chats = await recipients(sessionId);
+        const chats = await recipients(sessionId, 'approval');
         if (closed || !chats.length)
             return next();
         const info = await directory.describe(sessionId);
@@ -268,18 +313,18 @@ export function createBridge(deps) {
         const meta = { sessionId, toolName: request.toolName, ...(request.callId ? { callId: request.callId } : {}) };
         if (!settings.remoteApprovals || !privateChats.length) {
             journal.write({ event: 'dsh.approval', ...meta, remote: false, chats });
-            notify(chats, approvalNotice(info.title, request), 'approval', sessionId);
+            notify(chats, approvalNotice(sessionId, info.title, request), 'approval', sessionId);
             return next();
         }
         const wait = interactions.waitApproval(sessionId, {
             toolName: request.toolName, privateChats, ...(request.callId ? { callId: request.callId } : {}),
         }, settings.questionTimeoutMs, request.signal);
         if (!wait) {
-            notify(chats, approvalNotice(info.title, request), 'approval', sessionId);
+            notify(chats, approvalNotice(sessionId, info.title, request), 'approval', sessionId);
             return next();
         }
         journal.write({ event: 'dsh.approval', ...meta, remote: true, nonce: wait.nonce, chats: privateChats, timeoutMs: settings.questionTimeoutMs });
-        notify(privateChats, approvalNotice(info.title, request, wait.nonce, settings.questionTimeoutMs), 'approval-request', sessionId);
+        notify(privateChats, approvalNotice(sessionId, info.title, request, wait.nonce, settings.questionTimeoutMs), 'approval-request', sessionId);
         const outcome = await wait.result;
         journal.write({ event: 'dsh.approval.result', ...meta, nonce: wait.nonce, outcome: outcome ?? 'fallback' });
         return outcome ?? next();
