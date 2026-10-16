@@ -1,0 +1,77 @@
+# AGENTS.md
+
+dsh-wecom-bot is a single DeepSeek Harness plugin package (unlike the
+dsh-workpet monorepo, there is no `packages/` split: one `package.json`, one
+`src/`, one published npm package). This file covers *where a change goes*
+and *how to ship it*; README.md owns what the plugin does for users.
+
+## Layout
+
+```
+src/host/           Host half: runtime, catalog, journal, bridge/ (built to dist/host/index.js)
+src/client/         Client half: the settings page, React (built to dist/client.js,
+                    a __ModuleLoader__ factory — see scripts/build-client.mjs)
+src/shared/         protocol.ts: constants and types both halves import
+test/               *.test.js, run by `node --test` against the built dist/
+scripts/            build-client.mjs, clean.mjs, preview.mjs (settings-page screenshots)
+icon.svg            Plugin Manager display metadata (package.json's `icon` field)
+cordis.patch.yml    the bundle's insert patch; its `name` must equal package.json's `name`
+.github/workflows/  ci.yml (verify on push/PR), release.yml (tag -> npm stage + GitHub Release)
+```
+
+## Commands
+
+```sh
+pnpm install
+pnpm run build     # clean -> tsc (Host) -> tsc + esbuild (Client)
+pnpm run typecheck
+pnpm run test      # builds, then node --test against dist/
+pnpm run verify    # build + typecheck + test; what CI and prepublishOnly run
+pnpm run preview   # renders the settings page to preview/*.png (needs Google Chrome)
+```
+
+## Conventions
+
+- `dist/` is not committed (`.gitignore`); every workflow and `prepublishOnly` rebuilds it fresh. Never hand-edit it.
+- **`cordis.patch.yml`'s `name` and `src/shared/protocol.ts`'s `PACKAGE_NAME` must both equal `package.json`'s `name`.** The client keys its `plugins.bundle.config` slot registration by `PACKAGE_NAME`; a mismatch after a rename silently breaks the settings page. `test/client.test.js` checks this.
+- A rename or any change to `exports`/`main` requires reinstalling the local dev bundle (`plugin_manager` remove_bundle then install_bundle with the workspace path) **and a full DeepSeek Harness restart** — the desktop profile does not hot-reload the Host module, and a bare disable/enable of the plugin re-runs `apply()` against a module Node already has cached under the old specifier's resolved path, which fails with "failed to import". A content-only edit (rebuild, same package name) reloads fine with disable/enable; renaming anything about the package identity does not.
+
+## Releasing
+
+Single package, one version, one `vX.Y.Z` tag triggers the release of that one package — no `scripts/release.mjs` helper is needed (compare dsh-workpet's monorepo one): `package.json`'s own `version` is the only thing a release bumps.
+
+### One-time setup, before the first tag (done once, for v0.2.0)
+
+[release.yml](.github/workflows/release.yml) authenticates only through npm's
+token-free OIDC Trusted Publishing, which must be configured on a package
+that already exists on the registry.
+
+1. `pnpm run verify`.
+2. `npm login`, then `npm publish` from the repository root (unscoped name, so no `--access public` needed; `prepublishOnly` reruns `pnpm run verify` first).
+3. Establish the Trusted Publisher relationship — `npm trust github`, not the npmjs.com web UI, is the actual working path (confirmed when setting up v0.2.1: the web UI's documented steps did not produce a relationship `npm trust list` could see, and the first release run failed at "Stage on npm" with `E401 Unable to authenticate` until this command was run):
+   ```sh
+   npm trust github dsh-wecom-bot --repo lastorder/dsh-wecom-bot --file release.yml --allow-stage-publish
+   ```
+   `--file` takes just the workflow's filename (`release.yml`), not its path under `.github/workflows/` — passing the path fails with "GitHub Actions workflow must be just a file not a path". This needs your npm login and 2FA (one browser OTP prompt); verify first with `--dry-run` (no OTP required) if the exact repo/file values are ever in doubt, and `npm trust list dsh-wecom-bot` to confirm afterward.
+
+### Every release after that
+
+1. Bump `package.json`'s `version` to `X.Y.Z`.
+2. `pnpm run verify`.
+3. Commit as `Release vX.Y.Z: <summary>` with a prose body; this message becomes the GitHub Release notes verbatim.
+4. `git tag -a vX.Y.Z -m "Release vX.Y.Z: <summary>"` and `git push && git push --tags`.
+5. release.yml verifies, checks the tag against `package.json`'s version, runs `npm stage publish`, packs a tarball, and creates a GitHub Release **marked pre-release**.
+6. **Approve the stage**: `https://www.npmjs.com/package/dsh-wecom-bot?activeTab=versions`, or `npm stage list dsh-wecom-bot` then `npm stage approve <stage-id>` (2FA). Then uncheck "pre-release" on the GitHub Release.
+
+Do not run `npm publish` / `npm stage publish` by hand for an ordinary release; only to recover from a CI outage, after `pnpm run verify`. Keep the Trusted Publisher stage-only (`--allow-stage-publish`, never `--allow-publish`): the human approval on npmjs.com is the control that keeps a compromised workflow or repository from ever reaching the registry on its own.
+
+### Troubleshooting a release run
+
+- **`pnpm/action-setup`: "Error: No pnpm version is specified."** — `package.json` is missing `packageManager`; it must be present (this bit v0.2.0's and v0.2.1's first CI/release runs — adapting workflows from another repository without carrying over its `packageManager` field). Keep it in sync with the pnpm version used locally (`pnpm --version`).
+- **"Stage on npm": `E401 Unable to authenticate, your authentication token seems to be invalid.`** — no working Trusted Publisher relationship for this exact repo + workflow filename. Run the `npm trust github` command above (needs a human with npm 2FA; cannot be fixed from inside the workflow). `npm trust list dsh-wecom-bot` shows what is currently configured.
+- **Tag pushed against the wrong commit, or `package.json`'s version never bumped** — release.yml's "Check the tag matches package.json's version" step fails before anything is staged; fix the version or re-tag and re-push.
+
+### CI/release infrastructure notes
+
+- Third-party actions are pinned to a full commit SHA (`softprops/action-gh-release`); first-party `actions/*` and `pnpm/*` stay on major tags.
+- The release job's `id-token: write` permission mints the OIDC token npm exchanges for a short-lived, workflow-scoped stage credential — no `NPM_TOKEN` repository secret exists or should ever be added while Trusted Publishing covers this.
