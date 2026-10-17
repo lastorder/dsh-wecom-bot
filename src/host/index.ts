@@ -10,6 +10,7 @@
  *   workspaces.ts     the Workspace new Sessions live in (own default, or configured)
  *   models.ts         DSH model catalog and Session-local model selection
  *   groups-view.ts    the groups table the settings page shows and edits
+ *   session-title.ts  the `wecom-bot-<userid|chatid>` title every new Session gets
  *   bridge/           one live WeCom connection: inbound, commands, notices, outbox
  *   catalog.ts        DSH Sessions grouped by Workspace (archived/subagent hidden)
  *   observation.ts    refused senders, kept in memory for the page to authorize

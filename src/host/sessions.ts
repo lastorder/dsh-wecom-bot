@@ -4,6 +4,7 @@ import type {
 import type { CatalogService, SessionCatalog } from './catalog.js';
 import type { SessionController } from './dsh.js';
 import type { ModelService } from './models.js';
+import { sessionTitleFor, type SessionTitler } from './session-title.js';
 import type { WorkspaceService } from './workspaces.js';
 
 /**
@@ -62,6 +63,8 @@ export interface SessionProvisionerOptions {
   readonly catalogs: CatalogService;
   readonly bindings: { update(key: string, patch: { sessionId?: string }): Promise<unknown> };
   readonly bindingKey: (binding: BindingRecord) => string;
+  /** Names a Session this provisioner creates; optional and best-effort. */
+  readonly titles?: SessionTitler;
   /** How long a "missing Session" verdict is trusted before rebuilding the catalog. */
   readonly rebuildIntervalMs?: number;
   now?(): number;
@@ -155,6 +158,10 @@ export function createSessionProvisioner(options: SessionProvisionerOptions): Se
         ...(preset ? { agentPreset: preset } : {}),
       });
       await options.bindings.update(options.bindingKey(binding), { sessionId: created.sessionId });
+      // The Session is named after the principal that owns it — a userid for a
+      // private chat, a chatid for a group — so the DSH sidebar says which WeCom
+      // conversation it belongs to.
+      options.titles?.name(created.sessionId, sessionTitleFor(binding.id));
       journal.write({
         event: 'binding.session.created', binding: options.bindingKey(binding),
         sessionId: created.sessionId, workspace: workspace.path, workspaceId: workspace.id,

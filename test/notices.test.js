@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { byteLength, extractSessionPointer, MAX_NOTICE_BYTES, MAX_REPLY_BYTES } from '../dist/host/bridge/format.js';
 import {
   adminOnlyText, adminPrivateOnlyText, approvalNotice, authorizedNotice, compactedText, deleteWarningText, deletedText,
-  HELP_TEXT, newSessionText, nothingToCompactText, promptFailedNotice, questionNotice, quotePointer,
-  reviewNotice, sessionListText, turnCompleteNotice, unauthorizedText, workspaceListText,
+  groupSessionRefusalText, HELP_TEXT, newSessionText, nothingToCompactText, promptFailedNotice, questionNotice,
+  quotePointer, reviewNotice, sessionListText, turnCompleteNotice, unauthorizedText, workspaceListText,
 } from '../dist/host/bridge/notices.js';
 
 /**
@@ -34,6 +34,8 @@ test('every template fits the reply budget', () => {
     HELP_TEXT,
     adminOnlyText(),
     adminPrivateOnlyText(),
+    groupSessionRefusalText('delete'),
+    groupSessionRefusalText('compact'),
     unauthorizedText(),
     authorizedNotice('默认分组'),
     deleteWarningText('修复登录 Bug', 'session-9f3a1c7b2d4e'),
@@ -83,6 +85,8 @@ test('a hint is the only /use occurrence the quote parser can pick up', () => {
   for (const text of [HELP_TEXT, adminOnlyText(), adminPrivateOnlyText(), unauthorizedText(), authorizedNotice('默认分组')]) {
     assert.equal(extractSessionPointer(text), undefined);
   }
+  // A group refusal names the command in inline code — `/delete`, never `/use`.
+  assert.equal(extractSessionPointer(groupSessionRefusalText('delete')), undefined);
   // A member's /sessions footer and every refusal name `序号`, never `/use <word>`.
   assert.match(HELP_TEXT, /\/use/);
   assert.equal(extractSessionPointer(quotePointer('session-9f3a1c7b2d4e')), 'session-9f3a1c7b2d4e');
@@ -148,6 +152,17 @@ test('an administrator command sent in a group says why it is refused there', ()
   assert.match(adminOnlyText(), /只有插件配置里列出的管理员可以使用/);
   // /help says the same thing up front, instead of letting the reader find out.
   assert.match(HELP_TEXT, /只能在单聊里发送/);
+});
+
+test('a Session command refused in a group names the shared Session and the private chat', () => {
+  const deleting = groupSessionRefusalText('delete');
+  assert.match(deleting, /\*\*🔒 群聊的会话记录只有管理员可以归档\*\*/);
+  assert.match(deleting, /所有人共用/);
+  assert.match(deleting, /`\/delete`/);
+  assert.match(deleting, /自己的专属会话/);
+  const compacting = groupSessionRefusalText('compact');
+  assert.match(compacting, /只有管理员可以压缩/);
+  assert.match(compacting, /`\/compact`/);
 });
 
 test('/workspaces numbers every Workspace and marks the chosen one', () => {

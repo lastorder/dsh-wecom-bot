@@ -13,6 +13,7 @@ import { createRouter } from '../dist/host/routing.js';
 import { createRoutingStore } from '../dist/host/routing-store.js';
 import { createSessionOperations } from '../dist/host/session-ops.js';
 import { createSessionProvisioner } from '../dist/host/sessions.js';
+import { createSessionTitler } from '../dist/host/session-title.js';
 import { summarizeTurn } from '../dist/host/turns.js';
 import { createWorkspaceService } from '../dist/host/workspaces.js';
 import {
@@ -52,13 +53,14 @@ async function harness(settings = {}, hostOptions = {}, extra = {}) {
     ttlMs: 0,
     log: silent,
   });
+  const titles = createSessionTitler({ ctx, journal });
   const provisioner = createSessionProvisioner({
     sessionController: ctx.sessionController, models, workspaces, catalogs, bindings: store,
-    bindingKey: binding => `${binding.kind}:${binding.id}`, journal, log: silent,
+    bindingKey: binding => `${binding.kind}:${binding.id}`, titles, journal, log: silent,
   });
   const resolved = { ...baseSettings, ...settings };
   const router = createRouter({ store, provisioner, log: silent });
-  const ops = createSessionOperations({ ctx, workspaces, catalogs, journal });
+  const ops = createSessionOperations({ ctx, workspaces, catalogs, titles, journal });
 
   await store.load();
   if (extra.group) await store.updateGroup('default', extra.group);
@@ -649,6 +651,33 @@ test('/status reports the whole Session: Workspace, preset, model, effort, conte
   h.stop();
 });
 
+test('a Session the Bot creates is titled after the conversation that owns it', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, {
+    members: [['user', 'root'], ['user', 'alice'], ['group', 'group-1']],
+  });
+
+  // A private chat: the member's own userid.
+  await h.send('你好');
+  assert.deepEqual(h.ctx.renames, [{ sessionId: 'session-created-1', title: 'wecom-bot-alice' }]);
+
+  // A group chat: the chat's id, because that Session belongs to the whole group.
+  await h.send('大家好', { chat: 'group-1', user: 'bob' });
+  assert.deepEqual(h.ctx.renames.at(-1), { sessionId: 'session-created-2', title: 'wecom-bot-group-1' });
+
+  // An administrator's `/new` in a single chat names their own userid.
+  await h.send('/new', { chat: 'root', user: 'root' });
+  assert.deepEqual(h.ctx.renames.at(-1), { sessionId: 'session-created-3', title: 'wecom-bot-root' });
+  h.stop();
+});
+
+test('a deployment without the title service still creates Sessions', async () => {
+  const h = await harness({}, { sessionTitle: false });
+  await h.send('你好');
+  assert.equal(h.ctx.renames.length, 0);
+  assert.equal(h.ctx.prompts.length, 1, 'the message was still routed');
+  h.stop();
+});
+
 test('/compact folds the Session history and reports what it replaced', async () => {
   const h = await harness();
   await h.send('你好');
@@ -659,6 +688,36 @@ test('/compact folds the Session history and reports what it replaced', async ()
   assert.equal(h.ctx.compactions.length, 1);
   assert.equal(h.ctx.compactions[0].agent.id, 'session-created-1');
   assert.deepEqual(h.ctx.agentResolutions, ['session-created-1'], 'a cold Session is resumed through the controller');
+  h.stop();
+});
+
+test('/compact reads the service from the agent preset, not from the host plane', async () => {
+  // The web-app composition disables the host-plane `compaction` row and
+  // re-mounts it inside the agent preset's isolated group, so the plugin's own
+  // context never provides it. Reading it there was the bug: /compact answered
+  // 「当前 DSH 没有挂载上下文压缩服务」 on every deployment with presets.
+  const h = await harness({}, { compactScope: 'preset' });
+  await h.send('你好');
+  await h.send('/compact');
+  assert.match(lastReply(h), /上下文已压缩/);
+  assert.equal(h.ctx.compactions.length, 1, 'the preset-scoped service ran');
+  h.stop();
+});
+
+test('/compact still works where the backend stays on the host plane', async () => {
+  const h = await harness({}, { compactScope: 'host' });
+  await h.send('你好');
+  await h.send('/compact');
+  assert.match(lastReply(h), /上下文已压缩/);
+  h.stop();
+});
+
+test('/compact says which composition is missing the service', async () => {
+  const h = await harness({}, { compactScope: 'none' });
+  await h.send('你好');
+  await h.send('/compact');
+  assert.match(lastReply(h), /上下文压缩失败/);
+  assert.match(lastReply(h), /preset 没有挂载上下文压缩服务/);
   h.stop();
 });
 
@@ -702,13 +761,29 @@ test('/delete warns first, then archives the Session and clears the binding', as
   h.stop();
 });
 
-test('/delete in a group chat needs an administrator', async () => {
+test('/delete in a group chat needs an administrator, and says why', async () => {
   const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['group', 'group-1'], ['user', 'root']] });
   await h.send('大家好', { chat: 'group-1', user: 'alice' });
   await h.send('/delete', { chat: 'group-1', user: 'alice' });
-  assert.match(lastReply(h), /需要管理员权限/);
+  // Not the generic rank refusal: the Session itself is shared, and the member
+  // probably meant their own — so the reply says that and points at the 单聊.
+  assert.match(lastReply(h), /群聊的会话记录只有管理员可以归档/);
+  assert.match(lastReply(h), /只有管理员可以归档/);
+  assert.match(lastReply(h), /自己的专属会话/);
+  assert.match(lastReply(h), /单聊/);
+  assert.match(lastReply(h), /\/delete/);
+  assert.doesNotMatch(lastReply(h), /需要管理员权限/);
   await h.send('/delete', { chat: 'group-1', user: 'root' });
   assert.match(lastReply(h), /归档会话会清空它的记忆/);
+  h.stop();
+});
+
+test('/compact in a group chat gives the same group-specific refusal', async () => {
+  const h = await harness({}, {}, { members: [['group', 'group-1']] });
+  await h.send('大家好', { chat: 'group-1', user: 'alice' });
+  await h.send('/compact', { chat: 'group-1', user: 'alice' });
+  assert.match(lastReply(h), /群聊的会话记录只有管理员可以压缩/);
+  assert.match(lastReply(h), /单聊/);
   h.stop();
 });
 

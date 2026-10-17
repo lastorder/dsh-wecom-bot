@@ -168,9 +168,22 @@ export interface SessionController {
   modelCatalog(): Promise<ModelCatalog>;
 }
 
-/** One live Agent handle; enough to reach the Session-domain services. */
+/** The slice of a Cordis context this plugin reads services through. */
+export interface ServiceContext {
+  get?(name: string): unknown;
+}
+
+/**
+ * One live Agent handle; enough to reach the Session-domain services.
+ *
+ * `ctx` is the Agent's *own* context, and it matters: an agent preset composes
+ * its services inside isolated groups — the web-app composition disables the
+ * host-plane `compaction` row and re-mounts it under the preset's `isolate` —
+ * so a service the preset owns is reachable only from the agent's context.
+ */
 export interface AgentRef {
   readonly id: string;
+  readonly ctx?: ServiceContext;
 }
 
 export interface ApiSessionAgentError {

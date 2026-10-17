@@ -358,13 +358,15 @@ test('a card saves only its own section, and nothing is saved while it is untouc
   renderer.unmount();
 });
 
-test('adding an administrator searches known people by note and saves with its own card', async () => {
+test('adding an administrator searches known people by note, and writes at once', async () => {
   const harness = mount({ stored: { botId: 'bot', adminUserIds: ['alice'] } });
   const renderer = await render(harness);
   const root = renderer.root;
   const all = text(renderer.toJSON());
   assert.ok(all.includes('alice'), 'the configured administrator is listed');
   assert.equal(all.includes('未设置'), false, 'the empty tag became an add button');
+  assert.equal(root.findAll(node => node.type === 'button' && text(node) === '保存').length, 0,
+    'the card has no 保存 button: every edit is written when it is made');
 
   await act(async () => { exactButton(root, '添加').props.onClick(); });
   assert.ok(byLabel(root, '搜索已知用户'), 'the picker has a search box');
@@ -376,13 +378,10 @@ test('adding an administrator searches known people by note and saves with its o
     root.findAll(node => node.type === 'button' && node.props.className === 'wcb-picker-row')[0].props.onClick();
   });
   await flush();
-  assert.equal(harness.mutations.length, 0, 'the picker only fills the draft');
-  assert.ok(text(renderer.toJSON()).includes('mallory'), 'the new administrator is listed');
-
-  await act(async () => { await buttonByText(root, '保存').props.onClick(); });
-  await flush();
   const ops = JSON.parse(JSON.stringify(harness.mutations.at(-1).ops));
-  assert.deepEqual(ops.find(op => op.path[0] === 'adminUserIds').value, ['alice', 'mallory']);
+  assert.deepEqual(ops.find(op => op.path[0] === 'adminUserIds').value, ['alice', 'mallory'],
+    'picking somebody writes the list immediately');
+  assert.ok(text(renderer.toJSON()).includes('mallory'), 'the new administrator is listed');
   renderer.unmount();
 });
 
@@ -404,10 +403,24 @@ test('the notification scope is all-checked by default and narrows only when unc
   // Unchecking one Workspace stores the remaining path, not a list of all of them.
   await act(async () => { byLabel(root, '管理员接收 dsh-wecom-bot 的通知').props.onChange({ target: { checked: false } }); });
   await flush();
-  await act(async () => { await buttonByText(root, '保存').props.onClick(); });
+  const ops = JSON.parse(JSON.stringify(harness.mutations.at(-1).ops));
+  assert.deepEqual(ops.find(op => op.path[0] === 'adminWorkspaces').value, ['/Users/me/orion-agent'],
+    'a checkbox writes the scope immediately');
+  assert.equal(byLabel(root, '管理员接收 dsh-wecom-bot 的通知').props.checked, false, 'and the box reflects it');
+  renderer.unmount();
+});
+
+test('removing an administrator is written immediately too', async () => {
+  const harness = mount({ stored: { botId: 'bot', adminUserIds: ['alice'] } });
+  const renderer = await render(harness);
+  const root = renderer.root;
+  await act(async () => { buttonByLabel(root, 'alice 的详情').props.onClick(); });
+  await act(async () => { buttonByLabel(root, '移除管理员 alice').props.onClick(); });
   await flush();
   const ops = JSON.parse(JSON.stringify(harness.mutations.at(-1).ops));
-  assert.deepEqual(ops.find(op => op.path[0] === 'adminWorkspaces').value, ['/Users/me/orion-agent']);
+  assert.deepEqual(ops.find(op => op.path[0] === 'adminUserIds').value, [],
+    'the dialog removes the administrator without a second click');
+  assert.equal(text(renderer.toJSON()).includes('还没有管理员'), true, 'and the card shows the empty state');
   renderer.unmount();
 });
 

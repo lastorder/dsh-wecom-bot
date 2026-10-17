@@ -1,5 +1,6 @@
-import type { AgentService, CompactionResult, CompactionService, HostContext } from './dsh.js';
+import type { AgentRef, AgentService, CompactionResult, CompactionService, HostContext } from './dsh.js';
 import type { CatalogService } from './catalog.js';
+import type { SessionTitler } from './session-title.js';
 import type { WorkspaceService } from './workspaces.js';
 
 /**
@@ -11,10 +12,13 @@ import type { WorkspaceService } from './workspaces.js';
  *   can never reach another request, and the member's next message starts a
  *   fresh one. The JSONL log itself stays on disk — DSH offers no API to
  *   remove it, and reaching into the store by hand would corrupt its index.
- * - **compact** a Session's context (`ctx.get('compaction')`), after resolving
- *   the Agent that owns it (`sessionController.resolveAgent`), exactly the way
- *   DSH's own `/compact` command does.
- * - **create** a Session in a chosen Workspace (administrator `/new`).
+ * - **compact** a Session's context, after resolving the Agent that owns it
+ *   (`sessionController.resolveAgent`), exactly the way DSH's own `/compact`
+ *   command does. The service is read from the *agent's* context, not this
+ *   plugin's: an agent preset composes `compaction` inside an isolated group,
+ *   so the host plane never provides it (see {@link compactionFor}).
+ * - **create** a Session in a chosen Workspace (administrator `/new`), titled
+ *   so the DSH sidebar names the WeCom conversation it belongs to.
  *
  * Every method throws a Chinese, user-facing error message: the command layer
  * only wraps them in the Bot's reply shape.
@@ -25,6 +29,8 @@ export interface CreateSessionRequest {
   readonly workspace: string;
   /** Agent preset; omitted means the DSH default. */
   readonly preset?: string;
+  /** Session title; omitted leaves DSH's own titling alone. */
+  readonly title?: string;
 }
 
 export interface CompactOutcome {
@@ -45,6 +51,7 @@ export interface SessionOperationsOptions {
   readonly ctx: Pick<HostContext, 'sessionController' | 'get'>;
   readonly workspaces: WorkspaceService;
   readonly catalogs?: CatalogService;
+  readonly titles?: SessionTitler;
   readonly journal?: { write(record: Record<string, unknown>): void };
 }
 
@@ -64,6 +71,31 @@ const COMPACTION_FAILURE: Record<string, string> = {
 
 export function createSessionOperations(options: SessionOperationsOptions): SessionOperations {
   const journal = options.journal ?? { write() {} };
+
+  /**
+   * The compaction service that governs one Agent.
+   *
+   * `compaction` belongs to the Agent's *preset*, inside an isolated group
+   * (`isolate: { compaction: true }`), so asking this plugin's own host-level
+   * context finds nothing — that is exactly the 「没有挂载上下文压缩服务」 a
+   * member saw. `agentPresets.serviceFor` is the documented way to read a
+   * service out of an agent's own composition; `agent.ctx.get` reaches the
+   * same store, and the host level stays as the last fallback for compositions
+   * that keep the row on the host plane (`dsh-sdk-minimal`) .
+   */
+  function compactionFor(agent: AgentRef): CompactionService | undefined {
+    const candidates: unknown[] = [];
+    const presets = options.ctx.get?.('agentPresets') as
+      | { serviceFor?(agent: AgentRef, name: string): unknown }
+      | undefined;
+    if (typeof presets?.serviceFor === 'function') {
+      try { candidates.push(presets.serviceFor(agent, 'compaction')); } catch { /* a preset without the row answers nothing */ }
+    }
+    try { candidates.push(agent.ctx?.get?.('compaction')); } catch { /* never visible from this scope */ }
+    try { candidates.push(options.ctx.get?.('compaction')); } catch { /* the host-plane row may be disabled */ }
+    return candidates.find((candidate): candidate is CompactionService =>
+      Boolean(candidate) && typeof (candidate as CompactionService).compactNow === 'function');
+  }
 
   function registry(): { archiveSession(id: string, options?: { stopActivity?: boolean }): Promise<void> } | undefined {
     const found = options.ctx.get?.('workspaceRegistry') as
@@ -106,10 +138,10 @@ export function createSessionOperations(options: SessionOperationsOptions): Sess
       journal.write({ event: 'dsh.session.archive', sessionId });
     },
     async compact(sessionId) {
-      const compaction = options.ctx.get?.('compaction') as CompactionService | undefined;
-      if (!compaction?.compactNow) throw new Error('当前 DSH 没有挂载上下文压缩服务。');
       const agent = await agentFor(sessionId);
       if (!agent) throw new Error('无法恢复这个会话。');
+      const compaction = compactionFor(agent);
+      if (!compaction) throw new Error('这个会话所在的 preset 没有挂载上下文压缩服务，无法压缩它的上下文。');
       let result: CompactionResult | null;
       try {
         result = await compaction.compactNow(agent, AbortSignal.timeout(120_000));
@@ -134,6 +166,7 @@ export function createSessionOperations(options: SessionOperationsOptions): Sess
           ...(preset ? { agentPreset: preset } : {}),
         });
         options.catalogs?.invalidate();
+        if (request.title) options.titles?.name(created.sessionId, request.title);
         journal.write({
           event: 'dsh.session.create', sessionId: created.sessionId,
           workspace: workspace.path, workspaceId: workspace.id, preset: preset || null, source: 'wecom-admin',

@@ -4,10 +4,10 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { AdminView, BridgeStateView, WorkspaceOption } from '../../shared/protocol.ts';
 import { useConfigSave } from '../hooks.ts';
-import { changedOperations, displayPath, personKey, scopeIncludes, setLabel, toggle, toggleScope } from '../model.ts';
+import { displayPath, personKey, scopeIncludes, setLabel, toggle, toggleScope } from '../model.ts';
 import { useRoutingApply } from '../hooks.ts';
 import type { ConfigFormScope, StoredConfig } from '../types.ts';
-import { Card, CheckRow, Collapse, Empty, Fact, PersonDialog, PersonRow, SaveBar } from './ui.tsx';
+import { Card, CheckRow, Collapse, Empty, Fact, PersonDialog, PersonRow } from './ui.tsx';
 
 /**
  * Step 4: administrators. This is the one place that grants the power to leave
@@ -16,9 +16,12 @@ import { Card, CheckRow, Collapse, Empty, Fact, PersonDialog, PersonRow, SaveBar
  * recipients of tool-call approvals.
  *
  * Administrators are also always allowed to message the Bot, so a fresh install
- * is never locked out of its own Bot. The list is Config, so this card saves
- * itself — its 保存 writes only this section. A person's 备注 is routing state
- * and applies immediately, exactly like a group member's.
+ * is never locked out of its own Bot. The list and the notification scope are
+ * Config, and a Config write rebuilds the bridge and reconnects the socket — but
+ * adding, removing or re-scoping an administrator is a decision the operator has
+ * already made by clicking, so this card writes on every edit and has no 保存
+ * button at all. A person's 备注 is routing state and applies immediately,
+ * exactly like a group member's.
  */
 export function AdminCard({ scope, base, state, disabled, onChanged }: {
   scope: ConfigFormScope;
@@ -39,12 +42,25 @@ export function AdminCard({ scope, base, state, disabled, onChanged }: {
   const admins = state?.admins ?? [];
   const workspaces = state?.workspaces ?? [];
   const all = draft.adminWorkspaces.length === 0;
+  const busy = disabled || save.saving;
 
   useEffect(() => {
     setDraft({ adminUserIds: [...base.adminUserIds], adminWorkspaces: [...base.adminWorkspaces] });
   }, [base]);
 
-  const dirty = changedOperations({ ...base, ...draft }, base).length > 0;
+  /**
+   * Write one edit now. The draft follows the click immediately — a checkbox
+   * must not lag behind the pointer — and rebases on the stored revision when
+   * the write fails, so the card never shows a change that was not saved.
+   */
+  const apply = async (patch: Partial<{ adminUserIds: string[]; adminWorkspaces: string[] }>): Promise<void> => {
+    const next = { ...draft, ...patch };
+    setDraft(next);
+    if (!(await save.save(next))) {
+      setDraft({ adminUserIds: [...base.adminUserIds], adminWorkspaces: [...base.adminWorkspaces] });
+    }
+  };
+
   const known = new Map(admins.map(admin => [admin.id, admin]));
 
   /** People the operator already knows about, best name first. */
@@ -79,7 +95,7 @@ export function AdminCard({ scope, base, state, disabled, onChanged }: {
   const typed = query.trim();
 
   const addAdmin = (id: string): void => {
-    setDraft(current => ({ ...current, adminUserIds: toggle(current.adminUserIds, id, true) }));
+    void apply({ adminUserIds: toggle(draft.adminUserIds, id, true) });
     setQuery('');
     setPicking(false);
   };
@@ -88,11 +104,11 @@ export function AdminCard({ scope, base, state, disabled, onChanged }: {
     <Card
       step={4}
       title="管理员"
-      description="只有这里列出的 userid 可以切换会话（/sessions、/use、/new、/workspaces）、在单聊里审批工具调用，并按下面的范围接收通知。其它用户永远只能访问自己专属的会话。"
+      description="只有这里列出的 userid 可以切换会话（/sessions、/use、/new、/workspaces）、在单聊里审批工具调用，并按下面的范围接收通知。其它用户永远只能访问自己专属的会话。改动即时生效。"
       aside={<>
         {draft.adminUserIds.length > 0 && <Tag tone="success">{draft.adminUserIds.length} 人</Tag>}
         <Button
-          variant="outline" size="sm" icon={<IconPlusOutlineRegular />} disabled={disabled}
+          variant="outline" size="sm" icon={<IconPlusOutlineRegular />} disabled={busy}
           aria-label="添加管理员" onClick={() => setPicking(true)}
         >
           添加
@@ -104,6 +120,11 @@ export function AdminCard({ scope, base, state, disabled, onChanged }: {
           <div><div className="wcb-banner-body">{routing.error}</div></div>
         </div>
       )}
+      {save.error && (
+        <div className="wcb-banner" data-tone="danger" role="status">
+          <div><div className="wcb-banner-body">{save.error}</div></div>
+        </div>
+      )}
 
       <div className="wcb-panel">
         {draft.adminUserIds.length === 0 ? (
@@ -111,7 +132,7 @@ export function AdminCard({ scope, base, state, disabled, onChanged }: {
             <Empty>
               还没有管理员：没有人可以切换会话、审批工具调用或接收他人会话的通知。
               <div style={{ marginTop: 10 }}>
-                <Button variant="outline" size="sm" icon={<IconPlusOutlineRegular />} disabled={disabled} onClick={() => setPicking(true)}>
+                <Button variant="outline" size="sm" icon={<IconPlusOutlineRegular />} disabled={busy} onClick={() => setPicking(true)}>
                   添加管理员
                 </Button>
               </div>
@@ -125,9 +146,9 @@ export function AdminCard({ scope, base, state, disabled, onChanged }: {
                 id={id}
                 label={known.get(id)?.label ?? ''}
                 groupName={known.get(id)?.groupName}
-                disabled={disabled || routing.busy === personKey('user', id)}
+                disabled={busy || routing.busy === personKey('user', id)}
                 onNote={next => { void routing.apply(personKey('user', id), [setLabel(personKey('user', id), next)]); }}
-                onRemove={() => setDraft(current => ({ ...current, adminUserIds: toggle(current.adminUserIds, id, false) }))}
+                onRemove={() => { void apply({ adminUserIds: toggle(draft.adminUserIds, id, false) }); }}
               />
             ))}
           </div>
@@ -141,7 +162,7 @@ export function AdminCard({ scope, base, state, disabled, onChanged }: {
           title={<><IconShieldOutlineRegular size={15} /> 可接收通知的 Workspace</>}
           summary={all ? '全部 Workspace' : `${draft.adminWorkspaces.length} / ${workspaces.length || draft.adminWorkspaces.length} 个 Workspace`}
           actions={all ? undefined : (
-            <Button variant="ghost" size="sm" disabled={disabled} onClick={() => setDraft(current => ({ ...current, adminWorkspaces: [] }))}>
+            <Button variant="ghost" size="sm" disabled={busy} onClick={() => { void apply({ adminWorkspaces: [] }); }}>
               全选
             </Button>
           )}
@@ -156,11 +177,12 @@ export function AdminCard({ scope, base, state, disabled, onChanged }: {
                     key={workspace.path}
                     checked={scopeIncludes(draft.adminWorkspaces, workspace.path)}
                     label={`管理员接收 ${workspace.title} 的通知`}
-                    disabled={disabled}
-                    onToggle={on => setDraft(current => ({
-                      ...current,
-                      adminWorkspaces: toggleScope(current.adminWorkspaces, workspaces.map(item => item.path), workspace.path, on),
-                    }))}
+                    disabled={busy}
+                    onToggle={on => {
+                      void apply({
+                        adminWorkspaces: toggleScope(draft.adminWorkspaces, workspaces.map(item => item.path), workspace.path, on),
+                      });
+                    }}
                     meta={<span className="wcb-row-meta">{workspace.sessionCount ? `${workspace.sessionCount} 个会话` : '暂无会话'}</span>}
                   >
                     <span className="wcb-row-title">{workspace.title}</span>
@@ -173,23 +195,13 @@ export function AdminCard({ scope, base, state, disabled, onChanged }: {
                   {all
                     ? '未限定（全部勾选）：管理员会收到所有这些 Workspace 中会话的通知。取消勾选任意一项即改为只收勾选的 Workspace。'
                     : '管理员只接收已勾选 Workspace 中会话的通知（外加他们自己绑定的会话）。'}
-                  {' '}只有归档会话的 Workspace 也会列出。
+                  {' '}只有归档会话的 Workspace 也会列出。勾选即生效。
                 </span>
               </div>
             </div>
           )}
         </Collapse>
       </div>
-
-      <SaveBar
-        dirty={dirty}
-        saving={save.saving}
-        saved={save.saved}
-        error={save.error}
-        disabled={disabled}
-        onSave={() => { void save.save(draft); }}
-        onDiscard={() => setDraft({ adminUserIds: [...base.adminUserIds], adminWorkspaces: [...base.adminWorkspaces] })}
-      />
 
       <Modal
         open={picking} onClose={() => setPicking(false)} title="添加管理员" closeLabel="关闭"
@@ -223,7 +235,7 @@ export function AdminCard({ scope, base, state, disabled, onChanged }: {
           </div>
         )}
         <div className="wcb-hint">
-          名单来自未授权用户和已授权成员，优先显示备注名；没有备注时显示企微 userid。改动在点「保存」后生效。
+          名单来自未授权用户和已授权成员，优先显示备注名；没有备注时显示企微 userid。选中即生效。
         </div>
       </Modal>
     </Card>
@@ -274,10 +286,10 @@ function AdminRow({ id, label, groupName, disabled, onNote, onRemove }: {
         )}
       >
         <div className="wcb-person-facts">
-          <Fact name="授权来源">插件设置里的管理员列表（点本卡片的「保存」后生效）</Fact>
+          <Fact name="授权来源">插件设置里的管理员列表（改动即时生效）</Fact>
           <Fact name="所属分组">{groupName ?? '不在任何分组'}</Fact>
         </div>
-        <div className="wcb-hint">备注即时生效；加入或移出管理员名单需要点「保存」。</div>
+        <div className="wcb-hint">备注与管理员名单都即时生效。</div>
       </PersonDialog>
     </div>
   );

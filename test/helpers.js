@@ -120,8 +120,18 @@ export function fakeWorkspaceRegistry(workspaces = [], archived = [], pinned = [
  * captured listeners. `sessions` rows follow sessionController.list; created
  * Sessions are appended (and attached to their Workspace) so the catalog sees
  * them exactly like the real registry would.
+ *
+ * `compactScope` mirrors where DSH actually mounts the compaction backend:
+ * `'preset'` (the default, and what the web-app composition does) isolates it
+ * inside the agent preset, so the host-level `ctx.get('compaction')` fails and
+ * only `agentPresets.serviceFor(agent, 'compaction')` / `agent.ctx.get(...)`
+ * reach it; `'host'` keeps the older host-plane layout, and `'none'` mounts no
+ * backend at all. `sessionTitle: false` omits DSH's title service.
  */
-export function fakeHost({ sessions, workspaces, archived = [], pinned = [], defaultModel, compactResult, compactError } = {}) {
+export function fakeHost({
+  sessions, workspaces, archived = [], pinned = [], defaultModel, compactResult, compactError,
+  compactScope = 'preset', sessionTitle = true,
+} = {}) {
   const handlers = new Map();
   const prompts = [];
   const cancels = [];
@@ -131,6 +141,7 @@ export function fakeHost({ sessions, workspaces, archived = [], pinned = [], def
   const defaultSaves = [];
   const compactions = [];
   const agentResolutions = [];
+  const renames = [];
   const liveAgents = new Map();
   const compacted = compactResult === undefined
     ? { compactionId: 'c1', summarySeq: 30, shadowedSeqs: [1, 2, 3], shadowedTokenCount: 1234 }
@@ -145,23 +156,45 @@ export function fakeHost({ sessions, workspaces, archived = [], pinned = [], def
     currentSelection: () => ({ ...currentDefault }),
     async saveSelection(next) { defaultSaves.push({ ...next }); currentDefault = { ...next }; },
   };
+  const compactionService = {
+    async compactNow(agent, signal) {
+      compactions.push({ agent, aborted: signal.aborted });
+      if (compactError) throw compactError;
+      return compacted;
+    },
+  };
+  const titleService = {
+    rename(session, title) { renames.push({ sessionId: session.id, title }); return { title }; },
+  };
+  // Every Session this fake creates is live, exactly like the real store's.
+  const liveSessions = new Map();
+  const sessionStore = { get: id => liveSessions.get(id) };
+  // The Agent's own context: in the real composition this is where a
+  // preset-owned and isolated `compaction` lives.
+  const agentCtx = {
+    get: name => (name === 'compaction' && compactScope !== 'none' ? compactionService : ctx.get(name)),
+  };
   const ctx = {
     handlers, prompts, cancels, listCalls, creates, selections, defaultSaves, compactions,
-    agentResolutions, liveAgents, rows, registry, defaultModelService,
+    agentResolutions, renames, liveAgents, liveSessions, rows, registry, defaultModelService,
     on(name, fn) { handlers.set(name, fn); return () => { if (handlers.get(name) === fn) handlers.delete(name); }; },
     get(name) {
       if (name === 'workspaceRegistry') return registry;
       if (name === 'agentDefaultModel') return defaultModelService;
       if (name === 'agents') return { get: id => liveAgents.get(id) };
-      if (name === 'compaction') {
+      if (name === 'sessions') return sessionStore;
+      if (name === 'sessionTitle') return sessionTitle === false ? undefined : titleService;
+      if (name === 'agentPresets') {
+        // The real registry reads a service out of the agent's mounted preset.
         return {
-          async compactNow(agent, signal) {
-            compactions.push({ agent, aborted: signal.aborted });
-            if (compactError) throw compactError;
-            return compacted;
+          serviceFor(agent, serviceName) {
+            return serviceName === 'compaction' && compactScope === 'preset' ? agent.ctx?.get?.(serviceName) : undefined;
           },
+          async list() { return []; },
+          async resolve() { return { id: 'standard' }; },
         };
       }
+      if (name === 'compaction') return compactScope === 'host' ? compactionService : undefined;
       return undefined;
     },
     sessionController: {
@@ -180,6 +213,8 @@ export function fakeHost({ sessions, workspaces, archived = [], pinned = [], def
         const sessionId = `session-created-${creates.length}`;
         rows.push({ sessionId, updatedAt: Date.now(), running: false, blank: true, cwd, projections: { values: { title: null } } });
         if (workspace) workspace.sessionIds.push(sessionId);
+        // Created Sessions are live in the store, as DSH's own create leaves them.
+        liveSessions.set(sessionId, { id: sessionId });
         return { sessionId };
       },
       async selectModel(request) {
@@ -199,7 +234,9 @@ export function fakeHost({ sessions, workspaces, archived = [], pinned = [], def
       async modelCatalog() { return fakeModelCatalog; },
       async resolveAgent(sessionId) {
         agentResolutions.push(sessionId);
-        const agent = { id: sessionId, session: { id: sessionId } };
+        // The Agent carries its own context: a preset-owned service (compaction)
+        // is reachable only through it.
+        const agent = { id: sessionId, session: { id: sessionId }, ctx: agentCtx };
         liveAgents.set(sessionId, agent);
         return { agent };
       },

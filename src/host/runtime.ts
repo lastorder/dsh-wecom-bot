@@ -19,6 +19,7 @@ import { createRoundTracker, type RoundTracker } from './rounds.js';
 import { createRouter, type Router } from './routing.js';
 import { createSessionOperations, type SessionOperations } from './session-ops.js';
 import { createSessionProvisioner, type SessionProvisioner } from './sessions.js';
+import { createSessionTitler } from './session-title.js';
 import { createStatusTracker, type StatusTracker } from './status.js';
 import { summarizeTurn, type TurnSummary } from './turns.js';
 import { createWorkspaceService, pluginWorkspacePath } from './workspaces.js';
@@ -111,7 +112,8 @@ export function createRuntime(options: RuntimeOptions): Runtime {
   const presets: PresetService = createPresetService({
     registry: () => ctx.get?.('agentPresets') as AgentPresetRegistry | undefined,
   });
-  const sessionOps: SessionOperations = createSessionOperations({ ctx, workspaces, catalogs, journal });
+  const titles = createSessionTitler({ ctx, journal });
+  const sessionOps: SessionOperations = createSessionOperations({ ctx, workspaces, catalogs, titles, journal });
   const provisioner: SessionProvisioner = createSessionProvisioner({
     sessionController: ctx.sessionController,
     models,
@@ -119,6 +121,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     catalogs,
     bindings: store,
     bindingKey: binding => `${binding.kind}:${binding.id}`,
+    titles,
     journal,
     log,
   });

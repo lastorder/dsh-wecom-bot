@@ -9,11 +9,13 @@ import { formatContext, shortId } from './format.js';
 import type { InboundMessage } from './inbound.js';
 import { parseAnswer, type InteractionRegistry } from './interactions.js';
 import {
-  adminOnlyText, adminPrivateOnlyText, code, compactedText, deleteWarningText, deletedText, field, HELP_TEXT, inline,
+  adminOnlyText, adminPrivateOnlyText, code, compactedText, deleteWarningText, deletedText, field,
+  groupSessionRefusalText, HELP_TEXT, inline,
   newSessionText, noWorkspaceText, nothingToCompactText, sessionLabel, sessionListText, sessionRef,
   title, workspaceListText,
 } from './notices.js';
 import type { AccessPolicy } from './policy.js';
+import { sessionTitleFor } from '../session-title.js';
 import type { SelectionStore } from './selection.js';
 
 /** Slash commands sent from WeCom. Every handler answers with one passive reply. */
@@ -144,9 +146,12 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
   }
   // Commands that touch this conversation's Session (compact, delete) are open
   // to everybody in a private chat; in a group chat that Session is shared, so
-  // they need an administrator.
+  // they need an administrator — and the refusal says *that*, because a member
+  // in a group is usually after their own Session, not the group's.
   const allowed = (): boolean => isAdmin || message.chatType === 'single';
-  const deny = async (): Promise<void> => { await reply(adminOnlyText()); };
+  const deny = async (): Promise<void> => {
+    await reply(message.chatType === 'group' ? groupSessionRefusalText(command.name) : adminOnlyText());
+  };
 
   switch (command.name) {
     case 'help':
@@ -224,7 +229,9 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
       if (!isAdmin) { await deny(); return; }
       const path = preferredWorkspace(services, message.user);
       try {
-        const created = await services.ops.create({ workspace: path });
+        // `/new` only runs in a single chat (a group is refused above), so the
+        // administrator's own userid is the principal the Session belongs to.
+        const created = await services.ops.create({ workspace: path, title: sessionTitleFor(message.user) });
         if (!current()) return;
         selection.set(message.chat, message.user, created.sessionId);
         const label = await workspaceTitle(services, path);

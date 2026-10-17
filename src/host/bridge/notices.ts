@@ -131,6 +131,25 @@ export function adminPrivateOnlyText(): string {
   ].join('\n');
 }
 
+/**
+ * A member asking a group chat to compact or archive its Session.
+ *
+ * This is not the same refusal as {@link adminOnlyText}: the problem is not the
+ * sender's rank but the Session itself, which everybody in the group shares.
+ * The reply therefore names the real obstacle and points at the private chat,
+ * where the person's own Session — the one they probably meant — lives.
+ */
+export function groupSessionRefusalText(command: string): string {
+  const deleting = command === 'delete';
+  const action = deleting ? '归档' : '压缩';
+  return [
+    title('🔒', `群聊的会话记录只有管理员可以${action}`),
+    '',
+    `这个群聊里的会话记录是所有人共用的，只有插件配置里列出的管理员才有权限${action}它。`,
+    `> 如果你想${deleting ? '清空' : action}的是自己的专属会话，请在与机器人的单聊里发送 ${code(`/${command}`)}。`,
+  ].join('\n');
+}
+
 /** A sender that is in no group: the Bot answers instead of staying silent. */
 export function unauthorizedText(): string {
   return [
