@@ -99,8 +99,17 @@ interface StoredFile {
   readonly groups?: unknown;
   readonly bindings?: unknown;
   readonly labels?: unknown;
-  /** Per-administrator default Workspace, keyed by userid. */
+  /** Per-administrator preferences, keyed by userid; see {@link AdminDefaults}. */
   readonly adminDefaults?: unknown;
+}
+
+/**
+ * One administrator's preferences. An object rather than a bare path so a
+ * second preference can join `workspace` later without changing the file
+ * shape again.
+ */
+export interface AdminDefaults {
+  readonly workspace: string;
 }
 
 /** `user:<userid>` for private chats, `group:<chatid>` for groups. */
@@ -134,6 +143,16 @@ export function normalizeLabel(value: unknown): string {
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+/**
+ * The Workspace stored in one `adminDefaults` entry. Only the object form is
+ * read: this layout was never released any other way, and a bare string is
+ * exactly the shape a future reader would have to guess about.
+ */
+function adminDefaultsWorkspace(value: unknown): string {
+  if (!value || typeof value !== 'object') return '';
+  return text((value as Record<string, unknown>).workspace);
 }
 
 function stamp(value: unknown): number {
@@ -231,12 +250,15 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
       defaultGroup();
       return;
     }
-    const version = Number(parsed.version);
+    const version = typeof parsed.version === 'number' || typeof parsed.version === 'string'
+      ? String(parsed.version)
+      : '';
     if (version !== ROUTING_VERSION || !Array.isArray(parsed.bindings)) {
       // Every earlier layout is gone by design (there is no deployment on one),
       // so this is a read error, not something to migrate.
-      report(new Error(`routing file version ${String(parsed.version)} is not ${ROUTING_VERSION}`), 'version');
-      await setAside(`v${Number.isFinite(version) ? version : 'unknown'}`);
+      report(new Error(`routing file version ${version || '(missing)'} is not ${ROUTING_VERSION}`), 'version');
+      // The version is untrusted file content: never let it choose a path.
+      await setAside(`v${version.replace(/[^0-9A-Za-z.-]/g, '_').slice(0, 24) || 'unknown'}`);
       defaultGroup();
       return;
     }
@@ -254,7 +276,7 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
       labels.set(key, note);
     }
     for (const [user, value] of Object.entries((parsed.adminDefaults ?? {}) as Record<string, unknown>)) {
-      const path = text(value);
+      const path = adminDefaultsWorkspace(value);
       if (path && validBindingId(user)) adminWorkspaces.set(user, path);
     }
     for (const entry of parsed.bindings) {
@@ -275,7 +297,9 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
       groups: [...groups.values()],
       bindings: [...bindings.values()],
       labels: Object.fromEntries(labels),
-      adminDefaults: Object.fromEntries(adminWorkspaces),
+      adminDefaults: Object.fromEntries(
+        [...adminWorkspaces].map(([user, workspace]): [string, AdminDefaults] => [user, { workspace }]),
+      ),
     }, undefined, 2);
     chain = chain.then(async () => {
       const temporary = `${file}.${process.pid}.tmp`;

@@ -21,12 +21,13 @@ export const PLUGIN_WORKSPACE_DIRECTORY = 'workspace';
 /** Sidebar title of the plugin's own Workspace. */
 export const PLUGIN_WORKSPACE_TITLE = '企业微信';
 /**
- * Persisted groups+bindings file version (5 = groups own Workspace, model and
- * preset; notes live on the person; an administrator keeps the Workspace their
- * operator commands default to). A file of any other version is set aside
- * instead of migrated — there is no earlier deployment to keep working.
+ * Persisted groups+bindings file version. The layout is named after the release
+ * line it belongs to (`0.4`) instead of counting every edit, so the number in
+ * `bindings.json` only moves when a new minor line changes the layout. A file of
+ * any other version is set aside instead of migrated — there is no earlier
+ * deployment to keep working.
  */
-export const ROUTING_VERSION = 5;
+export const ROUTING_VERSION = '0.4';
 /** Upper bound on persisted members across all groups. */
 export const MAX_BINDINGS = 500;
 /** Upper bound on user groups. */
@@ -384,7 +385,7 @@ export interface RoutingResponse {
 }
 
 export interface BridgeStateView {
-  readonly version: 5;
+  readonly version: typeof ROUTING_VERSION;
   readonly connection: ConnectionStatus;
   readonly traffic: TrafficStats;
   /** Senders refused since Host start, newest first. */

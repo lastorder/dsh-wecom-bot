@@ -3,8 +3,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   changedOperations, choiceLabel, contextLabel, displayPath, dshDefaultLabel, effortLabel,
-  effortsFor, formatTokens, groupModelLabel, modelKey, modelLabel, modelName, parseModelKey, personKey,
-  presetLabel, presetName, relativeTime, scopeIncludes, setLabel, storedFrom, toggle, toggleScope,
+  effortsFor, formatTokens, groupModelSummary, modelKey, modelLabel, modelName, parseModelKey, personKey,
+  presetLabel, presetName, presetSummaryLabel, relativeTime, scopeIncludes, setLabel, storedFrom, toggle, toggleScope,
   updateMember, validateAdvanced, validateCredentials,
 } from '../src/client/model.ts';
 
@@ -76,9 +76,10 @@ const MEMBER = {
   messages: 2, lastSeenAt: 5, createdAt: 1,
 };
 
-test('a group label falls back to the DSH default, and a member to its WeCom id', () => {
-  assert.equal(groupModelLabel(CATALOG, GROUP), 'Reasoner（r）');
-  assert.equal(groupModelLabel(CATALOG, { ...GROUP, effectiveProvider: '', effectiveModel: '' }), '跟随 DSH 默认模型（Model）');
+test('a group summary names the model it runs, and a member falls back to its WeCom id', () => {
+  assert.equal(groupModelSummary(CATALOG, GROUP), 'Reasoner', 'the name alone fits the one-line overview');
+  assert.equal(groupModelSummary(CATALOG, { ...GROUP, effectiveProvider: '', effectiveModel: '' }), 'Model（DSH 默认）');
+  assert.equal(groupModelSummary(null, { ...GROUP, effectiveProvider: '', effectiveModel: '' }), 'DSH 默认');
   assert.equal(personKey('user', 'alice'), 'user:alice');
   assert.deepEqual(setLabel('user:alice', '爱丽丝'), { op: 'label.set', key: 'user:alice', label: '爱丽丝' });
   assert.deepEqual(updateMember('user:alice', { groupId: 'g1' }), {
@@ -104,6 +105,14 @@ test('presets are named by their published name, the shipped one, or the id', ()
   assert.equal(presetLabel(PRESETS, ''), '跟随 DSH 默认（标准）');
   assert.equal(presetLabel(null, ''), '跟随 DSH 默认');
   assert.equal(presetLabel({ presets: [], fetchedAt: 1 }, ''), '跟随 DSH 默认');
+});
+
+test('a summary names the preset a group actually runs, marking the DSH default', () => {
+  assert.equal(presetSummaryLabel(PRESETS, 'ptc'), 'PTC 模式');
+  assert.equal(presetSummaryLabel(PRESETS, ''), '标准（DSH 默认）', 'the fallback is named, not spelled out');
+  assert.equal(presetSummaryLabel(PRESETS, 'gone'), 'gone');
+  assert.equal(presetSummaryLabel(null, ''), 'DSH 默认');
+  assert.equal(presetSummaryLabel({ presets: [], fetchedAt: 1 }, ''), 'DSH 默认');
 });
 
 test('an effort is named from the catalog, and context occupancy is compact', () => {

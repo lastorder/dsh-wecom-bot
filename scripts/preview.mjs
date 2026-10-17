@@ -26,7 +26,7 @@ const now = Date.now();
 const REPO = '/Users/me/Workspace/learn/dsh-wecom-bot';
 const PLUGIN_WS = '/Users/me/.dsh/wecom-bot/workspace';
 const state = {
-  version: 5,
+  version: '0.4',
   connection: empty ? { phase: 'unconfigured', since: now - 30_000, detail: '缺少 Bot ID' } : { phase: 'online', since: now - 25 * 60_000 },
   traffic: empty ? { since: now, received: 0, rejected: 0, prompts: 0, notifications: 0, failures: 0 }
     : { since: now - 3_600_000, received: 21, rejected: 2, prompts: 9, notifications: 11, failures: 0, lastMessageAt: now - 90_000 },

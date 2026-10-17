@@ -22,8 +22,8 @@ import { createSessionProvisioner, type SessionProvisioner } from './sessions.js
 import { createStatusTracker, type StatusTracker } from './status.js';
 import { summarizeTurn, type TurnSummary } from './turns.js';
 import { createWorkspaceService, pluginWorkspacePath } from './workspaces.js';
-import type {
-  BridgeStateView, ModelCatalogView, PresetCatalogView, RoutingOp, RoutingView,
+import {
+  ROUTING_VERSION, type BridgeStateView, type ModelCatalogView, type PresetCatalogView, type RoutingOp, type RoutingView,
 } from '../shared/protocol.js';
 
 /**
@@ -368,7 +368,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       }
       if (routing?.full) notices.push('成员数量已达上限，新成员不会被记录；请在下方清理。');
       return {
-        version: 5,
+        version: ROUTING_VERSION,
         connection: status.connection(),
         traffic: status.traffic(),
         rejected: observations.rejected(key => Boolean(store.get(key))).map(row => {

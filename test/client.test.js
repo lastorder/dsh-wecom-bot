@@ -33,7 +33,7 @@ const primitives = new Proxy({
 }, { get: (target, key) => target[key] ?? (() => null) });
 
 const STATE = {
-  version: 4,
+  version: '0.4',
   connection: { phase: 'online', since: Date.now() - 60_000 },
   traffic: { since: 0, received: 3, rejected: 1, prompts: 1, notifications: 2, failures: 0 },
   rejected: [{
@@ -231,7 +231,7 @@ test('the page shows five cards and keeps every group collapsed until it is clic
   // Summaries are visible while collapsed; the editors are not.
   assert.ok(all.includes('默认分组'));
   assert.ok(all.includes('朋友'));
-  assert.ok(all.includes('1 位成员 · 企业微信'));
+  assert.ok(all.includes('1 位成员'));
   assert.equal(queryByLabel(root, '默认分组 的名称'), undefined);
   assert.equal(queryByLabel(root, 'alice 的备注'), undefined);
 
@@ -256,6 +256,30 @@ test('the page shows five cards and keeps every group collapsed until it is clic
   assert.ok(byLabel(root, 'alice 的备注'));
   assert.ok(byLabel(root, '把 alice 移动到分组'));
   assert.ok(text(renderer.toJSON()).includes('企微 ID'), 'the row only showed the note; the id lives in the details');
+  renderer.unmount();
+});
+
+test('a collapsed group names its Workspace, model, effort and preset', async () => {
+  const harness = mount();
+  const renderer = await render(harness);
+  const summaries = renderer.root
+    .findAll(node => node.props?.className === 'wcb-group-summary' && text(node).includes('位成员'))
+    .map(text);
+  assert.equal(summaries.length, 2, 'one overview per group');
+  const [following, set] = summaries;
+
+  // The default group follows DSH; the overview names what that resolves to.
+  assert.match(following, /^1 位成员/);
+  assert.ok(following.includes('Workspace企业微信'));
+  assert.ok(following.includes('模型DeepSeek Chat（DSH 默认）'));
+  assert.ok(following.includes('effort默认'), 'an unset effort says so instead of disappearing');
+  assert.ok(following.includes('preset标准（DSH 默认）'));
+
+  // A group that sets them shows the values it sets, each under its own name.
+  assert.ok(set.includes('Workspacedsh-wecom-bot'));
+  assert.ok(set.includes('模型DeepSeek Reasoner'));
+  assert.ok(set.includes('effort高'));
+  assert.ok(set.includes('presetPTC'));
   renderer.unmount();
 });
 
@@ -437,8 +461,9 @@ test('the effort of a group is adjustable next to its model, and reported in the
   const harness = mount({ stored: { botId: 'bot' }, state });
   const renderer = await render(harness);
   const root = renderer.root;
-  assert.ok(text(renderer.toJSON()).includes('Reasoner（deepseek-reasoner） · 低'),
-    'the collapsed summary shows the model and its effort');
+  const overview = text(renderer.toJSON());
+  assert.ok(overview.includes('模型DeepSeek Reasoner'), 'the collapsed summary names the model');
+  assert.ok(overview.includes('effort低'), 'and the effort it runs with');
 
   await act(async () => { buttonByLabel(root, '编辑 默认分组').props.onClick(); });
   await act(async () => { byLabel(root, '默认分组 的 effort').props.onChange({ target: { value: 'high' } }); });

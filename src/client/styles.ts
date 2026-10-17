@@ -150,7 +150,12 @@ export const STYLES = /* css */ `
 .wcb-group[data-open] .wcb-chevron { transform: rotate(90deg); }
 .wcb-group-icon { flex: none; color: var(--wcb-text-2); }
 .wcb-group-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 6px; }
-.wcb-group-summary { flex: 1; min-width: 0; color: var(--wcb-text-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: right; }
+/* The group overview: labelled facts that wrap instead of hiding behind an ellipsis. */
+.wcb-group-summary {
+  flex: 1; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end;
+  gap: 2px 10px; color: var(--wcb-text-3); font-size: 12px; text-align: right;
+}
+.wcb-group-summary .wcb-fact-inline { white-space: nowrap; }
 .wcb-row {
   display: flex; align-items: center; gap: 12px;
   padding: 9px 12px; border-top: .5px solid var(--wcb-line); cursor: pointer;

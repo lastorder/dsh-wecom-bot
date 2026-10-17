@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { byteLength, extractSessionPointer, MAX_NOTICE_BYTES, MAX_REPLY_BYTES } from '../dist/host/bridge/format.js';
 import {
-  adminOnlyText, approvalNotice, authorizedNotice, compactedText, deleteWarningText, deletedText,
+  adminOnlyText, adminPrivateOnlyText, approvalNotice, authorizedNotice, compactedText, deleteWarningText, deletedText,
   HELP_TEXT, newSessionText, nothingToCompactText, promptFailedNotice, questionNotice, quotePointer,
   reviewNotice, sessionListText, turnCompleteNotice, unauthorizedText, workspaceListText,
 } from '../dist/host/bridge/notices.js';
@@ -33,6 +33,7 @@ test('every template fits the reply budget', () => {
   const texts = [
     HELP_TEXT,
     adminOnlyText(),
+    adminPrivateOnlyText(),
     unauthorizedText(),
     authorizedNotice('默认分组'),
     deleteWarningText('修复登录 Bug', 'session-9f3a1c7b2d4e'),
@@ -79,7 +80,7 @@ test('a hint is the only /use occurrence the quote parser can pick up', () => {
   const listing = sessionListText(groups, undefined);
   assert.deepEqual(listing.listing, ['session-9f3a1c7b2d4e', 'session-77aa88bb99cc']);
   assert.equal(extractSessionPointer(listing.text), undefined);
-  for (const text of [HELP_TEXT, adminOnlyText(), unauthorizedText(), authorizedNotice('默认分组')]) {
+  for (const text of [HELP_TEXT, adminOnlyText(), adminPrivateOnlyText(), unauthorizedText(), authorizedNotice('默认分组')]) {
     assert.equal(extractSessionPointer(text), undefined);
   }
   // A member's /sessions footer and every refusal name `序号`, never `/use <word>`.
@@ -138,6 +139,15 @@ test('/compact reports what it folded, and says when there was nothing', () => {
   assert.match(compactedText(3, 1234), /3 条历史/);
   assert.match(compactedText(3, 1234), /1234 tokens/);
   assert.match(nothingToCompactText(), /没有可压缩的历史/);
+});
+
+test('an administrator command sent in a group says why it is refused there', () => {
+  assert.match(adminPrivateOnlyText(), /\*\*🔒 管理员命令只能在单聊中使用\*\*/);
+  assert.match(adminPrivateOnlyText(), /群聊里的会话是所有人共用的/);
+  assert.match(adminPrivateOnlyText(), /请在与机器人的单聊里发送/);
+  assert.match(adminOnlyText(), /只有插件配置里列出的管理员可以使用/);
+  // /help says the same thing up front, instead of letting the reader find out.
+  assert.match(HELP_TEXT, /只能在单聊里发送/);
 });
 
 test('/workspaces numbers every Workspace and marks the chosen one', () => {

@@ -6,8 +6,8 @@ import type { BridgeStateView, GroupMemberView, GroupView, RoutingOp, WorkspaceO
 import { useRoutingApply } from '../hooks.ts';
 import {
   BINDING_KIND_LABEL, SESSION_STATE_LABEL, addGroup, archiveMember, choiceLabel, contextLabel, deleteGroup,
-  displayPath, dshDefaultLabel, effortLabel, effortsFor, groupModelLabel, modelKey, modelLabel, modelName, parseModelKey,
-  presetLabel, presetName, relativeTime, removeMember, setLabel, updateGroup, updateMember,
+  displayPath, dshDefaultLabel, effortLabel, effortsFor, groupModelSummary, modelKey, modelLabel, modelName, parseModelKey,
+  presetLabel, presetName, presetSummaryLabel, relativeTime, removeMember, setLabel, updateGroup, updateMember,
 } from '../model.ts';
 import { Card, Collapse, ConfirmDialog, CountTag, Empty, Fact, PersonAvatar, PersonDialog, Select } from './ui.tsx';
 
@@ -145,10 +145,23 @@ function GroupPanel({ group, state, startEditing, disabled, onApply }: {
   const presets = state?.presets;
   const workspaces: readonly WorkspaceOption[] = state?.workspaces ?? [];
   const key = `group:${group.id}`;
-  const effort = group.reasoningEffort ? ` · ${effortLabel(catalog, {
-    provider: group.provider || group.effectiveProvider, model: group.model || group.effectiveModel,
-    reasoningEffort: group.reasoningEffort,
-  })}` : '';
+  // The collapsed row is the group's whole overview, so every fact it owns is
+  // named there — including the effort and the preset, which are easy to get
+  // wrong (and invisible without opening the form).
+  const effort = group.reasoningEffort
+    ? (effortLabel(catalog, {
+      provider: group.effectiveProvider, model: group.effectiveModel, reasoningEffort: group.reasoningEffort,
+    }) || group.reasoningEffort)
+    : '默认';
+  const summary = (
+    <>
+      <span className="wcb-fact-inline">{group.memberCount} 位成员</span>
+      <span className="wcb-fact-inline"><span className="wcb-fact-key">Workspace</span>{group.workspaceTitle}</span>
+      <span className="wcb-fact-inline"><span className="wcb-fact-key">模型</span>{groupModelSummary(catalog, group)}</span>
+      <span className="wcb-fact-inline"><span className="wcb-fact-key">effort</span>{effort}</span>
+      <span className="wcb-fact-inline"><span className="wcb-fact-key">preset</span>{presetSummaryLabel(presets, group.preset)}</span>
+    </>
+  );
 
   // Leaving the form (a save, a delete elsewhere) re-seeds the draft from truth.
   useEffect(() => { if (!editing) setDraft(draftOf(group)); }, [group, editing]);
@@ -174,7 +187,7 @@ function GroupPanel({ group, state, startEditing, disabled, onApply }: {
       open={open}
       onToggle={() => setOpen(value => !value)}
       title={<>{group.name}{group.isDefault && <Tag tone="quiet">默认</Tag>}</>}
-      summary={`${group.memberCount} 位成员 · ${group.workspaceTitle} · ${groupModelLabel(catalog, group)}${effort}`}
+      summary={summary}
       actions={<>
         {editing ? (
           <>

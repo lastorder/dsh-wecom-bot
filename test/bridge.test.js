@@ -129,7 +129,7 @@ test('an authorized member gets a Session in their group Workspace on first cont
   assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1');
   await h.store.flush();
   const file = JSON.parse(await readFile(h.store.file, 'utf8'));
-  assert.equal(file.version, 5);
+  assert.equal(file.version, '0.4');
   assert.equal(file.bindings[0].sessionId, 'session-created-1');
   h.stop();
 });
@@ -280,6 +280,32 @@ test('only administrators may list or switch Sessions; everyone else stays on th
   await h.send('看看这个', { quote: quoted });
   assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1', 'a quote cannot move a non-admin');
   assert.equal(h.journal.find('wecom.quote').at(-1).outcome, 'not-admin');
+  h.stop();
+});
+
+test('an administrator command is refused in a group chat, whoever sends it', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {
+    workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1'] }],
+  }, { members: [['user', 'root'], ['user', 'alice'], ['group', 'group-1']] });
+  await h.send('大家好', { chat: 'group-1', user: 'root' });
+  const created = h.ctx.creates.length;
+  // The Session in a group chat is shared, so these commands are not run there
+  // — not even for the administrator who would be allowed in a single chat.
+  for (const command of ['/new', '/workspaces', '/sessions', '/use 1', '/reset']) {
+    await h.send(command, { chat: 'group-1', user: 'root' });
+    assert.match(lastReply(h), /管理员命令只能在单聊中使用/, command);
+  }
+  assert.equal(h.ctx.creates.length, created, 'no Session is created from a group');
+
+  // A member hears the rank reason, and nothing runs either.
+  await h.send('/new', { chat: 'group-1', user: 'alice' });
+  assert.match(lastReply(h), /需要管理员权限/);
+  assert.equal(h.ctx.creates.length, created);
+
+  // In a single chat the same administrator command goes through.
+  await h.send('/new', { chat: 'root', user: 'root' });
+  assert.match(lastReply(h), /已创建并切换到新会话/);
+  assert.equal(h.ctx.creates.length, created + 1);
   h.stop();
 });
 
@@ -508,7 +534,7 @@ test('each remote approval has a fresh code; an old code cannot approve a later 
   await h.send(`/approve ${firstCode}`, { chat: 'root', user: 'root' });
   assert.match(lastReply(h), /没有可在此单聊审批的请求/);
   await h.send(`/approve ${secondCode}`, { chat: 'group-1', user: 'alice' });
-  assert.match(lastReply(h), /没有可在此单聊审批/);
+  assert.match(lastReply(h), /需要管理员权限/, 'a group chat never answers an approval');
   await h.send(`/approve ${secondCode}`, { chat: 'root', user: 'root' });
   assert.equal(await second, 'allowed-once');
   h.stop();

@@ -9,7 +9,7 @@ import { formatContext, shortId } from './format.js';
 import type { InboundMessage } from './inbound.js';
 import { parseAnswer, type InteractionRegistry } from './interactions.js';
 import {
-  adminOnlyText, code, compactedText, deleteWarningText, deletedText, field, HELP_TEXT, inline,
+  adminOnlyText, adminPrivateOnlyText, code, compactedText, deleteWarningText, deletedText, field, HELP_TEXT, inline,
   newSessionText, noWorkspaceText, nothingToCompactText, sessionLabel, sessionListText, sessionRef,
   title, workspaceListText,
 } from './notices.js';
@@ -88,6 +88,16 @@ export interface CommandScope {
 const BINDING_LABEL = { user: '个人', group: '群聊' } as const;
 
 /**
+ * Commands only an administrator may ever run. They act on the Bot rather than
+ * on this chat's conversation, so a group chat refuses them even for an
+ * administrator: the Session there is shared, and it must not be created,
+ * switched or re-pointed — or its tool calls approved — from the group.
+ */
+const ADMIN_ONLY_COMMANDS = new Set([
+  'new', 'workspaces', 'ws', 'sessions', 'list', 'ls', 'use', 'reset', 'approve', 'deny',
+]);
+
+/**
  * `**🏷 一句话结论**` plus an optional explanation line — the shape every
  * refusal and confirmation in this file uses, so a reply never looks like an
  * undifferentiated wall of text.
@@ -125,8 +135,16 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
   const ticket = services.ticket();
   const current = () => !services.stale(ticket);
   const isAdmin = policy.isAdmin(message.user);
-  // A private chat is one person's own conversation; a group chat's Session is
-  // shared, so changing or clearing its history needs an administrator.
+  // An administrator command in a group chat is refused whoever sends it: the
+  // shared conversation is not the place to manage the Bot. The reply names the
+  // real reason — rank for a member, the shared chat for an administrator.
+  if (message.chatType === 'group' && ADMIN_ONLY_COMMANDS.has(command.name)) {
+    await reply(isAdmin ? adminPrivateOnlyText() : adminOnlyText());
+    return;
+  }
+  // Commands that touch this conversation's Session (compact, delete) are open
+  // to everybody in a private chat; in a group chat that Session is shared, so
+  // they need an administrator.
   const allowed = (): boolean => isAdmin || message.chatType === 'single';
   const deny = async (): Promise<void> => { await reply(adminOnlyText()); };
 
@@ -420,9 +438,10 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
     case 'approve':
     case 'deny': {
       const state = command.args[0] ? interactions.findApproval(command.args[0]) : undefined;
-      // Tool execution may only be authorized by an administrator in a single chat.
-      if (!state || command.args.length !== 1 || message.chatType !== 'single' || message.chat !== message.user
-        || !state.privateChats.has(message.chat) || !isAdmin) {
+      // Reaching here already means a single chat (a group is refused above);
+      // the approval must still be visible to this chat and the sender an
+      // administrator.
+      if (!state || command.args.length !== 1 || !state.privateChats.has(message.chat) || !isAdmin) {
         await reply(notice('⚠️', '没有可在此单聊审批的请求', '只有管理员可以在单聊里用验证码审批；验证码也可能已经过期。'));
         return;
       }

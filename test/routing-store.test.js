@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -47,7 +47,7 @@ test('the default group always exists and cannot be removed', async () => {
   assert.equal(await store.updateGroup('default', { workspace: '/srv/app' }) !== undefined, true);
   await store.flush();
   const parsed = JSON.parse(await readFile(store.file, 'utf8'));
-  assert.equal(parsed.version, 5);
+  assert.equal(parsed.version, '0.4');
   assert.deepEqual(parsed.groups.map(group => group.id), ['default']);
 });
 
@@ -153,7 +153,7 @@ test('an unreadable file is quarantined instead of being overwritten', async () 
 test('a file of another version is set aside instead of being read or overwritten', async () => {
   const dir = await directory();
   await writeFile(join(dir, 'bindings.json'), JSON.stringify({
-    version: 3,
+    version: 5,
     groups: [{ id: 'default', name: '默认分组' }],
     bindings: [{ kind: 'user', id: 'alice', groupId: 'default', sessionId: 's1' }],
     labels: { 'user:alice': '爱丽丝' },
@@ -164,16 +164,54 @@ test('a file of another version is set aside instead of being read or overwritte
   assert.deepEqual(store.bindings(), [], 'nothing from an unread file is trusted');
   assert.equal(store.group('default').name, '默认分组');
   assert.deepEqual(stages, ['version']);
-  await stat(join(dir, 'bindings.json.v3'));
+  // The old integer counter is exactly the file v0.4.1 wrote, so it must be
+  // parked under its own name rather than read as the current layout.
+  await stat(join(dir, 'bindings.json.v5'));
   await assert.rejects(stat(join(dir, 'bindings.json')), 'the old file is moved, not clobbered');
 
   // Starting fresh writes the current version and keeps the old file around.
   await store.create('user', 'bob', { groupId: 'default' });
   await store.flush();
   const parsed = JSON.parse(await readFile(store.file, 'utf8'));
-  assert.equal(parsed.version, 5);
+  assert.equal(parsed.version, '0.4');
   assert.deepEqual(parsed.bindings.map(record => record.id), ['bob']);
-  await stat(join(dir, 'bindings.json.v3'));
+  await stat(join(dir, 'bindings.json.v5'));
+});
+
+test('a version string is never allowed to choose the path it is parked under', async () => {
+  const dir = await directory();
+  await writeFile(join(dir, 'bindings.json'), JSON.stringify({ version: '../../escape', bindings: [] }));
+  const store = createRoutingStore({ directory: dir, onError: () => {} });
+  await store.load();
+  assert.deepEqual(store.bindings(), []);
+  assert.deepEqual((await readdir(dir)).filter(name => name !== 'bindings.json'), ['bindings.json.v.._.._escape']);
+});
+
+test("an administrator's default Workspace is stored as a { workspace } object", async () => {
+  const dir = await directory();
+  const store = createRoutingStore({ directory: dir, onError: fail });
+  await store.load();
+  await store.setAdminWorkspace('root', '/srv/orion');
+  await store.flush();
+  const parsed = JSON.parse(await readFile(store.file, 'utf8'));
+  assert.deepEqual(parsed.adminDefaults, { root: { workspace: '/srv/orion' } }, 'an object, so more can join later');
+
+  const reloaded = createRoutingStore({ directory: dir, onError: fail });
+  await reloaded.load();
+  assert.equal(reloaded.adminWorkspace('root'), '/srv/orion');
+
+  await reloaded.setAdminWorkspace('root', '');
+  await reloaded.flush();
+  assert.deepEqual(JSON.parse(await readFile(store.file, 'utf8')).adminDefaults, {}, 'clearing drops the entry');
+
+  // A bare string is the shape this layout never shipped with; it is ignored
+  // rather than half-guessed, exactly like an unknown file version.
+  await writeFile(store.file, JSON.stringify({
+    version: '0.4', adminDefaults: { alice: '/srv/old' }, groups: [], bindings: [], labels: {},
+  }));
+  const strict = createRoutingStore({ directory: dir, onError: fail });
+  await strict.load();
+  assert.equal(strict.adminWorkspace('alice'), '');
 });
 
 test('a group keeps its Workspace, model, effort and preset across a reload', async () => {
@@ -203,7 +241,7 @@ test('a group keeps its Workspace, model, effort and preset across a reload', as
 test('corrupt entries and duplicates are dropped while loading', async () => {
   const dir = await directory();
   await writeFile(join(dir, 'bindings.json'), JSON.stringify({
-    version: 5,
+    version: '0.4',
     groups: [{ id: 'g1', name: ' 朋友 ' }, { id: 'g1', name: '重复' }, null, { id: 'x'.repeat(80) }, { name: '没有 id' }],
     bindings: [
       { kind: 'user', id: 'alice', groupId: 'missing', sessionId: 'session-1', createdAt: 1, updatedAt: 2 },

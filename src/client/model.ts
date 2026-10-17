@@ -210,6 +210,18 @@ export function presetLabel(presets: PresetCatalogView | null | undefined, id: s
   return found ? presetName(found) : id;
 }
 
+/**
+ * A preset for a one-line group summary: the name it actually runs, marked when
+ * that comes from DSH rather than from the group. `presetLabel` spells the
+ * fallback out in full, which is right in a dropdown and too long beside four
+ * other facts.
+ */
+export function presetSummaryLabel(presets: PresetCatalogView | null | undefined, id: string | undefined): string {
+  if (id) return presetLabel(presets, id);
+  const fallback = presets?.presets.find(preset => preset.isDefault);
+  return fallback ? `${presetName(fallback)}（DSH 默认）` : 'DSH 默认';
+}
+
 /** Compact token count: 812, 12.3k, 200k, 1.2M. */
 export function formatTokens(value: number): string {
   if (value < 1000) return String(Math.round(value));
@@ -250,10 +262,13 @@ export function personKey(kind: BindingKind, id: string): string {
   return `${kind}:${id}`;
 }
 
-/** One group's model label, or the DSH default when the group follows it. */
-export function groupModelLabel(catalog: ModelCatalogView | null | undefined, group: GroupView): string {
-  if (!group.effectiveProvider || !group.effectiveModel) return dshDefaultLabel(catalog);
-  return modelLabel(catalog, { provider: group.effectiveProvider, model: group.effectiveModel });
+/** One group's model for a summary line: its name, marked when it follows DSH. */
+export function groupModelSummary(catalog: ModelCatalogView | null | undefined, group: GroupView): string {
+  if (group.effectiveProvider && group.effectiveModel) {
+    return modelName(catalog, { provider: group.effectiveProvider, model: group.effectiveModel });
+  }
+  const fallback = catalog?.dshDefault;
+  return fallback ? `${modelName(catalog, fallback)}（DSH 默认）` : 'DSH 默认';
 }
 
 /* ------------------------------- display ------------------------------ */

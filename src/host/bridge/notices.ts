@@ -88,8 +88,8 @@ export const HELP_TEXT = [
   bold('💬 常用命令'),
   '- **/status** — 当前会话的 Workspace、preset、模型、effort、上下文与运行状态',
   '- **/whoami** — 查看你的 userid、所属分组与管理员身份',
-  `- **/compact** — 压缩当前会话的上下文：${code('/compact')}`,
-  `- **/delete** — 归档当前会话，清空它的记忆：${code('/delete')} 后再发 ${code('/delete confirm')}`,
+  `- **/compact** — 压缩当前会话的上下文：${code('/compact')}（群聊里需要管理员）`,
+  `- **/delete** — 归档当前会话，清空它的记忆：${code('/delete')} 后再发 ${code('/delete confirm')}（群聊里需要管理员）`,
   '- **/cancel** — 停止你的会话正在运行的回合',
   `- **/answer** — 回答 DSH 的提问：${code('/answer 验证码 选项序号或文字')}`,
   `- **/approve** — 允许本次工具调用：${code('/approve 验证码')}（需开启远程审批）`,
@@ -100,7 +100,7 @@ export const HELP_TEXT = [
   '引用（回复）我发出的某条通知，之后的消息就会继续那条通知所属的会话。',
   '',
   bold('🔒 管理员命令'),
-  '只有插件配置中列出的管理员可用：',
+  '只有插件配置中列出的管理员可以使用，并且只能在单聊里发送：群聊里的会话是所有人共用的，这些命令不会在群里执行。',
   '- **/new** — 在默认 Workspace 中新建一个会话并切换过去',
   '- **/workspaces** — 查看 DSH 的 Workspace 列表，并选择你的默认 Workspace',
   '- **/sessions** — 按 Workspace 列出可切换的会话',
@@ -113,6 +113,21 @@ export function adminOnlyText(): string {
     title('🔒', '需要管理员权限'),
     '',
     '这个命令只有插件配置里列出的管理员可以使用。你的消息会进入自己的专属会话；需要清空记忆时发送 **/delete**。',
+  ].join('\n');
+}
+
+/**
+ * An administrator command sent from a group chat. The sender may well be an
+ * administrator, and the refusal is not about rank: it is about the Session
+ * being shared, so a group chat must not create one, switch it, or answer an
+ * approval on everybody's behalf.
+ */
+export function adminPrivateOnlyText(): string {
+  return [
+    title('🔒', '管理员命令只能在单聊中使用'),
+    '',
+    '群聊里的会话是所有人共用的，这类命令会新建或切换会话、选定 Workspace，或替所有人审批工具调用，所以不在这里执行。',
+    '请在与机器人的单聊里发送这条命令。',
   ].join('\n');
 }
 
