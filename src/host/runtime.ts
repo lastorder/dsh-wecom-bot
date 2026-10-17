@@ -2,11 +2,13 @@ import { WSClient } from '@wecom/aibot-node-sdk';
 import { createBridge, type Bridge, type BridgeClient } from './bridge/index.js';
 import { authorizedNotice } from './bridge/notices.js';
 import { createAccessPolicy } from './bridge/policy.js';
-import { applyRoutingOps, buildRoutingView, type RoutingOpResult } from './groups-view.js';
-import { createRoutingStore, type RoutingStore } from './routing-store.js';
+import { applyStoreOps, buildRoutingView, type StoreOpResult } from './groups-view.js';
+import { createStore, type PluginStore } from './store.js';
 import { catalogView, createCatalogService, type CatalogService } from './catalog.js';
+
 import {
-  isTrustedWsUrl, readBridgeSettings, type BridgeSettings, type PluginConfig,
+  isTrustedWsUrl, readBridgeSettings, readJournalSettings, type BridgeSettings, type JournalSettings,
+  type PluginConfig,
 } from './config.js';
 import type {
   AgentDefaultModel, AgentPresetRegistry, HostContext, Logger, SessionEvent, SessionHandle, WorkspaceRegistry,
@@ -24,7 +26,7 @@ import { createStatusTracker, type StatusTracker } from './status.js';
 import { summarizeTurn, type TurnSummary } from './turns.js';
 import { createWorkspaceService, pluginWorkspacePath } from './workspaces.js';
 import {
-  ROUTING_VERSION, type BridgeStateView, type ModelCatalogView, type PresetCatalogView, type RoutingOp, type RoutingView,
+  STORE_VERSION, type BridgeStateView, type ModelCatalogView, type PresetCatalogView, type StoreOp, type RoutingView,
 } from '../shared/protocol.js';
 
 /**
@@ -59,14 +61,17 @@ export interface Runtime {
   /** The groups/members table for the settings page. */
   routingView(options?: { readonly refresh?: boolean }): Promise<RoutingView>;
   /** Apply settings-page group and member edits. */
-  applyRouting(ops: readonly RoutingOp[]): Promise<RoutingOpResult>;
+  applyOps(ops: readonly StoreOp[]): Promise<StoreOpResult>;
   /** Values the journal must scrub (the resolved Bot Secret). */
+
   secrets(): readonly string[];
+  /** The journal's own settings; read from the store on every write. */
+  journalSettings(): JournalSettings;
   readonly observations: ObservationStore;
   readonly rounds: RoundTracker;
   readonly status: StatusTracker;
   readonly catalogs: CatalogService;
-  readonly store: RoutingStore;
+  readonly store: PluginStore;
   current(): Bridge | undefined;
 }
 
@@ -89,7 +94,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       return registry && typeof registry.list === 'function' ? registry : undefined;
     },
   });
-  const store = createRoutingStore({
+  const store = createStore({
     directory: pluginHome(),
     onError: (error, stage) => {
       log.warn(`WeCom routing store ${stage} failed`);
@@ -130,7 +135,15 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 
   let bridge: Bridge | undefined;
   let stopBridge: (() => void) | undefined;
-  let signature = '';
+  /**
+   * The connection identity of the live bridge: Bot ID, resolved Secret and the
+   * WebSocket endpoint. Only these three ever justify dropping the socket — the
+   * rest of the settings are handed to the running bridge, so adding an
+   * administrator or re-scoping notifications costs no reconnect.
+   */
+  let identity = '';
+  /** The settings the live bridge currently holds, to journal real changes only. */
+  let applied = '';
   let secret = '';
   let queue: Promise<void> = Promise.resolve();
   let disposed = false;
@@ -147,7 +160,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       // Surface the SDK's terminal conditions on the settings page.
       if (/^Authentication failed/.test(text)) status.set('error', `认证失败：${text.replace(/^Authentication failed:\s*/, '').slice(0, 160)}`);
       else if (/^Max auth failure attempts/.test(text)) status.set('error', '多次认证失败，已停止重试；请检查 Bot ID 与 Secret');
-      else if (/^Max reconnect attempts/.test(text)) status.set('offline', '多次重连失败，已停止重连；保存配置可重新连接');
+      else if (/^Max reconnect attempts/.test(text)) status.set('offline', '多次重连失败，已停止重连；在「① 连接」里重新保存一次即可再连');
     };
     return { debug() {}, info: forward('info'), warn: forward('warn'), error: forward('error') };
   }
@@ -160,11 +173,19 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 
   async function reconfigure(): Promise<void> {
     if (disposed) return;
-    const settings: BridgeSettings = readBridgeSettings(config);
+    // The settings live in the store's file, so it has to be read before the first
+    // connection decision can be made. A reload event that arrives while the
+    // plugin is still starting otherwise queues this ahead of `store.load()`, and
+    // the bridge dials out with the defaults (no administrators) before adopting
+    // the real block a moment later — visible in the journal as a `rebuilt`
+    // followed by a `kept`. `load()` is memoized, so this costs one read.
+    await store.load();
+    if (disposed) return;
+    const settings: BridgeSettings = readBridgeSettings(config, store.settings());
     if (settings.wsUrl && !isTrustedWsUrl(settings.wsUrl)) {
-      if (signature !== 'invalid-ws') {
+      if (identity !== 'invalid-ws') {
         teardown();
-        signature = 'invalid-ws';
+        identity = 'invalid-ws';
         secret = '';
         log.error('WeCom wsUrl must be a credential-free wss:// address; connection disabled');
         status.set('invalid', 'WebSocket 地址必须是不含账号密码的 wss:// 地址');
@@ -178,25 +199,37 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       } catch (error) {
         if (disposed) return;
         teardown();
-        signature = '';
+        identity = '';
         status.set('error', '读取 DSH 凭据失败');
         journal.write({ event: 'config.error', level: 'error', stage: 'credentials', secretRef: settings.secretRef, error });
         return;
       }
     }
     if (disposed) return;
-    const next = JSON.stringify([settings, resolved]);
-    if (next === signature) return;
-    signature = next;
-    teardown();
-    secret = resolved;
-    journal.write({
-      event: 'config.applied',
+    const connection = JSON.stringify([settings.botId, resolved, settings.wsUrl]);
+    const summary = {
       botId: settings.botId, secretRef: settings.secretRef, secretConfigured: Boolean(resolved),
       wsUrl: settings.wsUrl || 'sdk-default',
       adminUserIds: settings.adminUserIds, adminWorkspaces: settings.adminWorkspaces,
       questionTimeoutMs: settings.questionTimeoutMs, remoteApprovals: settings.remoteApprovals,
-    });
+    };
+    if (connection === identity) {
+      // Nothing about the connection moved: the settings changed, or the event
+      // was about something else entirely. Hand the live bridge the new values —
+      // a settings edit must never cost the socket.
+      const current = JSON.stringify(settings);
+      if (bridge && current !== applied) {
+        applied = current;
+        bridge.updateSettings(settings);
+        journal.write({ event: 'config.applied', connection: 'kept', ...summary });
+      }
+      return;
+    }
+    identity = connection;
+    applied = JSON.stringify(settings);
+    teardown();
+    secret = resolved;
+    journal.write({ event: 'config.applied', connection: 'rebuilt', ...summary });
     if (!settings.botId || !resolved) {
       log.info?.('WeCom bridge awaits Bot ID and Secret on the plugin page');
       status.set('unconfigured', !settings.botId ? '缺少 Bot ID' : '缺少 Bot Secret');
@@ -279,7 +312,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
   async function routingView(options: { readonly refresh?: boolean } = {}): Promise<RoutingView> {
     await store.load();
     if (options.refresh) catalogs.invalidate();
-    const policy = createAccessPolicy(readBridgeSettings(config), { memberOf: () => undefined });
+    const policy = createAccessPolicy(readBridgeSettings(config, store.settings()), { memberOf: () => undefined });
     return await buildRoutingView({
       store, provisioner, workspaces, models, presets, catalogs, observations, router,
       ops: sessionOps,
@@ -290,7 +323,9 @@ export function createRuntime(options: RuntimeOptions): Runtime {
   return {
     observations, rounds, status, catalogs, store,
     current: () => bridge,
+
     secrets: () => (secret ? [secret] : []),
+    journalSettings: () => readJournalSettings(store.settings()),
     async start() {
       const off = [
         ctx.on('app-boot/config-reload', schedule),
@@ -311,15 +346,20 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       await store.flush();
     },
     routingView,
-    async applyRouting(ops) {
-      const policy = createAccessPolicy(readBridgeSettings(config), { memberOf: () => undefined });
-      const result = await applyRoutingOps({
+    async applyOps(ops) {
+      const policy = createAccessPolicy(readBridgeSettings(config, store.settings()), { memberOf: () => undefined });
+      const result = await applyStoreOps({
         store, provisioner, workspaces, models, presets, router, catalogs, observations, log,
         ops: sessionOps,
         isAdmin: user => policy.isAdmin(user),
       }, ops);
       if (result.ok) {
         catalogs.invalidate();
+        // A settings edit lands in the store, and the running bridge has to hear
+        // about it: administrators, the notification scope and the question timeout
+        // are read per message. This queues `reconfigure`, which sees an unchanged
+        // connection identity and updates the live bridge instead of reconnecting.
+        if (result.settingsChanged) schedule();
         // Authorization is what the person was waiting for: tell them once, in
         // the chat they already messaged from. An offline bridge simply drops
         // it — the next thing they send will work anyway.
@@ -349,7 +389,8 @@ export function createRuntime(options: RuntimeOptions): Runtime {
         if (message !== lastCatalogError) journal.write({ event: 'catalog.error', level: 'warn', error });
         lastCatalogError = message;
       }
-      const settings = readBridgeSettings(config);
+      const settings = readBridgeSettings(config, store.settings());
+      const stored = store.settings();
       let routing: RoutingView | null = null;
       let routingError: string | undefined;
       try {
@@ -371,7 +412,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       }
       if (routing?.full) notices.push('成员数量已达上限，新成员不会被记录；请在下方清理。');
       return {
-        version: ROUTING_VERSION,
+        version: STORE_VERSION,
         connection: status.connection(),
         traffic: status.traffic(),
         rejected: observations.rejected(key => Boolean(store.get(key))).map(row => {
@@ -387,6 +428,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
         presets: presetView,
         ...(presetsError ? { presetsError } : {}),
         workspaces: workspaces.list(),
+        settings: stored,
         admins: settings.adminUserIds.map(id => {
           const key = `user:${id}`;
           const note = store.label(key);
@@ -399,7 +441,6 @@ export function createRuntime(options: RuntimeOptions): Runtime {
             ...(group ? { groupName: group.name } : {}),
           });
         }),
-        adminWorkspaces: settings.adminWorkspaces,
         notices,
         journal: journal.info(),
       };

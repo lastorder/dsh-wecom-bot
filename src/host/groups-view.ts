@@ -1,13 +1,15 @@
 import {
-  DEFAULT_GROUP_ID, MAX_GROUPS, type BindingKind, type BindingRecord, type BindingSessionState, type ContextUsage,
-  type GroupMemberView, type GroupRecord, type GroupView, type ModelSelection, type RoutingOp,
-  type RoutingView,
+  DEFAULT_GROUP_ID, MAX_GROUPS, MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS,
+  MIN_QUESTION_TIMEOUT_MS, type BindingKind, type BindingRecord, type BindingSessionState, type ContextUsage,
+  type GroupMemberView, type GroupRecord, type GroupView, type ModelSelection, type StoreOp,
+  type RoutingView, type StoreSettingsPatch,
 } from '../shared/protocol.js';
+import { isTrustedWsUrl, uniqueIds } from './config.js';
 import type { CatalogService } from './catalog.js';
 import type { ModelService } from './models.js';
 import type { PresetService } from './presets.js';
 import type { ObservationStore } from './observation.js';
-import { bindingKey, normalizeLabel, parseBindingKey, validBindingId, type RoutingStore } from './routing-store.js';
+import { bindingKey, normalizeLabel, parseBindingKey, validBindingId, type PluginStore } from './store.js';
 import type { Router } from './routing.js';
 import type { SessionProvisioner } from './sessions.js';
 import type { WorkspaceService } from './workspaces.js';
@@ -24,7 +26,7 @@ import type { WorkspaceService } from './workspaces.js';
  */
 
 export interface RoutingViewDeps {
-  readonly store: RoutingStore;
+  readonly store: PluginStore;
   readonly provisioner: SessionProvisioner;
   readonly workspaces: WorkspaceService;
   readonly models: ModelService;
@@ -144,7 +146,7 @@ export async function buildRoutingView(deps: RoutingViewDeps): Promise<RoutingVi
   };
 }
 
-export interface RoutingOpResult {
+export interface StoreOpResult {
   readonly ok: boolean;
   readonly error?: string;
   /** Number of records the ops changed. */
@@ -153,11 +155,72 @@ export interface RoutingOpResult {
   readonly createdGroupId?: string;
   /** Principals `member.add` authorized, so the Bot can greet them. */
   readonly authorized?: readonly { readonly kind: BindingKind; readonly id: string; readonly groupId: string }[];
+  /** A `settings.set` op wrote the store's settings block. */
+  readonly settingsChanged?: boolean;
+}
+
+/**
+ * Validate one settings patch, or answer with the message to show.
+ *
+ * The store coerces and clamps whatever it finds in the file, because the file is
+ * hand-editable content. An edit that arrives *from the page* is a different
+ * thing: it is a decision the operator just made, so an unusable WebSocket
+ * address or an out-of-range timeout is refused out loud instead of being
+ * silently rounded into something nobody asked for.
+ */
+export function validateSettingsPatch(patch: StoreSettingsPatch): StoreSettingsPatch | string {
+  const record = patch as Record<string, unknown>;
+  const known = new Set([
+    'wsUrl', 'adminUserIds', 'adminWorkspaces', 'questionTimeoutMs', 'remoteApprovals', 'logEnabled', 'logRetentionDays',
+  ]);
+  for (const key of Object.keys(record)) if (!known.has(key)) return `无法识别的设置项：${key}`;
+  const clean: Record<string, unknown> = {};
+  if (record.wsUrl !== undefined) {
+    const url = typeof record.wsUrl === 'string' ? record.wsUrl.trim() : '';
+    if (url && !isTrustedWsUrl(url)) return 'WebSocket 地址必须是不含账号密码的 wss:// 地址。';
+    clean.wsUrl = url;
+  }
+  if (record.adminUserIds !== undefined) {
+    if (!Array.isArray(record.adminUserIds)) return '管理员列表不正确。';
+    for (const id of record.adminUserIds) if (!validBindingId(id)) return '需要有效的企微 userid。';
+    clean.adminUserIds = uniqueIds(record.adminUserIds);
+  }
+  if (record.adminWorkspaces !== undefined) {
+    if (!Array.isArray(record.adminWorkspaces)) return '通知范围不正确。';
+    for (const path of record.adminWorkspaces) {
+      if (typeof path !== 'string' || !path.trim() || path.length > 1024) return '通知范围里的 Workspace 路径不正确。';
+    }
+    clean.adminWorkspaces = uniqueIds(record.adminWorkspaces);
+  }
+  if (record.questionTimeoutMs !== undefined) {
+    const ms = Number(record.questionTimeoutMs);
+    if (!Number.isFinite(ms) || ms < MIN_QUESTION_TIMEOUT_MS || ms > MAX_QUESTION_TIMEOUT_MS) {
+      return `「等待企微回复」需要在 ${MIN_QUESTION_TIMEOUT_MS / 1000}–${MAX_QUESTION_TIMEOUT_MS / 1000} 秒之间。`;
+    }
+    clean.questionTimeoutMs = Math.round(ms);
+  }
+  if (record.remoteApprovals !== undefined) {
+    if (typeof record.remoteApprovals !== 'boolean') return '「远程审批」只能是开或关。';
+    clean.remoteApprovals = record.remoteApprovals;
+  }
+  if (record.logEnabled !== undefined) {
+    if (typeof record.logEnabled !== 'boolean') return '「对话日志」只能是开或关。';
+    clean.logEnabled = record.logEnabled;
+  }
+  if (record.logRetentionDays !== undefined) {
+    const days = Number(record.logRetentionDays);
+    if (!Number.isInteger(days) || days < MIN_LOG_RETENTION_DAYS || days > MAX_LOG_RETENTION_DAYS) {
+      return `「日志保留天数」需要在 ${MIN_LOG_RETENTION_DAYS}–${MAX_LOG_RETENTION_DAYS} 天之间。`;
+    }
+    clean.logRetentionDays = days;
+  }
+  return clean as StoreSettingsPatch;
 }
 
 /** Apply settings-page edits; the first failing op aborts the rest. */
-export async function applyRoutingOps(deps: RoutingViewDeps, ops: readonly RoutingOp[]): Promise<RoutingOpResult> {
+export async function applyStoreOps(deps: RoutingViewDeps, ops: readonly StoreOp[]): Promise<StoreOpResult> {
   let changed = 0;
+  let settingsChanged = false;
   let createdGroupId: string | undefined;
   const authorized: { kind: BindingKind; id: string; groupId: string }[] = [];
   // A model edit is only worth accepting against the real catalog; read it
@@ -312,6 +375,19 @@ export async function applyRoutingOps(deps: RoutingViewDeps, ops: readonly Routi
         changed++;
         break;
       }
+      case 'settings.set': {
+        if (!op.patch || typeof op.patch !== 'object') return { ok: false, error: '设置内容不正确。', changed };
+        const validated = validateSettingsPatch(op.patch);
+        if (typeof validated === 'string') return { ok: false, error: validated, changed };
+        try {
+          await deps.store.setSettings(validated);
+        } catch (error) {
+          return { ok: false, error: `无法保存设置：${error instanceof Error ? error.message : String(error)}`, changed };
+        }
+        settingsChanged = true;
+        changed++;
+        break;
+      }
       default:
         return { ok: false, error: '未知的修改类型。', changed };
     }
@@ -326,6 +402,7 @@ export async function applyRoutingOps(deps: RoutingViewDeps, ops: readonly Routi
   }
   return {
     ok: true, changed,
+    ...(settingsChanged ? { settingsChanged } : {}),
     ...(createdGroupId ? { createdGroupId } : {}),
     ...(authorized.length ? { authorized } : {}),
   };

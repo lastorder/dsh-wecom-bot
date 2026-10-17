@@ -26,7 +26,7 @@ const now = Date.now();
 const REPO = '/Users/me/Workspace/learn/dsh-wecom-bot';
 const PLUGIN_WS = '/Users/me/.dsh/wecom-bot/workspace';
 const state = {
-  version: '0.4',
+  version: '0.5',
   connection: empty ? { phase: 'unconfigured', since: now - 30_000, detail: '缺少 Bot ID' } : { phase: 'online', since: now - 25 * 60_000 },
   traffic: empty ? { since: now, received: 0, rejected: 0, prompts: 0, notifications: 0, failures: 0 }
     : { since: now - 3_600_000, received: 21, rejected: 2, prompts: 9, notifications: 11, failures: 0, lastMessageAt: now - 90_000 },
@@ -141,16 +141,24 @@ const state = {
     { id: 'w9', path: '/Users/me/Workspace/orion-agent', title: 'orion-agent', pluginOwned: false, sessionCount: 0, archivedSessionCount: 32 },
   ],
   admins: empty ? [] : [{ id: 'ZhangSan', label: '张三', displayName: '张三', groupName: '默认分组' }],
-  // Empty is the documented default: every Workspace, every box checked.
-  adminWorkspaces: [],
+  // The store's settings block; the ④ and ⑤ cards read it from here. An empty
+  // `adminWorkspaces` is the documented default: every Workspace, every box checked.
+  settings: empty
+    ? {
+      wsUrl: '', adminUserIds: [], adminWorkspaces: [], questionTimeoutMs: 60000,
+      remoteApprovals: false, logEnabled: true, logRetentionDays: 14,
+    }
+    : {
+      wsUrl: '', adminUserIds: ['ZhangSan'], adminWorkspaces: [], questionTimeoutMs: 30000,
+      remoteApprovals: true, logEnabled: true, logRetentionDays: 14,
+    },
   notices: [],
   journal: { enabled: true, directory: '/Users/me/.dsh/wecom-bot/logs', file: '/Users/me/.dsh/wecom-bot/logs/2026-10-16.jsonl', retentionDays: 14 },
 };
 // A fresh install has the built-in group only.
 if (empty) state.routing.groups = state.routing.groups.filter(group => group.isDefault);
-const stored = empty
-  ? { botId: '', adminUserIds: [], adminWorkspaces: [] }
-  : { botId: 'aibAbCdEfGh123456', adminUserIds: ['ZhangSan'], adminWorkspaces: [] };
+// The Config the ①连接 card edits: the connection identity, nothing else.
+const stored = empty ? { botId: '' } : { botId: 'aibAbCdEfGh123456' };
 
 // Light/dark values of the DSH tokens the page and the primitives read.
 const TOKENS = {

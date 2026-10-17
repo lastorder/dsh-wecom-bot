@@ -10,7 +10,7 @@ import { createModelService } from '../dist/host/models.js';
 import { createObservationStore } from '../dist/host/observation.js';
 import { createRoundTracker } from '../dist/host/rounds.js';
 import { createRouter } from '../dist/host/routing.js';
-import { createRoutingStore } from '../dist/host/routing-store.js';
+import { createStore } from '../dist/host/store.js';
 import { createSessionOperations } from '../dist/host/session-ops.js';
 import { createSessionProvisioner } from '../dist/host/sessions.js';
 import { createSessionTitler } from '../dist/host/session-title.js';
@@ -41,7 +41,7 @@ async function harness(settings = {}, hostOptions = {}, extra = {}) {
     list: async signal => (await ctx.sessionController.list({}, signal)).items,
     registry: () => ctx.registry,
   }, { ttlMs: 0 });
-  const store = createRoutingStore({ directory: extra.directory ?? scratchDirectory(), onError: () => {} });
+  const store = createStore({ directory: extra.directory ?? scratchDirectory(), onError: () => {} });
   const workspaces = createWorkspaceService({
     registry: () => ctx.registry,
     defaultPath: TEST_WORKSPACE_PATH,
@@ -131,7 +131,7 @@ test('an authorized member gets a Session in their group Workspace on first cont
   assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1');
   await h.store.flush();
   const file = JSON.parse(await readFile(h.store.file, 'utf8'));
-  assert.equal(file.version, '0.4');
+  assert.equal(file.version, '0.5');
   assert.equal(file.bindings[0].sessionId, 'session-created-1');
   h.stop();
 });

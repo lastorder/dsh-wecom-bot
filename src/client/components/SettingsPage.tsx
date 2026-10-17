@@ -12,10 +12,12 @@ import { StatusHeader } from './StatusHeader.tsx';
 /**
  * Plugin homepage (`plugins.bundle.config`, view `page`).
  *
- * Each card saves its own section: 连接 saves the Bot ID (and writes the
- * Secret to the credential store), 管理员 saves its own list, 高级设置 saves
- * the knobs, while groups, members and notes apply immediately on the Host.
- * There is no page-wide 保存配置 — nothing waits at the bottom of the page.
+ * One card still writes the plugin Config: 连接 saves the Bot ID (and writes the
+ * Secret to the credential store). Groups, members, notes and the settings the
+ * 管理员 / 高级设置 cards edit all land in the plugin's own store through
+ * `POST /api/wecom-bot/store`, applied live — groups and members immediately as
+ * 编辑 is confirmed, the settings on every 保存 or click. There is no page-wide
+ * 保存配置 — nothing waits at the bottom of the page.
  */
 export function SettingsPage({ scope, remote }: { scope: ConfigFormScope; remote?: ClientRemote }) {
   const snapshot = useFormSnapshot(scope);
@@ -55,8 +57,8 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
         onChanged={onChanged}
       />
       <RejectedCard state={state} disabled={!writable} onChanged={onChanged} />
-      <AdminCard scope={scope} base={base} state={state} disabled={!writable} onChanged={onChanged} />
-      <AdvancedCard scope={scope} base={base} journal={state?.journal} disabled={!writable} onChanged={onChanged} />
+      <AdminCard state={state} disabled={!writable} onChanged={onChanged} />
+      <AdvancedCard settings={state?.settings} journal={state?.journal} disabled={!writable} onChanged={onChanged} />
     </div>
   );
 }

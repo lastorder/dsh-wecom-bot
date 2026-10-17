@@ -1,6 +1,6 @@
 import { DEFAULT_GROUP_ID, type RejectionReason } from '../../shared/protocol.js';
 import { pathListed, type BridgeSettings } from '../config.js';
-import type { BindingKeyParts } from '../routing-store.js';
+import type { BindingKeyParts } from '../store.js';
 
 /**
  * Access policy: who may talk to the Bot at all.

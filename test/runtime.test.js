@@ -6,11 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply, Config, inject } from '../dist/host/index.js';
 import { createRuntime } from '../dist/host/runtime.js';
-import { fakeClient, fakeHost, finishedSession, frame, memoryJournal, settle, until } from './helpers.js';
+import { fakeClient, fakeHost, finishedSession, frame, memoryJournal, settle, until, writeStore } from './helpers.js';
 
-// Every runtime in this file must own a throwaway DSH home: the routing store
-// writes <DSH home>/wecom-bot/bindings.json next to the real plugin's data.
-// Tests that persist groups or members get one of their own, so they never see
+// Every runtime in this file must own a throwaway DSH home: the store writes
+// <DSH home>/wecom-bot/settings.json next to the real plugin's data. Tests that
+// persist settings, groups or members get one of their own, so they never see
 // each other's file.
 const HOME = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-home-')));
 process.env.DSH_HOME = HOME;
@@ -47,47 +47,55 @@ function hostWithServices(overrides = {}) {
 }
 
 const silent = { info() {}, warn() {}, error() {} };
-const post = (ops) => new Request('http://localhost/api/wecom-bot/routing', {
+const post = (ops) => new Request('http://localhost/api/wecom-bot/store', {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ops }),
 });
 
-test('Config carries policy only: connection, administrators and advanced knobs', () => {
+test('Config carries the connection identity, and nothing else', () => {
   const config = Config({});
   assert.equal(config.botId.get(), '');
   assert.equal(config.secretEnv.get(), 'WECOM_BOT_SECRET');
-  for (const key of ['adminUserIds', 'adminWorkspaces']) assert.deepEqual(config[key].get(), [], key);
-  assert.equal(config.remoteApprovals.get(), false);
-  assert.equal(config.logEnabled.get(), true);
-  assert.equal(config.logRetentionDays.get(), 14);
-  assert.equal('secret' in config, false);
+  assert.equal('secret' in config, false, 'the Secret itself only ever lives in the credential store');
+  // Everything the operator edits lives in the plugin's own document, so an edit
+  // is a store write and never a Config write: no profile rewrite, no reconnect.
+  for (const moved of [
+    'adminUserIds', 'adminWorkspaces', 'wsUrl', 'questionTimeoutMs', 'remoteApprovals',
+    'logEnabled', 'logRetentionDays',
+  ]) {
+    assert.equal(moved in config, false, `${moved} moved to the plugin store`);
+  }
   for (const gone of ['chatIds', 'allowedUserIds', 'defaultWorkspace', 'defaultProvider', 'defaultModel', 'defaultReasoningEffort']) {
-    assert.equal(gone in config, false, `${gone} moved to the routing store`);
+    assert.equal(gone in config, false, `${gone} moved to the plugin store`);
   }
   assert.deepEqual(inject, ['credentials', 'sessionController', 'connection']);
 });
 
-test('a plaintext or credentialed WebSocket URL is refused before the Secret is read', async () => {
+test('a plaintext or credentialed WebSocket URL is refused before the Secret is read', () => withHome(async home => {
+  // The endpoint is store state now, written before the runtime reads it — the
+  // same way the ⑤ card writes it while the plugin is running.
+  await writeStore(home, { settings: { wsUrl: 'ws://plaintext.example' } });
   const { ctx, reads } = hostWithServices();
   const journal = memoryJournal();
   const runtime = createRuntime({
     ctx, journal, log: silent,
-    config: Config({ botId: 'bot', wsUrl: 'ws://plaintext.example' }),
+    config: Config({ botId: 'bot' }),
     createClient: () => assert.fail('must not connect'),
   });
   await runtime.start();
-  assert.deepEqual(reads, []);
+  assert.deepEqual(reads, [], 'an unusable endpoint is refused before the Secret is touched');
   assert.equal(runtime.status.connection().phase, 'invalid');
   await runtime.stop();
-});
+}));
 
 test('runtime connects with the resolved Secret, never logs it, and serves the full state', () => withHome(async home => {
+  await writeStore(home, { settings: { adminUserIds: ['root'] } });
   const { ctx } = hostWithServices();
   const client = fakeClient();
   let options;
   const journal = memoryJournal(['TOP-SECRET-VALUE']);
   const runtime = createRuntime({
     ctx, journal, log: silent,
-    config: Config({ botId: 'bot', adminUserIds: ['root'] }),
+    config: Config({ botId: 'bot' }),
     createClient: value => { options = value; return client; },
   });
   await runtime.start();
@@ -114,7 +122,7 @@ test('runtime connects with the resolved Secret, never logs it, and serves the f
   assert.deepEqual(cached.sessions.groups.map(group => group.title), ['Alpha', '未分组'],
     'the blank Session is hidden until the turn starts');
   const state = await runtime.state({ refresh: true });
-  assert.equal(state.version, '0.4');
+  assert.equal(state.version, '0.5');
   assert.deepEqual(state.sessions.groups.map(group => group.title).sort(), ['Alpha', '未分组', '企业微信'].sort());
   assert.deepEqual(state.rejected, []);
   assert.equal(state.traffic.prompts, 1, 'the first message created a Session and prompted it');
@@ -137,7 +145,7 @@ test('runtime connects with the resolved Secret, never logs it, and serves the f
   await runtime.stop();
 }));
 
-test('the routing route creates groups, authorizes senders and validates every edit', () => withHome(async home => {
+test('the store route creates groups, authorizes senders and validates every edit', () => withHome(async home => {
   {
     const { ctx, routes } = hostWithServices();
     ctx.effect = fn => { void fn(); };
@@ -145,7 +153,7 @@ test('the routing route creates groups, authorizes senders and validates every e
     // never builds a client (a real one would dial the WeCom endpoint).
     apply(ctx, Config({}));
     await settle();
-    const route = routes.get('/api/wecom-bot/routing');
+    const route = routes.get('/api/wecom-bot/store');
     assert.ok(route, 'the routing route is registered');
     assert.deepEqual(route.methods, ['POST']);
 
@@ -198,7 +206,7 @@ test('the routing route creates groups, authorizes senders and validates every e
     assert.match((await defaultDelete.json()).error, /默认分组不能删除/);
 
     // Malformed bodies never reach the store.
-    assert.equal((await route.fetch(new Request('http://localhost/api/wecom-bot/routing', { method: 'POST', body: 'nope' }))).status, 400);
+    assert.equal((await route.fetch(new Request('http://localhost/api/wecom-bot/store', { method: 'POST', body: 'nope' }))).status, 400);
     assert.equal((await route.fetch(post([]))).status, 400);
     assert.equal((await route.fetch(post([{ op: 'explode' }]))).status, 400);
 
@@ -207,8 +215,8 @@ test('the routing route creates groups, authorizes senders and validates every e
     assert.equal((await removed.json()).routing.total, 0);
 
     // Whatever the page did, it is durable.
-    const stored = JSON.parse(await readFile(join(home, 'wecom-bot', 'bindings.json'), 'utf8'));
-    assert.equal(stored.version, '0.4');
+    const stored = JSON.parse(await readFile(join(home, 'wecom-bot', 'settings.json'), 'utf8'));
+    assert.equal(stored.version, '0.5');
     assert.deepEqual(stored.groups.map(item => item.name), ['默认分组', '朋友']);
     assert.deepEqual(stored.bindings, []);
   }
@@ -220,7 +228,7 @@ test('changing a group Workspace drops the Sessions it used to own', () => withH
     ctx.effect = fn => { void fn(); };
     apply(ctx, Config({}));
     await settle();
-    const route = routes.get('/api/wecom-bot/routing');
+    const route = routes.get('/api/wecom-bot/store');
     await route.fetch(post([
       { op: 'member.add', groupId: 'default', kind: 'user', id: 'alice' },
       { op: 'member.update', key: 'user:alice', patch: { sessionId: 'session-1' } },
@@ -297,7 +305,7 @@ test('a refused sender shows up in the state view until the page authorizes it',
   assert.deepEqual(before.routing.groups[0].members, []);
   assert.deepEqual(before.notices, ['还没有任何成员：给机器人发消息的人会出现在「未授权用户」里，把它加入分组即可授权。']);
 
-  await runtime.applyRouting([{ op: 'member.add', groupId: 'default', kind: 'user', id: 'mallory', label: '市场部小李' }]);
+  await runtime.applyOps([{ op: 'member.add', groupId: 'default', kind: 'user', id: 'mallory', label: '市场部小李' }]);
   const after = await runtime.state();
   assert.deepEqual(after.rejected, [], 'the row disappears once the sender is a member');
   assert.deepEqual(after.routing.groups[0].members.map(member => member.displayName), ['市场部小李']);
@@ -314,7 +322,7 @@ test('apply registers the authenticated routes and writes the journal under DSH_
     const state = routes.get('/api/wecom-bot/state');
     assert.equal(state.path, '/api/wecom-bot/state');
     assert.deepEqual(state.methods, ['GET']);
-    assert.ok(routes.get('/api/wecom-bot/routing'), 'both routes are registered');
+    assert.ok(routes.get('/api/wecom-bot/store'), 'both routes are registered');
     const response = await state.fetch(new Request('http://localhost/api/wecom-bot/state?refresh=1'));
     assert.equal(response.headers.get('cache-control'), 'no-store');
     const body = await response.json();
@@ -327,7 +335,7 @@ test('apply registers the authenticated routes and writes the journal under DSH_
     assert.deepEqual(body.rejected, []);
     await dispose();
     assert.equal(routes.get('/api/wecom-bot/state'), undefined);
-    assert.equal(routes.get('/api/wecom-bot/routing'), undefined);
+    assert.equal(routes.get('/api/wecom-bot/store'), undefined);
     const lines = (await readFile(body.journal.file, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     assert.deepEqual(lines.map(line => line.event).filter(event => event.startsWith('plugin.')), ['plugin.start', 'plugin.stop']);
   }
@@ -345,7 +353,7 @@ test('authorizing a sender greets them once through the live bridge', () => with
   await runtime.start();
   client.emit('authenticated');
 
-  const result = await runtime.applyRouting([
+  const result = await runtime.applyOps([
     { op: 'member.add', groupId: 'default', kind: 'user', id: 'ZhangSan' },
   ]);
   assert.equal(result.ok, true);
@@ -359,7 +367,7 @@ test('authorizing a sender greets them once through the live bridge', () => with
   await runtime.stop();
 }));
 
-test('archiving a member Session through the routing route clears the binding', () => withHome(async () => {
+test('archiving a member Session through the store route clears the binding', () => withHome(async () => {
   const { ctx } = hostWithServices();
   const runtime = createRuntime({
     ctx, journal: memoryJournal(), log: silent, config: Config({}),
@@ -369,9 +377,155 @@ test('archiving a member Session through the routing route clears the binding', 
   await runtime.store.create('user', 'alice', { groupId: 'default' });
   await runtime.store.update('user:alice', { sessionId: 's1' });
 
-  const result = await runtime.applyRouting([{ op: 'member.archive', key: 'user:alice' }]);
+  const result = await runtime.applyOps([{ op: 'member.archive', key: 'user:alice' }]);
   assert.equal(result.ok, true, result.error);
   assert.deepEqual(ctx.registry.archivedCalls, [{ sessionId: 's1', options: { stopActivity: true } }]);
   assert.equal(runtime.store.get('user:alice').sessionId, '');
+  await runtime.stop();
+}));
+
+/* ------------------------------------------------------------------ *
+ * A settings edit is a store write, not a Config write: it must never *
+ * cost the WeCom socket, and it must reach the running bridge         *
+ * ------------------------------------------------------------------ */
+
+test('editing the settings never reconnects the socket', () => withHome(async home => {
+  await writeStore(home, { settings: { adminUserIds: ['root'] } });
+  const { ctx } = hostWithServices();
+  const clients = [];
+  const journal = memoryJournal();
+  const runtime = createRuntime({
+    ctx, journal, log: silent,
+    config: Config({ botId: 'bot' }),
+    createClient: () => { const client = fakeClient(); clients.push(client); return client; },
+  });
+  await runtime.start();
+  await runtime.store.load();
+  clients[0].emit('authenticated');
+  assert.equal(runtime.status.connection().phase, 'online');
+
+  // What the ④ and ⑤ cards post: administrators, the notification scope, then
+  // the knobs — the edits that used to rebuild the bridge on every click.
+  const refused = await runtime.applyOps([{ op: 'settings.set', patch: { remoteApprovals: 'yes' } }]);
+  assert.equal(refused.ok, false, 'an unusable patch never reaches the store');
+  const applied = await runtime.applyOps([
+    { op: 'settings.set', patch: { adminUserIds: ['root', 'second'], adminWorkspaces: ['/w/alpha'] } },
+    { op: 'settings.set', patch: { remoteApprovals: true, questionTimeoutMs: 30000 } },
+  ]);
+  assert.equal(applied.ok, true);
+  assert.equal(applied.settingsChanged, true);
+  await settle();
+
+  assert.equal(clients.length, 1, 'the socket was never replaced');
+  assert.equal(runtime.status.connection().phase, 'online', 'and it is still up');
+  const state = await runtime.state();
+  assert.deepEqual(state.settings.adminUserIds, ['root', 'second']);
+  assert.deepEqual(state.settings.adminWorkspaces, ['/w/alpha']);
+  assert.equal(state.settings.remoteApprovals, true);
+  assert.equal(state.settings.questionTimeoutMs, 30000);
+  assert.deepEqual(state.admins.map(admin => admin.id), ['root', 'second']);
+  const kept = journal.find('config.applied').filter(record => record.connection === 'kept');
+  assert.equal(kept.length >= 1, true, 'the live update is journaled as a kept connection');
+  await runtime.stop();
+}));
+
+test('the live bridge adopts an edited administrator list', () => withHome(async home => {
+  // Authorization is policy, and policy is rebuilt from the store: a new
+  // administrator reaches the Bot immediately, on the connection already open.
+  await writeStore(home, { settings: { adminUserIds: [] } });
+  const { ctx } = hostWithServices();
+  const client = fakeClient();
+  const runtime = createRuntime({
+    ctx, journal: memoryJournal(), log: silent,
+    config: Config({ botId: 'bot' }),
+    createClient: () => client,
+  });
+  await runtime.start();
+  await runtime.store.load();
+  client.emit('authenticated');
+  client.emit('message', frame('hello', { chat: 'newcomer', user: 'newcomer' }));
+  await settle();
+  assert.equal(ctx.prompts.length, 0, 'a sender nobody authorized reaches no Session');
+
+  await runtime.applyOps([{ op: 'settings.set', patch: { adminUserIds: ['newcomer'] } }]);
+  await settle();
+  client.emit('message', frame('hello again', { chat: 'newcomer', user: 'newcomer' }));
+  await until(() => ctx.prompts.length > 0);
+  assert.equal(ctx.prompts.length, 1, 'the same connection now admits them');
+  await runtime.stop();
+}));
+
+test('the WebSocket endpoint is half of the connection, so editing it reconnects', () => withHome(async home => {
+  await writeStore(home, {});
+  const { ctx } = hostWithServices();
+  const clients = [];
+  const runtime = createRuntime({
+    ctx, journal: memoryJournal(), log: silent,
+    config: Config({ botId: 'bot' }),
+    createClient: value => { const client = fakeClient(); clients.push({ client, options: value }); return client; },
+  });
+  await runtime.start();
+  await runtime.store.load();
+  assert.equal(clients.length, 1);
+  const applied = await runtime.applyOps([{ op: 'settings.set', patch: { wsUrl: 'wss://openws.example' } }]);
+  assert.equal(applied.ok, true);
+  await until(() => clients.length === 2);
+  assert.equal(clients.length, 2, 'a new endpoint is a new connection');
+  assert.equal(clients[1].options.wsUrl, 'wss://openws.example');
+  await runtime.stop();
+}));
+
+test('a settings patch that cannot be used is refused with its reason', () => withHome(async home => {
+  await writeStore(home, {});
+  const { ctx } = hostWithServices();
+  const runtime = createRuntime({
+    ctx, journal: memoryJournal(), log: silent,
+    config: Config({ botId: 'bot' }),
+    createClient: () => fakeClient(),
+  });
+  await runtime.start();
+  await runtime.store.load();
+  const cases = [
+    [{ wsUrl: 'ws://plaintext.example' }, /wss:\/\//],
+    [{ wsUrl: 'wss://user:pass@openws.example' }, /wss:\/\//],
+    [{ questionTimeoutMs: 10 }, /等待企微回复/],
+    [{ logRetentionDays: 400 }, /日志保留天数/],
+    [{ adminUserIds: [''] }, /userid/],
+    [{ adminWorkspaces: [42] }, /Workspace 路径/],
+    [{ nope: 1 }, /无法识别的设置项/],
+  ];
+  for (const [patch, pattern] of cases) {
+    const result = await runtime.applyOps([{ op: 'settings.set', patch }]);
+    assert.equal(result.ok, false, JSON.stringify(patch));
+    assert.match(result.error, pattern);
+  }
+  assert.equal(runtime.store.settings().wsUrl, '', 'nothing half-applied');
+  assert.equal(runtime.store.settings().logRetentionDays, 14);
+  await runtime.stop();
+}));
+
+test('the stored settings are read before the first connection decision', () => withHome(async home => {
+  // A reload event can arrive while the plugin is still starting. The bridge must
+  // not dial out with the defaults and adopt the real settings afterwards: that
+  // would refuse a stored administrator for as long as the file takes to read,
+  // and leave a spurious `rebuilt` in the journal.
+  await writeStore(home, { settings: { adminUserIds: ['root'], questionTimeoutMs: 45000 } });
+  const { ctx } = hostWithServices();
+  const clients = [];
+  const journal = memoryJournal();
+  const runtime = createRuntime({
+    ctx, journal, log: silent,
+    config: Config({ botId: 'bot' }),
+    createClient: () => { const client = fakeClient(); clients.push(client); return client; },
+  });
+  const starting = runtime.start();
+  ctx.handlers.get('app-boot/config-reload')();
+  await starting;
+  assert.equal(clients.length, 1, 'one connection, not two');
+  const applied = journal.find('config.applied');
+  assert.equal(applied.length, 1, 'the first decision already had the stored settings');
+  assert.deepEqual(applied[0].adminUserIds, ['root']);
+  assert.equal(applied[0].questionTimeoutMs, 45000);
+  assert.equal(applied[0].connection, 'rebuilt');
   await runtime.stop();
 }));

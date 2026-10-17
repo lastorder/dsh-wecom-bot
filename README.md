@@ -103,7 +103,7 @@ DSH 里的会话跑完一轮、需要你回答、或者需要审批工具调用�
 | **preset** | DSH 的 agent preset（决定这个会话能用哪些工具、带哪些提示段），只在**新建会话时**生效 |
 
 - **授权 = 加入分组**：只有属于某个分组的成员（以及管理员）会得到回复。不在任何分组里的人发消息会收到一条固定回复「**🔒 用户未授权** · 请联系管理员把你加入分组后再试」，同时出现在插件主页的「未授权用户」卡片里，连同他最后一条消息的摘要；在那里选择分组、可选填备注并确认，就完成了授权，机器人随即给他发一条「管理员已授权，可以开始使用了」。
-- **管理员始终可以发消息**：`adminUserIds` 里的人由 Config 直接信任，无需入组，会被隐式放进「默认分组」。
+- **管理员始终可以发消息**：管理员名单由插件自己的设置直接信任，无需入组，会被隐式放进「默认分组」；这份名单存在 `<DSH home>/wecom-bot/settings.json`，不在 DSH 的插件 Config 里。
 - **会话创建**：成员的会话为空时，收到下一条消息会在**其分组的 Workspace** 里新建一个 DSH 会话并立即提交消息；会话已归档或已删除时会自动换一个新的。想主动换一个：发 `/delete`（再 `/delete confirm`）或在插件主页点成员行尾的「归档会话」。
 - **默认分组的 Workspace**：留空即插件自带目录 `<DSH home>/wecom-bot/workspace`（自动创建并注册到侧边栏，标题「企业微信」）；也可以选一个已存在的目录。
 - **模型与 effort 属于分组**：分组选定模型（与思考强度 effort）后，会在创建会话时安装为会话级模型，也适用于该分组已存在的会话；留空表示跟随 DSH 当前默认模型。插件调用 DSH 的 `sessionController.selectModel` 设置会话级模型后会**把 DSH 默认模型恢复原状**，所以配置插件不会改变你在 DSH 界面新建会话时用的默认模型。
@@ -116,6 +116,8 @@ DSH 里的会话跑完一轮、需要你回答、或者需要审批工具调用�
 ## 在插件主页配置
 
 打开 **设置 → 插件 → `dsh-wecom-bot`** 的 bundle 主页。页面只有五张卡片，默认显示的尽量少，需要什么点什么；**每张卡片各存各的**，底部的「保存配置」已经去掉了：
+
+> **什么时候会重连机器人**：只有**连接身份**变了才会 —— Bot ID、Bot Secret、WebSocket 地址。这三项之外的一切（管理员、通知范围、等待时间、远程审批、日志开关与保留天数）都写在插件自己的**一个文件**里：`<DSH home>/wecom-bot/settings.json`（`"version": "0.5"`），它同时装着设置块、分组、成员、备注和每位管理员的默认 Workspace。保存后**立即对运行中的机器人生效，不会断开正在进行的对话**；DSH 的插件 Config 里只剩 Bot ID 与 Secret 的引用名。
 
 ![插件主页：连接、用户分组、未授权用户、管理员、高级设置五张卡片](https://raw.githubusercontent.com/lastorder/dsh-wecom-bot/main/preview/settings.png)
 
@@ -142,10 +144,10 @@ DSH 里的会话跑完一轮、需要你回答、或者需要审批工具调用�
    - 添加成员不再有单独的按钮：给机器人发消息的人在「未授权用户」里授权，就是加成员的唯一入口。
    - **这里的改动立即生效，不需要点保存**。
 3. **③ 未授权用户**：给机器人发过消息、但不在任何分组里的人，按时间倒序，附带最后一条消息的摘要；点「加入分组」选择分组（可填备注）并确认，即完成授权，机器人会给他发一条授权提示。**列表只在内存中**，重启 DSH 后清空（授权本身是持久化的）。这里同样优先显示备注名。
-4. **④ 管理员**：管理员列表用的是同一套人员行——点小图标弹出人员详情（类型、企微 ID、所属分组、备注），**备注即时生效**、与分组成员共用同一个名字；「移除管理员」在详情窗口底部，**加人、移除、改通知范围都不需要再点保存**：选中/移除即写入（写 Config 会让机器人重连一次，但决定是你当场做的）。
+4. **④ 管理员**：管理员列表用的是同一套人员行——点小图标弹出人员详情（类型、企微 ID、所属分组、备注），**备注即时生效**、与分组成员共用同一个名字；「移除管理员」在详情窗口底部，**加人、移除、改通知范围都不需要再点保存**：选中/移除即写入插件设置，**不会重连机器人**（决定是你当场做的，所以不用再点一次确认）。
    - 列表为空时显示一个「添加管理员」按钮；不为空时卡片右上角有一个「添加」。两者打开同一个**带搜索框的已知用户列表**：候选人是未授权用户和已授权成员，**优先显示备注名**、没有备注才显示企微 ID；找不到时也可以直接按 userid 添加。
    - 「可接收通知的 Workspace」**默认折叠**，展开后是勾选列表。配置留空（默认）时**全部勾选**、表示不收窄范围；取消勾选某个 Workspace 后，存的就是剩下勾选的那些路径，全勾回去又回到留空。只有归档会话的 Workspace 也会列出来（除非已被删除）。勾选/取消即生效。
-5. **⑤ 高级设置**（默认折叠）：远程审批、等待企微回复的秒数、私有化部署的 `wss://` 地址、JSONL 日志开关与保留天数、日志目录；同样自带「保存 / 放弃」。
+5. **⑤ 高级设置**（默认折叠）：远程审批、等待企微回复的秒数、私有化部署的 `wss://` 地址、JSONL 日志开关与保留天数、日志目录；自带「保存 / 放弃」。这一卡里**只有 WebSocket 地址**属于连接身份，保存它会重连机器人；其余几项保存后立即生效，**日志开关与保留天数也不需要重启 DSH**。
 
 > 截图由 `pnpm run preview` 用样例数据离屏渲染生成（`--dark` 深色版 `preview/settings-dark.png`、`--advanced` 展开通知范围的版本 `preview/settings-advanced.png`、`--dialog` 人员详情窗口、`--picker` 添加管理员窗口 `preview/settings-picker.png`、`--archive` 归档确认窗口），改页面后重新跑一次即可更新。
 
@@ -155,9 +157,9 @@ DSH 里的会话跑完一轮、需要你回答、或者需要审批工具调用�
 - 普通用户**永远只能访问自己名下的那个会话**：`/sessions`、`/use`、`/new`、`/workspaces`、引用通知跳转都会被拒绝，也不会收到别人会话的通知。自己的会话可用 `/compact` 压缩上下文、用 `/delete`（再 `/delete confirm`）归档。
 - **管理员**（`adminUserIds`）可以：`/sessions` 按 Workspace 列出会话、`/use` 切换自己要操作的会话、`/workspaces` 选一个默认 Workspace、`/new` 在那个 Workspace 新建会话并切换过去、`/reset` 回到自己的专属会话、引用任意通知直接跳转到那个会话；并按 `adminWorkspaces` 接收这些 Workspace 中**所有会话**的通知（留空 = 全部 Workspace）。**工具调用审批只发给管理员**，群聊和普通用户的单聊永远收不到审批请求。
 - **管理员命令只能在单聊里发送**：群聊里的会话是所有人共用的，`/new`、`/workspaces`、`/sessions`、`/use`、`/reset`、`/approve`、`/deny` 在群里一律被拒绝（回「管理员命令只能在单聊中使用」，不会被执行）；`/compact`、`/delete` 在群里只有管理员能用，群成员发会收到一条专门的说明：「群聊的会话记录只有管理员可以归档/压缩……如果你想处理的是自己的专属会话，请在与机器人的单聊里发送这条命令」。
-- 管理员配置在插件主页的「④ 管理员」中维护，也可以直接改 Config 的 `adminUserIds` / `adminWorkspaces`。
+- 管理员名单（`adminUserIds`）与通知范围（`adminWorkspaces`）在插件主页的「④ 管理员」中维护，存在插件自己的 `<DSH home>/wecom-bot/settings.json` 里：改动即时生效、**不会重连机器人**。DSH 的插件 Config 里只有 `botId` 与 Secret 的引用名。
 - 撤销授权有两种方式：在成员详情窗口底部点「移出分组」，或删掉整个分组。两者都不会删除 DSH 里已有的会话，也不会忘记这个人的备注。
-- **备注属于人，而不是属于某次授权**：它和分组、成员一起保存在 `bindings.json` 里，但独立于授权——移出分组、删掉分组、甚至从未进过分组的管理员，备注都还在，下次授权同一个人时自动恢复显示。
+- **备注属于人，而不是属于某次授权**：它和分组、成员、设置一起存在 `settings.json` 的 `labels` 里，但独立于授权——移出分组、删掉分组、甚至从未进过分组的管理员，备注都还在，下次授权同一个人时自动恢复显示。
 
 ## 通知、提问与审批
 
@@ -170,9 +172,10 @@ DSH 里的会话跑完一轮、需要你回答、或者需要审批工具调用�
 
 - 「未授权用户」列表：被拒绝主体的 ID、次数、最近时间，以及**最后一条消息的摘要**（单行、最多 120 字）。这是为了让管理员能认出敲门的人是谁。
 - **被接受的正常消息不保留正文**；只有被拒绝的消息会留下摘要。
-- 所有这些都只驻留内存（最多 200 条、24 小时过期），DSH 重启即清空；**分组与成员是持久化的**，不受影响。
+- 所有这些都只驻留内存（最多 200 条、24 小时过期），DSH 重启即清空。
+- **持久化的东西都在一个文件里**：`<DSH home>/wecom-bot/settings.json`（`"version": "0.5"`，权限 `0600`、原子写入）。它装着设置块（管理员、通知范围、WebSocket 地址、等待时间、远程审批、日志开关与保留天数）、分组、成员、备注，以及每位管理员自己的默认 Workspace——不再有第二个状态文件。版本号对不上（或内容读不出来）的文件不会被猜测着读或就地覆盖，而是改名成 `settings.json.v<旧版本>`（读不出来的用 `settings.json.corrupt`）放在旁边，插件从空状态开始；想留用里面的内容，照它的 userid/chatid 在页面上重新加一次即可。
 
-状态与分组接口注册在 DSH Connection Fetch 通道（`/api/wecom-bot/state`、`/api/wecom-bot/routing`），只有已登录的 DSH 页面可访问。
+状态与编辑接口注册在 DSH Connection Fetch 通道（`/api/wecom-bot/state` 读取状态、`/api/wecom-bot/store` 应用页面上的一切修改），只有已登录的 DSH 页面可访问。
 
 ## 企业微信指令
 
@@ -255,9 +258,9 @@ DSH 里的会话跑完一轮、需要你回答、或者需要审批工具调用�
 | `dsh.session.archive` / `dsh.session.compact` / `dsh.session.create` | 归档会话、上下文压缩（条数与 tokens）、管理员 `/new` 新建会话 |
 | `dsh.session.title` | 给机器人新建的会话写标题（`wecom-bot-<userid/chatid>`）；`outcome: unavailable` 表示这个部署没挂标题服务 |
 | `wecom.session.new` / `wecom.session.delete` / `wecom.workspace.select` / `wecom.authorized` | 管理员新建会话、归档自己的会话、选择默认 Workspace、页面授权某人后给她发提示 |
-| `binding.store.error` / `binding.view.error`（`warn`） | 分组文件读写或读取分组视图失败（`stage: version` 表示文件版本不认识、已挪到 `bindings.json.v<版本>`） |
+| `binding.store.error` / `binding.view.error`（`warn`） | 设置文件读写或读取分组视图失败（`stage: version` 表示文件版本不认识、已挪到 `settings.json.v<版本>`；无法解析的文件挪到 `settings.json.corrupt`） |
 | `dsh.question*` / `dsh.approval*` | 提问、审批及其答复 |
-| `connection.phase`、`config.applied`、`wecom.sdk` | 连接状态变化、生效配置（不含 Secret）、SDK 日志 |
+| `connection.phase`、`config.applied`、`wecom.sdk` | 连接状态变化、生效的设置（不含 Secret；`connection: rebuilt` 表示重建了连接，`kept` 表示就地交给运行中的机器人）、SDK 日志 |
 
 Secret 值、`secret`/`token`/`authorization` 等字段、`response_url`、媒体 `url` 与 `aeskey` 一律脱敏。日志包含对话原文，请按敏感数据管理；不需要时可在高级设置中关闭。
 
@@ -271,13 +274,7 @@ pnpm run preview      # 可选：重新生成 README 里的设置页截图（需
 
 DSH 加载 `dist/` 中的构建产物：Host 入口 `dist/host/index.js`，浏览器入口 `dist/client.js`。本地开发时在 DSH「插件」中以本目录绝对路径安装 bundle；改完代码重新构建后**重启 DSH**（Host 模块不热重载；只改客户端页面时，插件客户端热重载可用）。接口已在 DSH `0.2.0-rc.2` 与 `0.2.1-rc.2` 上核对。
 
-### 从 0.3.x 及更早升级
-
-- Config 里的 `chatIds`、`allowedUserIds`、`defaultWorkspace`、`defaultProvider`、`defaultModel`、`defaultReasoningEffort` **都已移除**（0.4.x）。这些字段留在 profile 配置里不会报错，只是被忽略——授权改由「用户分组」决定，Workspace 与模型改由分组持有。
-- **升级后请到「用户分组」里把默认分组的 Workspace / 模型重新设一遍**：旧 Config 的值不会自动迁移（第一版会保留默认分组的插件自带目录）。
-- 需要重新授权：旧的 `allowedUserIds` / `chatIds` 白名单不再生效，所以升级后**所有人都不在分组里**。让他发一条消息，然后到「未授权用户」里把他加进分组；或者先把他加进「管理员」，管理员无需入组即可使用。
-- **绑定文件没有迁移**：`<DSH home>/wecom-bot/bindings.json` 的 `version` 现在是**发布线**而不是递增计数（当前 `"0.4"`，包含分组 + 成员 + 备注 + 管理员各自的默认 Workspace）；只有换到新的次版本线并改动布局时它才会变。每位管理员的偏好存成对象（`"adminDefaults": { "<userid>": { "workspace": "<路径>" } }`），以后加字段不用再换文件形状。别的版本号——包括 0.4.1 写下的整数 `5`——不会被猜测着读，而是被改名成 `bindings.json.v<版本>` 放好，插件从空状态开始。想留用旧文件的内容，照里面的 userid/chatid 在页面上重新加一次即可。重启 DSH 后如果「未授权用户」里出现了原来的成员，说明旧文件被放到一边了，重新授权一次即可。
-- 0.3.0 里的 `sessionIds`（更早的会话白名单）早已被忽略，可以手动从 profile 配置里删掉。
+升级到新版本时没有手工迁移步骤：装上新的包，插件继续读同一个 `settings.json`（版本线没变就照原样用）；唯一需要动手的情况是文件版本换到了新的次版本线，那时旧文件会被改名放到旁边（见「[内存里保留了什么](#内存里保留了什么)」），照里面的 userid/chatid 在页面上重新加一次即可。
 
 ## 已知限制
 
@@ -298,9 +295,9 @@ src/
   shared/protocol.ts      Host 与页面共享的常量、分组/成员/模型/状态接口类型
   host/                   DSH Host 插件（Node ESM，tsc → dist/host）
     index.ts              入口：Config、inject、apply（注册两个已认证接口）
-    config.ts             Config schema 与规范化（策略：连接、管理员、高级开关）
-    runtime.ts            宿主生命周期编排：配置/凭据变化时重建连接；唯一的 session/event 监听
-    routing-store.ts      分组 + 成员 + 备注 + 每位管理员的默认 Workspace：<DSH home>/wecom-bot/bindings.json（原子写、私有权限、只认当前版本）
+    config.ts             Config schema：只有连接身份（Bot ID + 凭据库里的 Secret 引用名）
+    runtime.ts            宿主生命周期编排：连接身份变化才重建连接，其余设置就地交给运行中的机器人
+    store.ts              插件自己的文档 `settings.json`：设置块 + 分组 + 成员 + 备注 + 每位管理员的默认 Workspace（原子写、私有权限、只认当前版本）
     routing.ts            成员 → 会话路由（分组的 Workspace/模型 + 成员自己的会话）
     sessions.ts           会话供给：创建会话、安装模型、描述会话状态
     session-ops.ts        需要 DSH 服务的三个操作：归档会话、压缩上下文、在指定 Workspace 新建会话
@@ -308,7 +305,7 @@ src/
     workspaces.ts         默认/自定义 Workspace 的解析与注册
     models.ts             DSH 模型目录与「安装会话级模型后恢复默认模型」
     presets.ts            DSH 的 agent preset 名单（分组表单的选项、写入前的校验）
-    groups-view.ts        配置页的分组表格（读取 + 校验并应用编辑）
+    groups-view.ts        配置页的分组表格（读取 + 校验并应用编辑，含设置项的字段校验）
     bridge/               一条企微连接：
       index.ts              组装、入站处理、授权、路由、通知/提问/审批
       inbound.ts            回调帧校验与防重放
@@ -326,11 +323,11 @@ src/
     turns.ts              从 Session 日志汇总一个回合
     journal.ts            JSONL 日志、DSH home 解析、脱敏
     status.ts             连接状态与计数
-    routes.ts             已认证的状态与分组接口
+    routes.ts             已认证的两个接口：读取状态、应用页面上的设置/分组/成员修改
   client/                 插件主页（React TSX，esbuild → dist/client.js）
     index.tsx             注册到 plugins.bundle.config
     components/           状态栏、凭据、用户分组、未授权用户、管理员、高级设置（人员行为 ui.tsx 的 PersonRow/PersonDialog，分卡片保存用 SaveBar）
-    hooks.ts / api.ts     Config 表单、凭据、状态接口与分组提交
+    hooks.ts / api.ts     Config 表单（只有①连接用）、插件设置提交、凭据与状态接口
     model.ts              纯函数：草稿、差异、校验、模型/preset/effort/上下文标签、分组/成员操作
     styles.ts             基于 DSH 主题变量的样式
 scripts/build-client.mjs  打包为 DSH 浏览器模块格式（React 与 DSH UI 组件由宿主提供）

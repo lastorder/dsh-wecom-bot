@@ -1,5 +1,5 @@
 import { DEFAULT_GROUP_ID, type BindingRecord, type GroupRecord } from '../shared/protocol.js';
-import { bindingKey, bindingKeyFor, type BindingKeyParts, type RoutingStore } from './routing-store.js';
+import { bindingKey, bindingKeyFor, type BindingKeyParts, type PluginStore } from './store.js';
 import type { SessionProvisioner } from './sessions.js';
 
 /**
@@ -35,12 +35,12 @@ export interface Router {
   reapplyGroup(groupId: string): Promise<void>;
   /** The group that decides Workspace and model for one member. */
   groupOf(binding: BindingRecord): GroupRecord;
-  readonly store: RoutingStore;
+  readonly store: PluginStore;
   readonly provisioner: SessionProvisioner;
 }
 
 export interface RouterOptions {
-  readonly store: RoutingStore;
+  readonly store: PluginStore;
   readonly provisioner: SessionProvisioner;
   readonly log?: { warn(message: string): void };
 }

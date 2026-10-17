@@ -33,7 +33,7 @@ const primitives = new Proxy({
 }, { get: (target, key) => target[key] ?? (() => null) });
 
 const STATE = {
-  version: '0.4',
+  version: '0.5',
   connection: { phase: 'online', since: Date.now() - 60_000 },
   traffic: { since: 0, received: 3, rejected: 1, prompts: 1, notifications: 2, failures: 0 },
   rejected: [{
@@ -102,13 +102,25 @@ const STATE = {
     // Every Session archived: it can never notify anybody, so the scope list hides it.
     { id: 'w2', path: '/Users/me/orion-agent', title: 'orion-agent', pluginOwned: false, sessionCount: 0, archivedSessionCount: 32 },
   ],
+  // The store's settings block: ④管理员 and ⑤高级设置 edit this, not the Config.
+  settings: {
+    wsUrl: '',
+    adminUserIds: [],
+    adminWorkspaces: [],
+    questionTimeoutMs: 60000,
+    remoteApprovals: false,
+    logEnabled: true,
+    logRetentionDays: 14,
+  },
   admins: [{ id: 'alice', label: '', displayName: 'alice' }],
-  adminWorkspaces: [],
   notices: [],
   journal: { enabled: true, directory: '/Users/me/.dsh/wecom-bot/logs', file: '/Users/me/.dsh/wecom-bot/logs/2026-10-16.jsonl', retentionDays: 14 },
 };
 
-function mount({ stored = {}, secretConfigured = true, state = STATE } = {}) {
+/** The sample page with part of the store's settings block replaced. */
+const withSettings = patch => ({ ...STATE, settings: { ...STATE.settings, ...patch } });
+
+function mount({ stored = {}, secretConfigured = true, state = STATE, postError } = {}) {
   let current = state;
   let entry;
   const fetches = [];
@@ -125,8 +137,16 @@ function mount({ stored = {}, secretConfigured = true, state = STATE } = {}) {
       fetches.push({ url, options });
       let body = current;
       if (options?.method === 'POST') {
-        const added = JSON.parse(options.body).ops.some(op => op.op === 'group.add');
-        body = { ok: true, routing: current.routing, ...(added ? { createdGroupId: 'g-new' } : {}) };
+        if (postError) return { ok: false, status: 422, json: async () => ({ ok: false, error: postError }) };
+        const ops = JSON.parse(options.body).ops;
+        const added = ops.some(op => op.op === 'group.add');
+        // The Host merges a settings patch field by field into its own document,
+        // so the next read answers with what was just written — the authority the
+        // page polls, rather than the write's own answer.
+        for (const op of ops) {
+          if (op.op === 'settings.set') current = { ...current, settings: { ...current.settings, ...op.patch } };
+        }
+        body = { ok: true, routing: current.routing, settings: current.settings, ...(added ? { createdGroupId: 'g-new' } : {}) };
       }
       return { ok: true, status: 200, json: async () => body };
     },
@@ -145,7 +165,7 @@ function mount({ stored = {}, secretConfigured = true, state = STATE } = {}) {
 
   let snapshot = {
     status: 'ready', revision: 1, writable: true,
-    value: { botId: '', adminUserIds: [], adminWorkspaces: [], ...stored },
+    value: { botId: '', ...stored },
   };
   const listeners = new Set();
   const mutations = [];
@@ -359,11 +379,11 @@ test('a card saves only its own section, and nothing is saved while it is untouc
 });
 
 test('adding an administrator searches known people by note, and writes at once', async () => {
-  const harness = mount({ stored: { botId: 'bot', adminUserIds: ['alice'] } });
+  const harness = mount({ state: withSettings({ adminUserIds: ['alice'] }) });
   const renderer = await render(harness);
   const root = renderer.root;
   const all = text(renderer.toJSON());
-  assert.ok(all.includes('alice'), 'the configured administrator is listed');
+  assert.ok(all.includes('alice'), 'the stored administrator is listed');
   assert.equal(all.includes('未设置'), false, 'the empty tag became an add button');
   assert.equal(root.findAll(node => node.type === 'button' && text(node) === '保存').length, 0,
     'the card has no 保存 button: every edit is written when it is made');
@@ -378,15 +398,16 @@ test('adding an administrator searches known people by note, and writes at once'
     root.findAll(node => node.type === 'button' && node.props.className === 'wcb-picker-row')[0].props.onClick();
   });
   await flush();
-  const ops = JSON.parse(JSON.stringify(harness.mutations.at(-1).ops));
-  assert.deepEqual(ops.find(op => op.path[0] === 'adminUserIds').value, ['alice', 'mallory'],
-    'picking somebody writes the list immediately');
+  assert.equal(harness.fetches.find(call => call.options?.method === 'POST').url, 'api/wecom-bot/store');
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'settings.set', patch: { adminUserIds: ['alice', 'mallory'] } }],
+    'picking somebody writes the store, not the Config');
+  assert.equal(harness.mutations.length, 0, 'the administrator list left the Config form');
   assert.ok(text(renderer.toJSON()).includes('mallory'), 'the new administrator is listed');
   renderer.unmount();
 });
 
 test('the notification scope is all-checked by default and narrows only when unchecked', async () => {
-  const harness = mount({ stored: { botId: 'bot', adminUserIds: ['alice'] } });
+  const harness = mount({ state: withSettings({ adminUserIds: ['alice'] }) });
   const renderer = await render(harness);
   const root = renderer.root;
   assert.ok(text(renderer.toJSON()).includes('全部 Workspace'), 'the folded summary says the default');
@@ -403,24 +424,80 @@ test('the notification scope is all-checked by default and narrows only when unc
   // Unchecking one Workspace stores the remaining path, not a list of all of them.
   await act(async () => { byLabel(root, '管理员接收 dsh-wecom-bot 的通知').props.onChange({ target: { checked: false } }); });
   await flush();
-  const ops = JSON.parse(JSON.stringify(harness.mutations.at(-1).ops));
-  assert.deepEqual(ops.find(op => op.path[0] === 'adminWorkspaces').value, ['/Users/me/orion-agent'],
-    'a checkbox writes the scope immediately');
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'settings.set', patch: { adminWorkspaces: ['/Users/me/orion-agent'] } }],
+    'a checkbox writes the narrowed scope immediately');
   assert.equal(byLabel(root, '管理员接收 dsh-wecom-bot 的通知').props.checked, false, 'and the box reflects it');
+  assert.ok(text(renderer.toJSON()).includes('1 / 2 个 Workspace'), 'the summary counts what is left');
+
+  // Checking the last one back collapses the list to the empty "all" it means.
+  await act(async () => { byLabel(root, '管理员接收 dsh-wecom-bot 的通知').props.onChange({ target: { checked: true } }); });
+  await flush();
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'settings.set', patch: { adminWorkspaces: [] } }],
+    'a scope covering every Workspace is stored as the default, not as today\'s paths');
+  assert.equal(byLabel(root, '管理员接收 orion-agent 的通知').props.checked, true);
+  assert.ok(text(renderer.toJSON()).includes('全部 Workspace'));
   renderer.unmount();
 });
 
 test('removing an administrator is written immediately too', async () => {
-  const harness = mount({ stored: { botId: 'bot', adminUserIds: ['alice'] } });
+  const harness = mount({ state: withSettings({ adminUserIds: ['alice'] }) });
   const renderer = await render(harness);
   const root = renderer.root;
   await act(async () => { buttonByLabel(root, 'alice 的详情').props.onClick(); });
   await act(async () => { buttonByLabel(root, '移除管理员 alice').props.onClick(); });
   await flush();
-  const ops = JSON.parse(JSON.stringify(harness.mutations.at(-1).ops));
-  assert.deepEqual(ops.find(op => op.path[0] === 'adminUserIds').value, [],
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'settings.set', patch: { adminUserIds: [] } }],
     'the dialog removes the administrator without a second click');
   assert.equal(text(renderer.toJSON()).includes('还没有管理员'), true, 'and the card shows the empty state');
+  renderer.unmount();
+});
+
+test('⑤保存 writes one settings patch, converting the seconds the field shows into milliseconds', async () => {
+  const harness = mount();
+  const renderer = await render(harness);
+  const root = renderer.root;
+  const advanced = root.find(node => node.type === 'details');
+
+  // The endpoint is the one field here that is half of the connection.
+  assert.ok(text(advanced).includes('保存这一项会重新连接机器人'));
+  assert.ok(text(advanced).includes('不会断开正在进行的对话'), 'and the rest of the card says it applies live');
+  assert.equal(advanced.findAll(node => node.type === 'button' && text(node) === '保存').length, 0,
+    'an untouched card offers no save button');
+
+  await act(async () => { byLabel(root, '等待企微回复的秒数').props.onChange({ target: { value: '30' } }); });
+  assert.equal(byLabel(root, '等待企微回复的秒数').props.value, 30, 'the field is a whole number of seconds');
+  await act(async () => { advanced.findAll(node => node.type === 'button' && text(node) === '保存')[0].props.onClick(); });
+  await flush();
+  assert.equal(harness.fetches.find(call => call.options?.method === 'POST').url, 'api/wecom-bot/store');
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'settings.set', patch: { questionTimeoutMs: 30000 } }],
+    'the store keeps milliseconds, the field shows seconds');
+  assert.equal(harness.mutations.length, 0, 'the advanced knobs left the Config form');
+  assert.ok(text(renderer.toJSON()).includes('已保存。'), 'the card confirms its own save');
+
+  // A later edit writes only what that edit moved: the saved timeout is the
+  // stored one now, so it is not written back a second time.
+  await act(async () => { byLabel(root, 'WebSocket 地址').props.onChange({ target: { value: ' wss://openws.example ' } }); });
+  await act(async () => { advanced.findAll(node => node.type === 'button' && text(node) === '保存')[0].props.onClick(); });
+  await flush();
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'settings.set', patch: { wsUrl: 'wss://openws.example' } }],
+    'one patch, trimmed, for the field that moved');
+  renderer.unmount();
+});
+
+test('a refused settings write shows the Host message as it arrived, and keeps the draft', async () => {
+  const harness = mount({ postError: '「等待企微回复」需要在 1–300 秒之间。' });
+  const renderer = await render(harness);
+  const root = renderer.root;
+  await act(async () => { byLabel(root, '等待企微回复的秒数').props.onChange({ target: { value: '30' } }); });
+  await act(async () => {
+    root.find(node => node.type === 'details')
+      .findAll(node => node.type === 'button' && text(node) === '保存')[0].props.onClick();
+  });
+  await flush();
+  assert.ok(text(renderer.toJSON()).includes('「等待企微回复」需要在 1–300 秒之间。'),
+    'the Host is the authority, so its explanation is what the operator reads');
+  assert.equal(byLabel(root, '等待企微回复的秒数').props.value, 30, 'the edit is still there to fix');
+  assert.equal(harness.mutations.length, 0);
   renderer.unmount();
 });
 
@@ -440,7 +517,7 @@ test('a group is edited as one draft: 编辑 becomes 保存 and posts a single p
 
   await act(async () => { await buttonByText(root, '保存').props.onClick(); });
   await flush();
-  assert.equal(harness.fetches.find(call => call.options?.method === 'POST').url, 'api/wecom-bot/routing');
+  assert.equal(harness.fetches.find(call => call.options?.method === 'POST').url, 'api/wecom-bot/store');
   assert.deepEqual(posts(harness).at(-1), [{
     op: 'group.update', id: 'default',
     patch: {
@@ -541,8 +618,9 @@ test('an unauthorized sender is authorized straight into a group, with a note', 
 });
 
 test('a person with a note is shown by the note, and the id only in the details', async () => {
-  const state = { ...STATE, admins: [{ id: 'root', label: '运维小李', displayName: '运维小李' }] };
-  const harness = mount({ stored: { botId: 'bot', adminUserIds: ['root'] }, state });
+  const state = withSettings({ adminUserIds: ['root'] });
+  state.admins = [{ id: 'root', label: '运维小李', displayName: '运维小李' }];
+  const harness = mount({ state });
   const renderer = await render(harness);
   const root = renderer.root;
   const collapsed = text(renderer.toJSON());

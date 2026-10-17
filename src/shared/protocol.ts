@@ -12,8 +12,8 @@ export const CONFIG_NAMESPACE = 'wecom-bot';
 export const DEFAULT_SECRET_REF = 'WECOM_BOT_SECRET';
 /** Authenticated Connection Fetch route; the browser reads it document-relative. */
 export const STATE_ROUTE = '/api/wecom-bot/state';
-/** Authenticated Connection Fetch route that applies group/member edits. */
-export const ROUTING_ROUTE = '/api/wecom-bot/routing';
+/** Authenticated Connection Fetch route that applies settings/group/member edits. */
+export const STORE_ROUTE = '/api/wecom-bot/store';
 /** Directory below the DSH home that holds this plugin's own data. */
 export const PLUGIN_HOME_DIRECTORY = 'wecom-bot';
 /** The plugin's own Workspace directory, below {@link PLUGIN_HOME_DIRECTORY}. */
@@ -21,13 +21,16 @@ export const PLUGIN_WORKSPACE_DIRECTORY = 'workspace';
 /** Sidebar title of the plugin's own Workspace. */
 export const PLUGIN_WORKSPACE_TITLE = '企业微信';
 /**
- * Persisted groups+bindings file version. The layout is named after the release
- * line it belongs to (`0.4`) instead of counting every edit, so the number in
- * `bindings.json` only moves when a new minor line changes the layout. A file of
- * any other version is set aside instead of migrated — there is no earlier
- * deployment to keep working.
+ * Persisted plugin store version (`settings.json`). The layout is named after
+ * the release line it belongs to (`0.5`) instead of counting every edit, so the
+ * number in the file only moves when a new minor line changes the layout. A file
+ * of any other version is set aside instead of migrated — the plugin has no
+ * deployment on an earlier one, and a silent upgrader is exactly the kind of
+ * code that cannot be tested after the fact.
  */
-export const ROUTING_VERSION = '0.4';
+export const STORE_VERSION = '0.5';
+/** The plugin's own document: settings, groups, memberships and notes. */
+export const STORE_FILE = 'settings.json';
 /** Upper bound on persisted members across all groups. */
 export const MAX_BINDINGS = 500;
 /** Upper bound on user groups. */
@@ -37,6 +40,13 @@ export const DEFAULT_GROUP_ID = 'default';
 export const DEFAULT_GROUP_NAME = '默认分组';
 /** Longest accepted 备注 / group name, in characters. */
 export const MAX_LABEL_CHARS = 60;
+/** Bounds the page and the Host both enforce on the store's settings block. */
+export const MIN_QUESTION_TIMEOUT_MS = 1000;
+export const MAX_QUESTION_TIMEOUT_MS = 300000;
+export const DEFAULT_QUESTION_TIMEOUT_MS = 60000;
+export const MIN_LOG_RETENTION_DAYS = 1;
+export const MAX_LOG_RETENTION_DAYS = 365;
+export const DEFAULT_LOG_RETENTION_DAYS = 14;
 
 export type ConnectionPhase =
   | 'unconfigured' // Bot ID or Secret missing
@@ -136,6 +146,41 @@ export interface JournalInfo {
   readonly file: string;
   readonly retentionDays: number;
 }
+
+/* ------------------------------------------------------------------ *
+ * The store's settings block: everything the operator edits, minus   *
+ * the connection identity (which stays in the plugin Config)         *
+ * ------------------------------------------------------------------ */
+
+/**
+ * The operator-owned settings the plugin keeps in its own document, next to the
+ * groups and memberships.
+ *
+ * Only the connection identity (`botId` and the Secret reference) lives in the
+ * plugin Config, because that is what a DSH profile declares and what the
+ * credential service resolves. Everything else lives here, and editing it never
+ * rebuilds the bridge: adding an administrator or re-scoping notifications must
+ * not drop the WeCom socket. Changing {@link StoreSettings.wsUrl} is the one
+ * exception — it is half of the connection, so the bridge reconnects.
+ */
+export interface StoreSettings {
+  /** Custom WebSocket endpoint; empty means the SDK default. Only `wss://`. */
+  readonly wsUrl: string;
+  /** Administrators: switch Sessions, receive approvals, reach every notice. */
+  readonly adminUserIds: readonly string[];
+  /** Workspaces an administrator's notices cover; empty means every one. */
+  readonly adminWorkspaces: readonly string[];
+  /** How long the Bot waits for a WeCom answer before falling back to DSH. */
+  readonly questionTimeoutMs: number;
+  /** Whether tool approvals may be answered from a WeCom private chat. */
+  readonly remoteApprovals: boolean;
+  /** Whether the JSONL conversation journal is written. */
+  readonly logEnabled: boolean;
+  readonly logRetentionDays: number;
+}
+
+/** One settings edit; omitted fields keep their stored value. */
+export type StoreSettingsPatch = Partial<StoreSettings>;
 
 /* ------------------------------------------------------------------ *
  * Groups and members: one group owns Workspace+model, members route   *
@@ -315,7 +360,7 @@ export interface WorkspaceOption {  readonly id: string;
   readonly archivedSessionCount: number;
 }
 
-/** One administrator row: the Config grants the power, the store keeps the note. */
+/** One administrator row: the store's settings grant the power, and keep the note. */
 export interface AdminView {
   readonly id: string;
   /** Operator note; empty when unnamed. */
@@ -326,8 +371,8 @@ export interface AdminView {
   readonly groupName?: string;
 }
 
-/** Edits the settings page applies to groups and members. */
-export type RoutingOp =
+/** Edits the settings page applies to the plugin's store. */
+export type StoreOp =
   | { readonly op: 'group.add'; readonly name?: string }
   | {
     readonly op: 'group.update';
@@ -370,13 +415,19 @@ export type RoutingOp =
    * administrator who is in no group still has a name, and the note survives
    * being removed from a group.
    */
-  | { readonly op: 'label.set'; readonly key: string; readonly label: string };
+  | { readonly op: 'label.set'; readonly key: string; readonly label: string }
+  /**
+   * Write the store's settings block: the administrator list, the notification
+   * scope and the advanced knobs. This lands in the plugin's own document, so it
+   * is applied live — no DSH config write, no bridge rebuild, no reconnect.
+   */
+  | { readonly op: 'settings.set'; readonly patch: StoreSettingsPatch };
 
-export interface RoutingRequest {
-  readonly ops: readonly RoutingOp[];
+export interface StoreRequest {
+  readonly ops: readonly StoreOp[];
 }
 
-export interface RoutingResponse {
+export interface StoreResponse {
   readonly ok: boolean;
   readonly error?: string;
   readonly routing?: RoutingView;
@@ -385,7 +436,7 @@ export interface RoutingResponse {
 }
 
 export interface BridgeStateView {
-  readonly version: typeof ROUTING_VERSION;
+  readonly version: typeof STORE_VERSION;
   readonly connection: ConnectionStatus;
   readonly traffic: TrafficStats;
   /** Senders refused since Host start, newest first. */
@@ -399,8 +450,9 @@ export interface BridgeStateView {
   readonly presets: PresetCatalogView | null;
   readonly presetsError?: string;
   readonly workspaces: readonly WorkspaceOption[];
+  /** The store's settings block, as the ④管理员 / ⑤高级设置 cards edit it. */
+  readonly settings: StoreSettings;
   readonly admins: readonly AdminView[];
-  readonly adminWorkspaces: readonly string[];
   /** Non-fatal setup problems worth showing on the page. */
   readonly notices: readonly string[];
   readonly journal: JournalInfo;

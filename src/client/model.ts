@@ -5,31 +5,20 @@
  */
 import type {
   AgentPresetOption, BindingKind, ContextUsage, GroupMemberView, GroupView,
-  ModelCatalogView, ModelChoice, ModelSelection, PresetCatalogView, RoutingOp,
+  ModelCatalogView, ModelChoice, ModelSelection, PresetCatalogView, StoreOp,
+  StoreSettings, StoreSettingsPatch,
 } from '../shared/protocol.ts';
-import { DEFAULT_SECRET_REF } from '../shared/protocol.ts';
+import {
+  DEFAULT_LOG_RETENTION_DAYS, DEFAULT_QUESTION_TIMEOUT_MS, DEFAULT_SECRET_REF,
+  MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS, MIN_QUESTION_TIMEOUT_MS,
+} from '../shared/protocol.ts';
 import type { FormOperation, StoredConfig } from './types.ts';
 
+/** The 连接 card's fallback: the Config holds the Bot ID and the Secret reference. */
 export const DEFAULTS: StoredConfig = {
   botId: '',
   secretEnv: DEFAULT_SECRET_REF,
-  adminUserIds: [],
-  adminWorkspaces: [],
-  wsUrl: '',
-  questionTimeoutMs: 60000,
-  remoteApprovals: false,
-  logEnabled: true,
-  logRetentionDays: 14,
 };
-
-const LIST_KEYS = ['adminUserIds', 'adminWorkspaces'] as const;
-const SCALAR_KEYS = [
-  'botId', 'wsUrl', 'questionTimeoutMs', 'remoteApprovals', 'logEnabled', 'logRetentionDays',
-] as const;
-
-function list(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
-}
 
 function text(value: unknown, fallback = ''): string {
   return typeof value === 'string' ? value : fallback;
@@ -40,40 +29,25 @@ export function storedFrom(value: Partial<StoredConfig> | undefined): StoredConf
   return {
     botId: text(v.botId),
     secretEnv: text(v.secretEnv).trim() || DEFAULTS.secretEnv,
-    adminUserIds: list(v.adminUserIds),
-    adminWorkspaces: list(v.adminWorkspaces),
-    wsUrl: text(v.wsUrl),
-    questionTimeoutMs: typeof v.questionTimeoutMs === 'number' ? v.questionTimeoutMs : DEFAULTS.questionTimeoutMs,
-    remoteApprovals: v.remoteApprovals === true,
-    logEnabled: v.logEnabled !== false,
-    logRetentionDays: typeof v.logRetentionDays === 'number' ? v.logRetentionDays : DEFAULTS.logRetentionDays,
   };
 }
 
-function normalizedList(values: readonly string[]): string[] {
-  return [...new Set(values.map(value => value.trim()).filter(Boolean))];
-}
-
-function sameList(a: readonly string[], b: readonly string[]): boolean {
-  const left = normalizedList(a);
-  const right = normalizedList(b);
-  return left.length === right.length && left.every(item => right.includes(item));
-}
-
-function normalizedScalar(key: (typeof SCALAR_KEYS)[number], draft: StoredConfig): unknown {
+function normalizedScalar(key: 'botId', draft: StoredConfig): unknown {
   const value = draft[key];
   return typeof value === 'string' ? value.trim() : value;
 }
 
-/** The minimal Config operations that turn `base` into `draft` (Secret excluded). */
+/**
+ * The minimal Config operations that turn `base` into `draft`.
+ *
+ * The Config is the Bot ID and the Secret reference, and only the first of them
+ * is a form field: a Secret is written to DSH's credential store, never into the
+ * Config document, so it is never part of a diff.
+ */
 export function changedOperations(draft: StoredConfig, base: StoredConfig): FormOperation[] {
   const ops: FormOperation[] = [];
-  for (const key of SCALAR_KEYS) {
-    const next = normalizedScalar(key, draft);
-    if (next !== normalizedScalar(key, base)) ops.push({ op: 'set', path: [key], value: next });
-  }
-  for (const key of LIST_KEYS) {
-    if (!sameList(draft[key], base[key])) ops.push({ op: 'set', path: [key], value: normalizedList(draft[key]) });
+  if (normalizedScalar('botId', draft) !== normalizedScalar('botId', base)) {
+    ops.push({ op: 'set', path: ['botId'], value: normalizedScalar('botId', draft) });
   }
   return ops;
 }
@@ -91,8 +65,17 @@ export function validateCredentials(draft: { readonly botId: string; readonly se
   return errors;
 }
 
-/** The 高级设置 card's own validation: a safe endpoint and the two ranges. */
-export function validateAdvanced(draft: Pick<StoredConfig, 'wsUrl' | 'questionTimeoutMs' | 'logRetentionDays'>): FieldErrors {
+/**
+ * The 高级设置 card's own validation: a safe endpoint and the two ranges, read
+ * from the store's settings block rather than from the Config.
+ *
+ * The Host refuses the same values out loud (`validateSettingsPatch`), and these
+ * bounds are its constants, so the field error appears before the round trip
+ * without the two ever drifting apart.
+ */
+export function validateAdvanced(
+  draft: Pick<StoreSettings, 'wsUrl' | 'questionTimeoutMs' | 'logRetentionDays'>,
+): FieldErrors {
   const errors: FieldErrors = {};
   const wsUrl = draft.wsUrl.trim();
   if (wsUrl) {
@@ -103,13 +86,47 @@ export function validateAdvanced(draft: Pick<StoredConfig, 'wsUrl' | 'questionTi
       errors.wsUrl = '不是有效的 URL。';
     }
   }
-  if (!Number.isFinite(draft.questionTimeoutMs) || draft.questionTimeoutMs < 1000 || draft.questionTimeoutMs > 300000) {
-    errors.questionTimeoutMs = '请输入 1–300 秒。';
+  if (!Number.isFinite(draft.questionTimeoutMs)
+    || draft.questionTimeoutMs < MIN_QUESTION_TIMEOUT_MS || draft.questionTimeoutMs > MAX_QUESTION_TIMEOUT_MS) {
+    errors.questionTimeoutMs = `请输入 ${MIN_QUESTION_TIMEOUT_MS / 1000}–${MAX_QUESTION_TIMEOUT_MS / 1000} 秒。`;
   }
-  if (!Number.isInteger(draft.logRetentionDays) || draft.logRetentionDays < 1 || draft.logRetentionDays > 365) {
-    errors.logRetentionDays = '请输入 1–365 的整数天数。';
+  if (!Number.isInteger(draft.logRetentionDays)
+    || draft.logRetentionDays < MIN_LOG_RETENTION_DAYS || draft.logRetentionDays > MAX_LOG_RETENTION_DAYS) {
+    errors.logRetentionDays = `请输入 ${MIN_LOG_RETENTION_DAYS}–${MAX_LOG_RETENTION_DAYS} 的整数天数。`;
   }
   return errors;
+}
+
+/** The store's settings block as the 高级设置 card seeds its draft. */
+export function advancedSlice(settings: StoreSettings | undefined): Pick<
+  StoreSettings, 'remoteApprovals' | 'questionTimeoutMs' | 'wsUrl' | 'logEnabled' | 'logRetentionDays'
+> {
+  return {
+    remoteApprovals: settings?.remoteApprovals ?? false,
+    questionTimeoutMs: settings?.questionTimeoutMs ?? DEFAULT_QUESTION_TIMEOUT_MS,
+    wsUrl: settings?.wsUrl ?? '',
+    logEnabled: settings?.logEnabled ?? true,
+    logRetentionDays: settings?.logRetentionDays ?? DEFAULT_LOG_RETENTION_DAYS,
+  };
+}
+
+/**
+ * The patch that turns the stored slice into the draft.
+ *
+ * Only the fields the operator actually moved are part of it, so saving the card
+ * cannot write back a stale copy of something another window just changed.
+ */
+export function settingsPatch(
+  draft: Pick<StoreSettings, 'remoteApprovals' | 'questionTimeoutMs' | 'wsUrl' | 'logEnabled' | 'logRetentionDays'>,
+  stored: Pick<StoreSettings, 'remoteApprovals' | 'questionTimeoutMs' | 'wsUrl' | 'logEnabled' | 'logRetentionDays'>,
+): StoreSettingsPatch {
+  const patch: { -readonly [K in keyof StoreSettingsPatch]: StoreSettingsPatch[K] } = {};
+  if (draft.remoteApprovals !== stored.remoteApprovals) patch.remoteApprovals = draft.remoteApprovals;
+  if (draft.questionTimeoutMs !== stored.questionTimeoutMs) patch.questionTimeoutMs = draft.questionTimeoutMs;
+  if (draft.wsUrl.trim() !== stored.wsUrl.trim()) patch.wsUrl = draft.wsUrl.trim();
+  if (draft.logEnabled !== stored.logEnabled) patch.logEnabled = draft.logEnabled;
+  if (draft.logRetentionDays !== stored.logRetentionDays) patch.logRetentionDays = draft.logRetentionDays;
+  return patch;
 }
 
 export function toggle(values: readonly string[], id: string, on?: boolean): string[] {
@@ -131,8 +148,8 @@ export function scopeIncludes(values: readonly string[], path: string): boolean 
  * The stored scope after toggling one Workspace.
  *
  * A list that covers every offered Workspace collapses back to `[]` — the
- * canonical "all" the Config documents, so checking everything does not
- * silently pin today's Workspace set into the file.
+ * canonical "all" the store documents, so checking everything does not silently
+ * pin today's Workspace set into the file.
  */
 export function toggleScope(values: readonly string[], allPaths: readonly string[], path: string, on: boolean): string[] {
   const next = new Set(values.length ? values : allPaths);
@@ -290,7 +307,19 @@ export function relativeTime(at: number | undefined, now = Date.now()): string {
 
 /* --------------------------- routing operations ------------------------ */
 
-export function addGroup(name?: string): RoutingOp {
+/**
+ * Write the store's settings block.
+ *
+ * One op carries a whole patch, because `settings.set` merges field by field on
+ * the Host: the ④管理员 card sends the array it just changed, the ⑤高级设置 card
+ * sends the knobs it just moved, and neither has to read the other's fields back
+ * first.
+ */
+export function setSettings(patch: StoreSettingsPatch): StoreOp {
+  return { op: 'settings.set', patch };
+}
+
+export function addGroup(name?: string): StoreOp {
   return { op: 'group.add', ...(name ? { name } : {}) };
 }
 
@@ -301,32 +330,32 @@ export function updateGroup(id: string, patch: {
   model?: string;
   reasoningEffort?: string;
   preset?: string;
-}): RoutingOp {
+}): StoreOp {
   return { op: 'group.update', id, patch };
 }
 
-export function deleteGroup(id: string): RoutingOp {
+export function deleteGroup(id: string): StoreOp {
   return { op: 'group.delete', id };
 }
 
-export function addMember(groupId: string, kind: BindingKind, id: string, label?: string): RoutingOp {
+export function addMember(groupId: string, kind: BindingKind, id: string, label?: string): StoreOp {
   return { op: 'member.add', groupId, kind, id, ...(label ? { label } : {}) };
 }
 
-export function updateMember(key: string, patch: { groupId?: string }): RoutingOp {
+export function updateMember(key: string, patch: { groupId?: string }): StoreOp {
   return { op: 'member.update', key, patch };
 }
 
 /** Set (or clear) a person's 备注; works for members and administrators alike. */
-export function setLabel(key: string, label: string): RoutingOp {
+export function setLabel(key: string, label: string): StoreOp {
   return { op: 'label.set', key, label };
 }
 
-export function removeMember(key: string): RoutingOp {
+export function removeMember(key: string): StoreOp {
   return { op: 'member.remove', key };
 }
 
 /** Archive one member's Session; the next message creates a fresh one. */
-export function archiveMember(key: string): RoutingOp {
+export function archiveMember(key: string): StoreOp {
   return { op: 'member.archive', key };
 }

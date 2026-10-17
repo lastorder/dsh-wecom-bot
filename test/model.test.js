@@ -2,42 +2,104 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  changedOperations, choiceLabel, contextLabel, displayPath, dshDefaultLabel, effortLabel,
+  advancedSlice, changedOperations, choiceLabel, contextLabel, displayPath, dshDefaultLabel, effortLabel,
   effortsFor, formatTokens, groupModelSummary, modelKey, modelLabel, modelName, parseModelKey, personKey,
-  presetLabel, presetName, presetSummaryLabel, relativeTime, scopeIncludes, setLabel, storedFrom, toggle, toggleScope,
-  updateMember, validateAdvanced, validateCredentials,
+  presetLabel, presetName, presetSummaryLabel, relativeTime, scopeIncludes, setLabel, setSettings, settingsPatch,
+  storedFrom, toggle, toggleScope, updateMember, validateAdvanced, validateCredentials,
 } from '../src/client/model.ts';
 
-test('one section diffs into minimal Config operations and never includes the Secret', () => {
-  const base = storedFrom({ botId: 'bot', adminUserIds: ['root'] });
-  const draft = {
-    ...base,
-    botId: ' bot-2 ',
-    adminUserIds: ['root', 'second', 'second', ' '],
-  };
-  assert.deepEqual(changedOperations(draft, base), [
+test('the Config diff carries the Bot ID, and never the Secret the credential store owns', () => {
+  const base = storedFrom({ botId: 'bot' });
+  assert.deepEqual(changedOperations({ ...base, botId: ' bot-2 ' }, base), [
     { op: 'set', path: ['botId'], value: 'bot-2' },
-    { op: 'set', path: ['adminUserIds'], value: ['root', 'second'] },
   ]);
   // Normalization alone is not a change, so 保存 stays disabled.
-  assert.deepEqual(changedOperations({ ...base, adminUserIds: ['root', ' root '] }, base), []);
-  assert.deepEqual(changedOperations({ ...base, adminWorkspaces: ['/w'] }, base),
-    [{ op: 'set', path: ['adminWorkspaces'], value: ['/w'] }], 'the admin scope is Config too');
+  assert.deepEqual(changedOperations({ ...base, botId: ' bot ' }, base), []);
+  // The Secret reference is not a form field: the value is written to the
+  // credential store and the reference identifies it, so neither is diffed.
+  assert.deepEqual(changedOperations({ ...base, secretEnv: 'OTHER_REF' }, base), []);
+  assert.deepEqual(changedOperations(base, base), []);
+});
+
+test('the reduced Config form holds the connection identity and drops everything else', () => {
+  assert.deepEqual(storedFrom(undefined), { botId: '', secretEnv: 'WECOM_BOT_SECRET' });
+  assert.deepEqual(storedFrom({ botId: 'bot', secretEnv: '  ' }), { botId: 'bot', secretEnv: 'WECOM_BOT_SECRET' });
+  // Administrators and the advanced knobs belong to the store's settings block
+  // now; a Config snapshot that still carries them contributes nothing.
+  assert.deepEqual(
+    storedFrom({ botId: 'bot', secretEnv: 'REF', adminUserIds: ['root'], adminWorkspaces: ['/w'], wsUrl: 'wss://x', questionTimeoutMs: 30000 }),
+    { botId: 'bot', secretEnv: 'REF' },
+  );
 });
 
 test('each Config card validates only its own fields', () => {
   assert.deepEqual(Object.keys(validateCredentials({ botId: '', secret: '' }, false)).sort(), ['botId', 'secret']);
   assert.deepEqual(validateCredentials({ botId: 'bot', secret: 's' }, false), {});
   assert.deepEqual(validateCredentials({ botId: 'bot', secret: '' }, true), {}, 'a stored Secret may be kept');
+});
 
+test('the 高级设置 fields are validated against the store bounds the Host enforces', () => {
   const advanced = { wsUrl: '', questionTimeoutMs: 60000, logRetentionDays: 14 };
   assert.deepEqual(validateAdvanced(advanced), {});
-  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, wsUrl: 'ws://x' })), ['wsUrl']);
-  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, wsUrl: 'wss://u:p@x' })), ['wsUrl']);
   assert.deepEqual(validateAdvanced({ ...advanced, wsUrl: 'wss://openws.example' }), {});
-  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: 0, logRetentionDays: 0.5 })).sort(),
-    ['logRetentionDays', 'questionTimeoutMs']);
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, wsUrl: 'ws://x' })), ['wsUrl']);
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, wsUrl: 'wss://u:p@x' })), ['wsUrl'], 'credentials in the URL are refused');
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, wsUrl: 'notaurl' })), ['wsUrl']);
+
+  // 1–300 seconds, both bounds included and both sides refused.
+  assert.deepEqual(validateAdvanced({ ...advanced, questionTimeoutMs: 1000 }), {});
+  assert.deepEqual(validateAdvanced({ ...advanced, questionTimeoutMs: 300000 }), {});
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: 999 })), ['questionTimeoutMs']);
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: 300001 })), ['questionTimeoutMs']);
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: 0 })), ['questionTimeoutMs']);
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: Number.NaN })), ['questionTimeoutMs']);
+  assert.equal(validateAdvanced({ ...advanced, questionTimeoutMs: 0 }).questionTimeoutMs, '请输入 1–300 秒。');
+
+  // 1–365 whole days.
+  assert.deepEqual(validateAdvanced({ ...advanced, logRetentionDays: 1 }), {});
+  assert.deepEqual(validateAdvanced({ ...advanced, logRetentionDays: 365 }), {});
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, logRetentionDays: 0 })), ['logRetentionDays']);
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, logRetentionDays: 366 })), ['logRetentionDays']);
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, logRetentionDays: 1.5 })), ['logRetentionDays'], 'a fraction of a day is not a day');
+  assert.equal(validateAdvanced({ ...advanced, logRetentionDays: 0.5 }).logRetentionDays, '请输入 1–365 的整数天数。');
+
+  // Both ranges are reported at once, so one 保存 press names every problem.
+  assert.deepEqual(
+    Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: 0, logRetentionDays: 0.5 })).sort(),
+    ['logRetentionDays', 'questionTimeoutMs'],
+  );
 });
+
+test('a settings patch carries only the fields the operator moved', () => {
+  const stored = advancedSlice({
+    wsUrl: 'wss://openws.example', adminUserIds: [], adminWorkspaces: [],
+    questionTimeoutMs: 60000, remoteApprovals: false, logEnabled: true, logRetentionDays: 14,
+  });
+  assert.deepEqual(stored, {
+    remoteApprovals: false, questionTimeoutMs: 60000, wsUrl: 'wss://openws.example', logEnabled: true, logRetentionDays: 14,
+  });
+  assert.deepEqual(settingsPatch(stored, stored), {}, 'an untouched card produces no write at all');
+  assert.deepEqual(settingsPatch({ ...stored, questionTimeoutMs: 30000 }, stored), { questionTimeoutMs: 30000 });
+  assert.deepEqual(settingsPatch({ ...stored, remoteApprovals: true, logRetentionDays: 30 }, stored),
+    { remoteApprovals: true, logRetentionDays: 30 });
+  // The endpoint is written trimmed, and only when it really moved.
+  assert.deepEqual(settingsPatch({ ...stored, wsUrl: ' wss://other.example ' }, stored), { wsUrl: 'wss://other.example' });
+  assert.deepEqual(settingsPatch({ ...stored, wsUrl: '  wss://openws.example  ' }, stored), {});
+
+  // A deployment that has not answered the state route yet still has a draft.
+  assert.deepEqual(advancedSlice(undefined), {
+    remoteApprovals: false, questionTimeoutMs: 60000, wsUrl: '', logEnabled: true, logRetentionDays: 14,
+  });
+
+  // One op carries the whole patch, and it is the store op the page posts.
+  assert.deepEqual(setSettings({ questionTimeoutMs: 30000 }), {
+    op: 'settings.set', patch: { questionTimeoutMs: 30000 },
+  });
+  assert.deepEqual(setSettings({ adminUserIds: ['root'] }), {
+    op: 'settings.set', patch: { adminUserIds: ['root'] },
+  });
+});
+
 
 const CATALOG = {
   choices: [

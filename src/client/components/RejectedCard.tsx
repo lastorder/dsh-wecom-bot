@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   IconCheckCircleOutlineRegular, Button, Input, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives';
-import { postRouting } from '../api.ts';
+import { postStore } from '../api.ts';
 import type { BridgeStateView, GroupView, RejectedSenderView } from '../../shared/protocol.ts';
 import { addMember, relativeTime } from '../model.ts';
 import { Card, Empty, KindBadge, Select } from './ui.tsx';
@@ -61,7 +61,7 @@ function RejectedRow({ row, groups, disabled, onChanged }: {
     setBusy(true);
     setError(undefined);
     try {
-      await postRouting([addMember(groupId, row.kind, row.id, label.trim())]);
+      await postStore([addMember(groupId, row.kind, row.id, label.trim())]);
       onChanged();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));

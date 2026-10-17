@@ -1,5 +1,5 @@
 import type { BindingKind, RejectedObservation } from '../shared/protocol.js';
-import { bindingKey } from './routing-store.js';
+import { bindingKey } from './store.js';
 
 /**
  * Host-lifetime, bounded memory of the WeCom senders that messaged the Bot.

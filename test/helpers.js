@@ -1,6 +1,7 @@
 // Shared fakes for the Host tests. They mirror only what the plugin uses.
 import { EventEmitter } from 'node:events';
 import { mkdtempSync, realpathSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { sanitize } from '../dist/host/journal.js';
@@ -286,6 +287,21 @@ export const baseSettings = {
 
 /** A routing store plus the standard services every Host test needs. */
 export async function fakeRoutingStore(extra = {}) {
-  const { createRoutingStore } = await import('../dist/host/routing-store.js');
-  return createRoutingStore({ directory: extra.directory ?? scratchDirectory(), onError: () => {}, ...extra });
+  const { createStore } = await import('../dist/host/store.js');
+  return createStore({ directory: extra.directory ?? scratchDirectory(), onError: () => {}, ...extra });
+}
+
+/**
+ * Seed the plugin's own store file in a throwaway DSH home.
+ *
+ * The Host never migrates or invents this document, so a test that wants the
+ * deployment "configured" with something writes it here, before the runtime
+ * reads it. Everything omitted keeps the store's documented default.
+ */
+export async function writeStore(home, document = {}) {
+  const directory = join(home, 'wecom-bot');
+  await mkdir(directory, { recursive: true });
+  await writeFile(join(directory, 'settings.json'), JSON.stringify({
+    version: '0.5', settings: {}, groups: [], bindings: [], labels: {}, adminDefaults: {}, ...document,
+  }, undefined, 2));
 }

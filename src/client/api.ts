@@ -1,12 +1,12 @@
 /** Network helpers: the plugin's state route and DSH credential Remotes. */
 import {
-  ROUTING_ROUTE, STATE_ROUTE, type BridgeStateView, type RoutingOp, type RoutingResponse,
+  STORE_ROUTE, STATE_ROUTE, type BridgeStateView, type StoreOp, type StoreResponse,
 } from '../shared/protocol.ts';
 import type { CredentialInfo, CredentialsRemote, RemoteEnvelope } from './types.ts';
 
 /** Document-relative, so it follows whatever base path serves the DSH GUI. */
 export const STATE_URL = STATE_ROUTE.replace(/^\//, '');
-export const ROUTING_URL = ROUTING_ROUTE.replace(/^\//, '');
+export const STORE_URL = STORE_ROUTE.replace(/^\//, '');
 
 export async function fetchState(refresh: boolean, signal?: AbortSignal): Promise<BridgeStateView> {
   const response = await fetch(`${STATE_URL}${refresh ? '?refresh=1' : ''}`, {
@@ -19,10 +19,10 @@ export async function fetchState(refresh: boolean, signal?: AbortSignal): Promis
 }
 
 /** Apply group/member edits immediately; the Host answers with the fresh table. */
-export async function postRouting(ops: readonly RoutingOp[]): Promise<RoutingResponse> {
+export async function postStore(ops: readonly StoreOp[]): Promise<StoreResponse> {
   let response: Response;
   try {
-    response = await fetch(ROUTING_URL, {
+    response = await fetch(STORE_URL, {
       method: 'POST',
       credentials: 'same-origin',
       cache: 'no-store',
@@ -34,9 +34,9 @@ export async function postRouting(ops: readonly RoutingOp[]): Promise<RoutingRes
   }
   if (response.status === 401 || response.status === 403) throw new Error('DSH 登录已失效，请刷新页面。');
   if (response.status === 404) throw new Error('插件后台尚未加载新版本，请重启 DSH 后再试。');
-  let body: RoutingResponse | undefined;
+  let body: StoreResponse | undefined;
   try {
-    body = await response.json() as RoutingResponse;
+    body = await response.json() as StoreResponse;
   } catch {
     throw new Error(`修改失败（HTTP ${response.status}）。`);
   }

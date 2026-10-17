@@ -2,8 +2,8 @@ import { useEffect, useState } from 'react';
 import {
   Button, IconPlusOutlineRegular, IconRefreshOutlineRegular, IconTrashOutlineRegular, Input, StateDot, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives';
-import type { BridgeStateView, GroupMemberView, GroupView, RoutingOp, WorkspaceOption } from '../../shared/protocol.ts';
-import { useRoutingApply } from '../hooks.ts';
+import type { BridgeStateView, GroupMemberView, GroupView, StoreOp, WorkspaceOption } from '../../shared/protocol.ts';
+import { useStoreApply } from '../hooks.ts';
 import {
   BINDING_KIND_LABEL, SESSION_STATE_LABEL, addGroup, archiveMember, choiceLabel, contextLabel, deleteGroup,
   displayPath, dshDefaultLabel, effortLabel, effortsFor, groupModelSummary, modelKey, modelLabel, modelName, parseModelKey,
@@ -31,7 +31,7 @@ export function GroupsCard({ state, error, disabled, refreshing, onRefresh, onCh
   onRefresh(): void;
   onChanged(): void;
 }) {
-  const { busy, error: applyError, apply } = useRoutingApply(onChanged);
+  const { busy, error: applyError, apply } = useStoreApply(onChanged);
   const [freshId, setFreshId] = useState<string>();
   const view = state?.routing;
 
@@ -135,7 +135,7 @@ function GroupPanel({ group, state, startEditing, disabled, onApply }: {
   state: BridgeStateView | undefined;
   startEditing: boolean;
   disabled: boolean;
-  onApply(key: string, ops: RoutingOp[]): Promise<unknown>;
+  onApply(key: string, ops: StoreOp[]): Promise<unknown>;
 }) {
   const [open, setOpen] = useState(startEditing);
   const [editing, setEditing] = useState(startEditing);
@@ -348,7 +348,7 @@ function MemberRow({ member, group, groups, state, disabled, onApply }: {
   groups: readonly GroupView[];
   state: BridgeStateView | undefined;
   disabled: boolean;
-  onApply(key: string, ops: RoutingOp[]): Promise<unknown>;
+  onApply(key: string, ops: StoreOp[]): Promise<unknown>;
 }) {
   const [details, setDetails] = useState(false);
   const [archiving, setArchiving] = useState(false);
@@ -462,7 +462,7 @@ function MemberRow({ member, group, groups, state, disabled, onApply }: {
 function RemoveMember({ member, disabled, onApply }: {
   member: GroupMemberView;
   disabled: boolean;
-  onApply(key: string, ops: RoutingOp[]): Promise<unknown>;
+  onApply(key: string, ops: StoreOp[]): Promise<unknown>;
 }) {
   const [confirming, setConfirming] = useState(false);
   return confirming ? (

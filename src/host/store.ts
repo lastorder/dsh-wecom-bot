@@ -1,35 +1,42 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
-  DEFAULT_GROUP_ID, DEFAULT_GROUP_NAME, MAX_BINDINGS, MAX_GROUPS, MAX_LABEL_CHARS,
-  ROUTING_VERSION, type BindingKind, type BindingRecord, type GroupRecord,
+  DEFAULT_GROUP_ID, DEFAULT_GROUP_NAME, DEFAULT_LOG_RETENTION_DAYS, DEFAULT_QUESTION_TIMEOUT_MS,
+  MAX_BINDINGS, MAX_GROUPS, MAX_LABEL_CHARS, MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS,
+  MIN_LOG_RETENTION_DAYS, MIN_QUESTION_TIMEOUT_MS, STORE_FILE, STORE_VERSION,
+  type BindingKind, type BindingRecord, type GroupRecord, type StoreSettings, type StoreSettingsPatch,
 } from '../shared/protocol.js';
+import { uniqueIds } from './config.js';
 
 /**
- * Durable routing state: the user groups (each owning a Workspace, a model and
- * an agent preset) and the members assigned to them.
+ * The plugin's own durable document: `<DSH home>/wecom-bot/settings.json`.
  *
- * A member row is what authorizes one WeCom principal — private chat senders
- * by their userid, group chats by their chatid — and it also records the DSH
- * Session that principal talks to. This is runtime state, not Config: the page
- * edits it live (and the operator authorizes a rejected sender from the
- * settings page), which must not rewrite the DSH profile document or
- * reconnect the socket. The file lives next to the journal, under
- * `<DSH home>/wecom-bot/bindings.json`, and every write is serialized and
- * atomic (write-then-rename).
+ * It holds everything the operator edits except the connection identity, which
+ * stays in the plugin Config because a DSH profile declares it and the credential
+ * service resolves it:
  *
- * The operator note (备注) is keyed by person, not by membership: a note is
- * about who somebody is, so it survives being moved between groups, being
- * removed, and belonging to no group at all (an administrator).
+ *   - the settings block: administrators, the notification scope, the WebSocket
+ *     endpoint, the question timeout, remote approvals and the journal;
+ *   - the user groups (each owning a Workspace, a model and an agent preset);
+ *   - the members assigned to them — one row authorizes one WeCom principal, by
+ *     userid for a private chat or by chatid for a group, and records the DSH
+ *     Session that principal talks to;
+ *   - the operator notes (备注), keyed by person rather than by membership, so a
+ *     note survives being moved between groups, being removed, and belonging to
+ *     no group at all (an administrator);
+ *   - each administrator's own preference: the Workspace their `/sessions` and
+ *     `/new` commands default to, written by the Bot itself.
  *
- * Administrators also keep one preference here: the Workspace their operator
- * commands (`/sessions`, `/new`) default to. It belongs to the person, like
- * the note, and is written by the Bot itself rather than the page.
+ * Everything here is written through this one module — the settings page posts
+ * ops, and the Bot writes its own preferences — so a write is serialized and
+ * atomic (write-then-rename, `0600`). None of it is Config: an edit must never
+ * rewrite the DSH profile document or rebuild the bridge, because adding an
+ * administrator must not drop the WeCom socket while somebody is talking to the
+ * Bot.
  *
- * There is deliberately no migration path from the pre-group versions: the
- * plugin has no deployed users on them, and a file of another version is set
- * aside rather than half-read, so a future change only has to describe the
- * current version.
+ * There is deliberately no migration path from an earlier layout: the plugin has
+ * no deployment on one, a file of another version is set aside instead of being
+ * half-read, and describing the current version is the whole job.
  */
 
 export interface BindingKeyParts {
@@ -52,9 +59,16 @@ export interface BindingPatch {
   readonly sessionId?: string;
 }
 
-export interface RoutingStore {
+export interface PluginStore {
   /** Read the file once; safe to call repeatedly and concurrently. */
   load(): Promise<void>;
+  /**
+   * The settings block. Defaults until `load()` finishes; every caller that acts
+   * on it (the runtime, the page) loads the store first.
+   */
+  settings(): StoreSettings;
+  /** Merge one settings edit; omitted fields keep their stored value. */
+  setSettings(patch: StoreSettingsPatch): Promise<StoreSettings>;
   groups(): readonly GroupRecord[];
   group(id: string): GroupRecord | undefined;
   bindings(): readonly BindingRecord[];
@@ -86,7 +100,7 @@ export interface RoutingStore {
   readonly file: string;
 }
 
-export interface RoutingStoreOptions {
+export interface PluginStoreOptions {
   readonly directory: string;
   readonly maxEntries?: number;
   readonly maxGroups?: number;
@@ -96,6 +110,7 @@ export interface RoutingStoreOptions {
 
 interface StoredFile {
   readonly version?: unknown;
+  readonly settings?: unknown;
   readonly groups?: unknown;
   readonly bindings?: unknown;
   readonly labels?: unknown;
@@ -143,6 +158,55 @@ export function normalizeLabel(value: unknown): string {
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : '';
+}
+
+function asArray(value: unknown): readonly unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function bounded(value: unknown, min: number, max: number, fallback: number): number {
+  const number = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return Math.min(max, Math.max(min, Math.round(number)));
+}
+
+/** A settings block with every default in place. */
+export function defaultStoreSettings(): StoreSettings {
+  return {
+    wsUrl: '',
+    adminUserIds: [],
+    adminWorkspaces: [],
+    questionTimeoutMs: DEFAULT_QUESTION_TIMEOUT_MS,
+    remoteApprovals: false,
+    logEnabled: true,
+    logRetentionDays: DEFAULT_LOG_RETENTION_DAYS,
+  };
+}
+
+/**
+ * The settings block, re-typed from untrusted content.
+ *
+ * The operator can edit this file by hand — and `settings.set` patches arrive
+ * over HTTP — so every field is coerced and clamped rather than rejected, and a
+ * nonsense value falls back to its default. Whether a `wsUrl` is *usable* is the
+ * runtime's judgement, not this one's: an unusable endpoint has to surface as a
+ * connection state, not as a setting that quietly did nothing.
+ */
+export function normalizeStoreSettings(value: unknown): StoreSettings {
+  const record = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  return {
+    wsUrl: text(record.wsUrl),
+    adminUserIds: uniqueIds(asArray(record.adminUserIds)),
+    adminWorkspaces: uniqueIds(asArray(record.adminWorkspaces)),
+    questionTimeoutMs: bounded(
+      record.questionTimeoutMs, MIN_QUESTION_TIMEOUT_MS, MAX_QUESTION_TIMEOUT_MS, DEFAULT_QUESTION_TIMEOUT_MS,
+    ),
+    remoteApprovals: record.remoteApprovals === true,
+    logEnabled: record.logEnabled !== false,
+    logRetentionDays: bounded(
+      record.logRetentionDays, MIN_LOG_RETENTION_DAYS, MAX_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS,
+    ),
+  };
 }
 
 /**
@@ -194,8 +258,8 @@ function normalizeBinding(value: unknown): BindingRecord | undefined {
   };
 }
 
-export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
-  const file = join(options.directory, 'bindings.json');
+export function createStore(options: PluginStoreOptions): PluginStore {
+  const file = join(options.directory, STORE_FILE);
   const max = options.maxEntries ?? MAX_BINDINGS;
   const maxGroups = options.maxGroups ?? MAX_GROUPS;
   const now = options.now ?? Date.now;
@@ -206,6 +270,7 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
   const labels = new Map<string, string>();
   /** Per-administrator default Workspace, keyed by userid. */
   const adminWorkspaces = new Map<string, string>();
+  let settings: StoreSettings = defaultStoreSettings();
   let loaded: Promise<void> | undefined;
   let chain: Promise<void> = Promise.resolve();
   let dropped = false;
@@ -253,15 +318,16 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
     const version = typeof parsed.version === 'number' || typeof parsed.version === 'string'
       ? String(parsed.version)
       : '';
-    if (version !== ROUTING_VERSION || !Array.isArray(parsed.bindings)) {
-      // Every earlier layout is gone by design (there is no deployment on one),
-      // so this is a read error, not something to migrate.
-      report(new Error(`routing file version ${version || '(missing)'} is not ${ROUTING_VERSION}`), 'version');
+    if (version !== STORE_VERSION || !Array.isArray(parsed.bindings)) {
+      // Every earlier layout is gone by design (the plugin has no deployment on
+      // one), so this is a read error, not something to migrate.
+      report(new Error(`store file version ${version || '(missing)'} is not ${STORE_VERSION}`), 'version');
       // The version is untrusted file content: never let it choose a path.
       await setAside(`v${version.replace(/[^0-9A-Za-z.-]/g, '_').slice(0, 24) || 'unknown'}`);
       defaultGroup();
       return;
     }
+    settings = normalizeStoreSettings(parsed.settings);
     if (Array.isArray(parsed.groups)) {
       for (const entry of parsed.groups) {
         const group = normalizeGroup(entry);
@@ -292,8 +358,9 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
 
   function persist(): Promise<void> {
     const payload = JSON.stringify({
-      version: ROUTING_VERSION,
+      version: STORE_VERSION,
       savedAt: new Date(now()).toISOString(),
+      settings,
       groups: [...groups.values()],
       bindings: [...bindings.values()],
       labels: Object.fromEntries(labels),
@@ -338,6 +405,18 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
     file,
     async load() {
       await loadOnce();
+    },
+    settings: () => settings,
+    async setSettings(patch) {
+      await loadOnce();
+      // Merge only the fields the caller sent: one patch never clears the rest.
+      const merged: Record<string, unknown> = { ...settings };
+      for (const [key, value] of Object.entries(patch)) {
+        if (value !== undefined) merged[key] = value;
+      }
+      settings = normalizeStoreSettings(merged);
+      await persist();
+      return settings;
     },
     groups: () => [...groups.values()],
     group: id => groups.get(id),

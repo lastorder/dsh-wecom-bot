@@ -3,7 +3,7 @@ import type { WSClient, WsFrame } from '@wecom/aibot-node-sdk';
 import { DEFAULT_GROUP_ID } from '../../shared/protocol.js';
 import { createCatalogService, type CatalogService } from '../catalog.js';
 import type { BridgeSettings } from '../config.js';
-import { bindingKey, bindingKeyFor } from '../routing-store.js';
+import { bindingKey, bindingKeyFor } from '../store.js';
 import type {
   ApprovalOutcome, ApprovalRequest, HostContext, Logger, QuestionAnswer, QuestionRequest,
   SessionEvent, SessionHandle,
@@ -75,12 +75,20 @@ export interface Bridge {
   readonly directory: SessionDirectory;
   readonly observations: ObservationStore;
   readonly rounds: RoundTracker;
+
   /** Send one proactive message (used when the page authorizes somebody). */
   notify(chat: string, text: string, kind: NoticeKind): void;
+  /**
+   * Adopt edited settings without touching the socket. Administrators, the
+   * notification scope, the question timeout and remote approvals are read per
+   * message, so only the access policy has to be rebuilt here; replacing the
+   * bridge is reserved for the connection identity (Bot ID, Secret, endpoint).
+   */
+  updateSettings(settings: BridgeSettings): void;
 }
 
 export function createBridge(deps: BridgeDeps): Bridge {
-  const { ctx, client, settings, router } = deps;
+  const { ctx, client, router } = deps;
   const log = deps.log ?? console;
   const journal = deps.journal ?? nullJournal;
   const observations = deps.observations ?? createObservationStore();
@@ -92,9 +100,13 @@ export function createBridge(deps: BridgeDeps): Bridge {
     registry: () => undefined,
   });
 
-  const policy = createAccessPolicy(settings, {
+  // The bridge reads these on every message, so a settings edit is handed to
+  // the running bridge rather than replacing it (see `updateSettings`).
+  let settings = deps.settings;
+  const policyFor = () => createAccessPolicy(settings, {
     memberOf: message => router.store.get(bindingKeyFor(message))?.groupId,
   });
+  let policy = policyFor();
   const directory = createSessionDirectory(catalogs, {
     allow: entry => policy.adminWorkspaceAllowed(entry.group.path),
   });
@@ -557,6 +569,10 @@ export function createBridge(deps: BridgeDeps): Bridge {
 
   return {
     start, handleFrame, whenIdle, onTurnEnd, onQuestion, onApproval, directory, observations, rounds,
+    updateSettings(next) {
+      settings = next;
+      policy = policyFor();
+    },
     notify(chat, text, kind) {
       if (closed) return;
       outbox.enqueue({ chat, text, kind });

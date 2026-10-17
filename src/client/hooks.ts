@@ -1,8 +1,8 @@
 /** React hooks binding the page to DSH Config forms, credentials and the state route. */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { BridgeStateView, RoutingOp, RoutingResponse } from '../shared/protocol.ts';
-import { describeCredential, fetchState, postRouting } from './api.ts';
-import { changedOperations, storedFrom } from './model.ts';
+import type { BridgeStateView, StoreOp, StoreResponse, StoreSettingsPatch } from '../shared/protocol.ts';
+import { describeCredential, fetchState, postStore } from './api.ts';
+import { changedOperations, setSettings, storedFrom } from './model.ts';
 import type { ClientRemote, ConfigFormScope, FormSnapshot, StoredConfig } from './types.ts';
 
 export function useFormSnapshot(scope: ConfigFormScope): FormSnapshot {
@@ -88,7 +88,7 @@ export function useSecretStatus(remote: ClientRemote | undefined, ref: string): 
   return { configured, known, refresh };
 }
 
-export interface RoutingApply {
+export interface StoreApply {
   /** Key of the edit in flight; empty when idle. */
   readonly busy: string;
   /** Why the last edit failed; cleared by the next one. */
@@ -97,7 +97,7 @@ export interface RoutingApply {
    * Apply one immediate group/member edit. Resolves to the Host's answer (the
    * fresh table, plus the id of a group it created) or undefined on failure.
    */
-  apply(key: string, ops: readonly RoutingOp[]): Promise<RoutingResponse | undefined>;
+  apply(key: string, ops: readonly StoreOp[]): Promise<StoreResponse | undefined>;
   dismiss(): void;
 }
 
@@ -110,15 +110,15 @@ export interface RoutingApply {
  * that stays on screen after the fact only gets in the way. A failure is the
  * exception — it is shown in place until the next attempt.
  */
-export function useRoutingApply(onChanged: () => void): RoutingApply {
+export function useStoreApply(onChanged: () => void): StoreApply {
   const [busy, setBusy] = useState('');
   const [error, setError] = useState<string>();
 
-  const apply = useCallback(async (key: string, ops: readonly RoutingOp[]): Promise<RoutingResponse | undefined> => {
+  const apply = useCallback(async (key: string, ops: readonly StoreOp[]): Promise<StoreResponse | undefined> => {
     setBusy(key);
     setError(undefined);
     try {
-      const response = await postRouting(ops);
+      const response = await postStore(ops);
       onChanged();
       return response;
     } catch (cause) {
@@ -131,6 +131,59 @@ export function useRoutingApply(onChanged: () => void): RoutingApply {
 
   const dismiss = useCallback(() => setError(undefined), []);
   return { busy, error, apply, dismiss };
+}
+
+export interface StoreSettingsSave {
+  readonly saving: boolean;
+  /** Why the last write failed; cleared by the next attempt. */
+  readonly error?: string;
+  /** True for a moment after a successful write. */
+  readonly saved: boolean;
+  /** Write one settings patch; false when the Host refused it. */
+  save(patch: StoreSettingsPatch): Promise<boolean>;
+}
+
+/**
+ * Save one card's slice of the plugin's own settings block.
+ *
+ * Same ergonomics as {@link useConfigSave} — a 保存 / 放弃 bar and a 已保存
+ * indicator — but a different write channel and therefore a different failure
+ * model. There is nothing to rebase and no revision to lose: the store route
+ * merges the patch field by field into the plugin's document, so a write only
+ * ever states the fields this card changed, and two cards editing at once cannot
+ * overwrite each other's. The one authority is the store itself, and the page
+ * picks the result up on its next state read — which the caller's `onSaved`
+ * forces.
+ */
+export function useStoreSettingsSave(onSaved: () => void): StoreSettingsSave {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+  const [saved, setSaved] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+
+  const save = useCallback(async (patch: StoreSettingsPatch): Promise<boolean> => {
+    setSaving(true);
+    setError(undefined);
+    if (timer.current) clearTimeout(timer.current);
+    try {
+      await postStore([setSettings(patch)]);
+      setSaved(true);
+      timer.current = setTimeout(() => setSaved(false), 2000);
+      onSaved();
+      return true;
+    } catch (cause) {
+      // The Host validates the same values and answers in Chinese; its message
+      // is what the operator needs to read, so it is shown as it arrived.
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }, [onSaved]);
+
+  return { saving, error, saved, save };
 }
 
 export interface ConfigSave {

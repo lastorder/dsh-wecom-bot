@@ -1,16 +1,13 @@
 /** Browser-side contracts of the DSH services this page uses. */
 
-/** Stored Host Config (see src/host/config.ts). */
+/**
+ * Stored Host Config (see src/host/config.ts): the connection identity, and
+ * only that. Everything else the operator edits lives in the plugin's own
+ * document and arrives as {@link BridgeStateView.settings}.
+ */
 export interface StoredConfig {
   readonly botId: string;
   readonly secretEnv: string;
-  readonly adminUserIds: readonly string[];
-  readonly adminWorkspaces: readonly string[];
-  readonly wsUrl: string;
-  readonly questionTimeoutMs: number;
-  readonly remoteApprovals: boolean;
-  readonly logEnabled: boolean;
-  readonly logRetentionDays: number;
 }
 
 export interface FormSnapshot {

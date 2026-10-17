@@ -4,10 +4,10 @@ import { chmod, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/prom
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  bindingKey, bindingKeyFor, createRoutingStore, normalizeLabel, parseBindingKey, validBindingId,
-} from '../dist/host/routing-store.js';
+  bindingKey, bindingKeyFor, createStore, normalizeLabel, parseBindingKey, validBindingId,
+} from '../dist/host/store.js';
 
-const directory = async () => await mkdtemp(join(tmpdir(), 'wecom-routing-'));
+const directory = async () => await mkdtemp(join(tmpdir(), 'wecom-store-'));
 const fail = () => assert.fail('no error expected');
 
 test('keys are namespaced by kind, and only valid WeCom ids are accepted', () => {
@@ -37,7 +37,7 @@ test('a note is one bounded line, or nothing at all', () => {
 
 test('the default group always exists and cannot be removed', async () => {
   const dir = await directory();
-  const store = createRoutingStore({ directory: dir, onError: fail });
+  const store = createStore({ directory: dir, onError: fail });
   await store.load();
   assert.deepEqual(store.groups().map(group => group.id), ['default']);
   assert.equal(store.group('default').name, '默认分组');
@@ -47,13 +47,13 @@ test('the default group always exists and cannot be removed', async () => {
   assert.equal(await store.updateGroup('default', { workspace: '/srv/app' }) !== undefined, true);
   await store.flush();
   const parsed = JSON.parse(await readFile(store.file, 'utf8'));
-  assert.equal(parsed.version, '0.4');
+  assert.equal(parsed.version, '0.5');
   assert.deepEqual(parsed.groups.map(group => group.id), ['default']);
 });
 
 test('groups are created, renamed and described', async () => {
   const dir = await directory();
-  const store = createRoutingStore({ directory: dir, now: () => 1000, onError: fail });
+  const store = createStore({ directory: dir, now: () => 1000, onError: fail });
   await store.load();
   const created = await store.createGroup('  朋友  ');
   assert.equal(created.name, '朋友');
@@ -68,7 +68,7 @@ test('groups are created, renamed and described', async () => {
 
 test('a member is created once per principal and survives a reload', async () => {
   const dir = await directory();
-  const store = createRoutingStore({ directory: dir, onError: fail });
+  const store = createStore({ directory: dir, onError: fail });
   await store.load();
   const group = await store.createGroup('客人');
   const first = await store.create('user', 'alice', { groupId: group.id, label: '爱丽丝' });
@@ -91,7 +91,7 @@ test('a member is created once per principal and survives a reload', async () =>
   assert.match(raw, /\n$/, 'the file ends with a newline');
   assert.equal((await stat(store.file)).mode & 0o777, 0o600, 'the file is private to the user');
 
-  const reloaded = createRoutingStore({ directory: dir, onError: fail });
+  const reloaded = createStore({ directory: dir, onError: fail });
   await reloaded.load();
   assert.deepEqual(reloaded.bindings().map(record => record.sessionId), ['session-1', '']);
   assert.equal(reloaded.label('user:alice'), '新备注', 'notes are durable');
@@ -102,7 +102,7 @@ test('a member is created once per principal and survives a reload', async () =>
 
 test('deleting a group de-authorizes its members and keeps the others', async () => {
   const dir = await directory();
-  const store = createRoutingStore({ directory: dir, onError: fail });
+  const store = createStore({ directory: dir, onError: fail });
   await store.load();
   const guests = await store.createGroup('客人');
   await store.create('user', 'alice', { groupId: 'default' });
@@ -116,7 +116,7 @@ test('deleting a group de-authorizes its members and keeps the others', async ()
 test('the store refuses to grow past its cap instead of dropping the oldest silently', async () => {
   const dir = await directory();
   const errors = [];
-  const store = createRoutingStore({ directory: dir, maxEntries: 2, onError: (error, stage) => errors.push(stage) });
+  const store = createStore({ directory: dir, maxEntries: 2, onError: (error, stage) => errors.push(stage) });
   await store.load();
   await store.create('user', 'a', { groupId: 'default' });
   await store.create('user', 'b', { groupId: 'default' });
@@ -129,7 +129,7 @@ test('the store refuses to grow past its cap instead of dropping the oldest sile
 
 test('group creation is capped too', async () => {
   const dir = await directory();
-  const store = createRoutingStore({ directory: dir, maxGroups: 2, onError: fail });
+  const store = createStore({ directory: dir, maxGroups: 2, onError: fail });
   await store.load();
   await store.createGroup('a');
   await assert.rejects(store.createGroup('b'), /group limit/);
@@ -138,13 +138,13 @@ test('group creation is capped too', async () => {
 
 test('an unreadable file is quarantined instead of being overwritten', async () => {
   const dir = await directory();
-  await writeFile(join(dir, 'bindings.json'), '{ not json', { mode: 0o600 });
+  await writeFile(join(dir, 'settings.json'), '{ not json', { mode: 0o600 });
   const stages = [];
-  const store = createRoutingStore({ directory: dir, onError: (error, stage) => stages.push(stage) });
+  const store = createStore({ directory: dir, onError: (error, stage) => stages.push(stage) });
   await store.load();
   assert.deepEqual(store.bindings(), []);
   assert.deepEqual(stages, ['parse']);
-  await stat(join(dir, 'bindings.json.corrupt'));
+  await stat(join(dir, 'settings.json.corrupt'));
   await store.create('user', 'alice', { groupId: 'default' });
   assert.equal(store.bindings().length, 1);
   assert.equal(store.group('default').id, 'default');
@@ -152,51 +152,51 @@ test('an unreadable file is quarantined instead of being overwritten', async () 
 
 test('a file of another version is set aside instead of being read or overwritten', async () => {
   const dir = await directory();
-  await writeFile(join(dir, 'bindings.json'), JSON.stringify({
+  await writeFile(join(dir, 'settings.json'), JSON.stringify({
     version: 5,
     groups: [{ id: 'default', name: '默认分组' }],
     bindings: [{ kind: 'user', id: 'alice', groupId: 'default', sessionId: 's1' }],
     labels: { 'user:alice': '爱丽丝' },
   }));
   const stages = [];
-  const store = createRoutingStore({ directory: dir, onError: (error, stage) => stages.push(stage) });
+  const store = createStore({ directory: dir, onError: (error, stage) => stages.push(stage) });
   await store.load();
   assert.deepEqual(store.bindings(), [], 'nothing from an unread file is trusted');
   assert.equal(store.group('default').name, '默认分组');
   assert.deepEqual(stages, ['version']);
   // The old integer counter is exactly the file v0.4.1 wrote, so it must be
   // parked under its own name rather than read as the current layout.
-  await stat(join(dir, 'bindings.json.v5'));
-  await assert.rejects(stat(join(dir, 'bindings.json')), 'the old file is moved, not clobbered');
+  await stat(join(dir, 'settings.json.v5'));
+  await assert.rejects(stat(join(dir, 'settings.json')), 'the old file is moved, not clobbered');
 
   // Starting fresh writes the current version and keeps the old file around.
   await store.create('user', 'bob', { groupId: 'default' });
   await store.flush();
   const parsed = JSON.parse(await readFile(store.file, 'utf8'));
-  assert.equal(parsed.version, '0.4');
+  assert.equal(parsed.version, '0.5');
   assert.deepEqual(parsed.bindings.map(record => record.id), ['bob']);
-  await stat(join(dir, 'bindings.json.v5'));
+  await stat(join(dir, 'settings.json.v5'));
 });
 
 test('a version string is never allowed to choose the path it is parked under', async () => {
   const dir = await directory();
-  await writeFile(join(dir, 'bindings.json'), JSON.stringify({ version: '../../escape', bindings: [] }));
-  const store = createRoutingStore({ directory: dir, onError: () => {} });
+  await writeFile(join(dir, 'settings.json'), JSON.stringify({ version: '../../escape', bindings: [] }));
+  const store = createStore({ directory: dir, onError: () => {} });
   await store.load();
   assert.deepEqual(store.bindings(), []);
-  assert.deepEqual((await readdir(dir)).filter(name => name !== 'bindings.json'), ['bindings.json.v.._.._escape']);
+  assert.deepEqual((await readdir(dir)).filter(name => name !== 'settings.json'), ['settings.json.v.._.._escape']);
 });
 
 test("an administrator's default Workspace is stored as a { workspace } object", async () => {
   const dir = await directory();
-  const store = createRoutingStore({ directory: dir, onError: fail });
+  const store = createStore({ directory: dir, onError: fail });
   await store.load();
   await store.setAdminWorkspace('root', '/srv/orion');
   await store.flush();
   const parsed = JSON.parse(await readFile(store.file, 'utf8'));
   assert.deepEqual(parsed.adminDefaults, { root: { workspace: '/srv/orion' } }, 'an object, so more can join later');
 
-  const reloaded = createRoutingStore({ directory: dir, onError: fail });
+  const reloaded = createStore({ directory: dir, onError: fail });
   await reloaded.load();
   assert.equal(reloaded.adminWorkspace('root'), '/srv/orion');
 
@@ -207,16 +207,16 @@ test("an administrator's default Workspace is stored as a { workspace } object",
   // A bare string is the shape this layout never shipped with; it is ignored
   // rather than half-guessed, exactly like an unknown file version.
   await writeFile(store.file, JSON.stringify({
-    version: '0.4', adminDefaults: { alice: '/srv/old' }, groups: [], bindings: [], labels: {},
+    version: '0.5', adminDefaults: { alice: '/srv/old' }, groups: [], bindings: [], labels: {},
   }));
-  const strict = createRoutingStore({ directory: dir, onError: fail });
+  const strict = createStore({ directory: dir, onError: fail });
   await strict.load();
   assert.equal(strict.adminWorkspace('alice'), '');
 });
 
 test('a group keeps its Workspace, model, effort and preset across a reload', async () => {
   const dir = await directory();
-  const store = createRoutingStore({ directory: dir, onError: fail });
+  const store = createStore({ directory: dir, onError: fail });
   await store.load();
   const guests = await store.createGroup('客人');
   await store.updateGroup(guests.id, {
@@ -224,7 +224,7 @@ test('a group keeps its Workspace, model, effort and preset across a reload', as
   });
   await store.flush();
 
-  const reloaded = createRoutingStore({ directory: dir, onError: fail });
+  const reloaded = createStore({ directory: dir, onError: fail });
   await reloaded.load();
   const group = reloaded.group(guests.id);
   assert.deepEqual(
@@ -240,8 +240,8 @@ test('a group keeps its Workspace, model, effort and preset across a reload', as
 
 test('corrupt entries and duplicates are dropped while loading', async () => {
   const dir = await directory();
-  await writeFile(join(dir, 'bindings.json'), JSON.stringify({
-    version: '0.4',
+  await writeFile(join(dir, 'settings.json'), JSON.stringify({
+    version: '0.5',
     groups: [{ id: 'g1', name: ' 朋友 ' }, { id: 'g1', name: '重复' }, null, { id: 'x'.repeat(80) }, { name: '没有 id' }],
     bindings: [
       { kind: 'user', id: 'alice', groupId: 'missing', sessionId: 'session-1', createdAt: 1, updatedAt: 2 },
@@ -253,7 +253,7 @@ test('corrupt entries and duplicates are dropped while loading', async () => {
       { kind: 'user', id: 'nobody', groupId: 'g1' },
     ],
   }));
-  const store = createRoutingStore({ directory: dir, onError: fail });
+  const store = createStore({ directory: dir, onError: fail });
   await store.load();
   assert.deepEqual(store.bindings().map(record => `${record.kind}:${record.id}`),
     ['user:alice', 'group:chat-1', 'user:nobody']);
@@ -269,7 +269,7 @@ test('corrupt entries and duplicates are dropped while loading', async () => {
 
 test('a note belongs to the person: it survives removal, deletion and having no group', async () => {
   const dir = await directory();
-  const store = createRoutingStore({ directory: dir, onError: fail });
+  const store = createStore({ directory: dir, onError: fail });
   await store.load();
   const guests = await store.createGroup('客人');
   await store.create('user', 'alice', { groupId: guests.id, label: '爱丽丝' });
@@ -290,7 +290,7 @@ test('a note belongs to the person: it survives removal, deletion and having no 
   assert.equal(store.label('user:nobody'), '');
 
   await store.setLabel('user:root', '运维');
-  const reloaded = createRoutingStore({ directory: dir, onError: fail });
+  const reloaded = createStore({ directory: dir, onError: fail });
   await reloaded.load();
   assert.equal(reloaded.label('user:alice'), '爱丽丝');
   assert.equal(reloaded.label('user:bob'), '鲍勃');
@@ -300,7 +300,7 @@ test('a note belongs to the person: it survives removal, deletion and having no 
 
 test('a move to an unknown group keeps the current membership', async () => {
   const dir = await directory();
-  const store = createRoutingStore({ directory: dir, onError: fail });
+  const store = createStore({ directory: dir, onError: fail });
   await store.load();
   const guests = await store.createGroup('客人');
   await store.create('user', 'alice', { groupId: guests.id });
@@ -311,11 +311,116 @@ test('a move to an unknown group keeps the current membership', async () => {
 test('a fresh store tolerates a missing directory and creates it privately', async () => {
   const dir = await directory();
   await chmod(dir, 0o700);
-  const store = createRoutingStore({ directory: join(dir, 'nested', 'here'), onError: fail });
+  const store = createStore({ directory: join(dir, 'nested', 'here'), onError: fail });
   await store.load();
   await store.create('user', 'alice', { groupId: 'default' });
   await store.flush();
   const parsed = JSON.parse(await readFile(store.file, 'utf8'));
   assert.equal(parsed.bindings.length, 1);
   assert.equal(parsed.groups.length, 1);
+});
+
+/* ------------------------------------------------------------------ *
+ * The settings block: everything the operator edits but the           *
+ * connection identity, in the same document as the groups             *
+ * ------------------------------------------------------------------ */
+
+test('a fresh store starts from the documented settings defaults', async () => {
+  const store = createStore({ directory: await directory(), onError: fail });
+  await store.load();
+  assert.deepEqual(store.settings(), {
+    wsUrl: '',
+    adminUserIds: [],
+    adminWorkspaces: [],
+    questionTimeoutMs: 60000,
+    remoteApprovals: false,
+    logEnabled: true,
+    logRetentionDays: 14,
+  });
+  assert.equal(store.file.endsWith('settings.json'), true, 'the plugin owns one document');
+});
+
+test('a settings edit merges, and an explicit empty list clears a list', async () => {
+  const store = createStore({ directory: await directory(), onError: fail });
+  await store.load();
+  await store.setSettings({ adminUserIds: ['root'] });
+  await store.setSettings({ remoteApprovals: true });
+  await store.setSettings({ adminWorkspaces: ['/w/a', '/w/a', ' '] });
+  const settings = store.settings();
+  assert.deepEqual(settings.adminUserIds, ['root'], 'an earlier patch survives a later one');
+  assert.equal(settings.remoteApprovals, true);
+  assert.deepEqual(settings.adminWorkspaces, ['/w/a']);
+  // `[]` is a value the operator chose, not a missing field.
+  await store.setSettings({ adminUserIds: [] });
+  assert.deepEqual(store.settings().adminUserIds, []);
+  assert.equal(store.settings().remoteApprovals, true, 'the fields the patch omitted are untouched');
+});
+
+test('settings share the file with the groups and survive a reload', async () => {
+  const dir = await directory();
+  const store = createStore({ directory: dir, onError: fail });
+  await store.load();
+  await store.setSettings({ wsUrl: 'wss://openws.example', questionTimeoutMs: 120000, logRetentionDays: 3 });
+  await store.createGroup('朋友');
+  await store.flush();
+  const parsed = JSON.parse(await readFile(store.file, 'utf8'));
+  assert.equal(parsed.settings.wsUrl, 'wss://openws.example');
+  assert.equal(parsed.settings.questionTimeoutMs, 120000);
+  assert.equal(parsed.groups.length, 2, 'one document holds both');
+  const reloaded = createStore({ directory: dir, onError: fail });
+  await reloaded.load();
+  assert.equal(reloaded.settings().wsUrl, 'wss://openws.example');
+  assert.equal(reloaded.settings().logRetentionDays, 3);
+  assert.equal(reloaded.groups().length, 2);
+});
+
+test('hand-edited settings are re-typed and clamped, never trusted', async () => {
+  const dir = await directory();
+  await writeFile(join(dir, 'settings.json'), JSON.stringify({
+    version: '0.5',
+    settings: {
+      wsUrl: 42,
+      adminUserIds: ['root', 'root', '', 7, '  root2  '],
+      adminWorkspaces: 'not-an-array',
+      questionTimeoutMs: 10 ** 9,
+      remoteApprovals: 'yes',
+      logEnabled: 0,
+      logRetentionDays: 0,
+    },
+    groups: [], bindings: [], labels: {}, adminDefaults: {},
+  }));
+  const store = createStore({ directory: dir, onError: fail });
+  await store.load();
+  const settings = store.settings();
+  assert.equal(settings.wsUrl, '', 'a non-string endpoint is not an endpoint');
+  assert.deepEqual(settings.adminUserIds, ['root', 'root2']);
+  assert.deepEqual(settings.adminWorkspaces, []);
+  assert.equal(settings.questionTimeoutMs, 300000, 'clamped to the documented maximum');
+  assert.equal(settings.remoteApprovals, false, 'only a real true is true');
+  assert.equal(settings.logEnabled, true, 'only a real false turns the journal off');
+  assert.equal(settings.logRetentionDays, 1, 'clamped to the documented minimum');
+});
+
+test('a file without a settings block keeps its groups and gets the defaults', async () => {
+  const dir = await directory();
+  await writeFile(join(dir, 'settings.json'), JSON.stringify({
+    version: '0.5',
+    groups: [{ id: 'g1', name: '朋友', workspace: '/srv/app' }],
+    bindings: [{ kind: 'user', id: 'alice', groupId: 'g1', sessionId: 's1' }],
+    labels: { 'user:alice': '爱丽丝' },
+    adminDefaults: {},
+  }));
+  const store = createStore({ directory: dir, onError: fail });
+  await store.load();
+  assert.deepEqual(store.settings(), {
+    wsUrl: '',
+    adminUserIds: [],
+    adminWorkspaces: [],
+    questionTimeoutMs: 60000,
+    remoteApprovals: false,
+    logEnabled: true,
+    logRetentionDays: 14,
+  });
+  assert.equal(store.group('g1').name, '朋友');
+  assert.equal(store.label('user:alice'), '爱丽丝');
 });

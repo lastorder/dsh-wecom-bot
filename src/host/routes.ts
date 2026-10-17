@@ -1,4 +1,4 @@
-import { ROUTING_ROUTE, STATE_ROUTE, type RoutingOp, type RoutingResponse } from '../shared/protocol.js';
+import { STORE_ROUTE, STATE_ROUTE, type StoreOp, type StoreResponse } from '../shared/protocol.js';
 import type { FetchRoute } from './dsh.js';
 import type { Runtime } from './runtime.js';
 
@@ -39,13 +39,13 @@ export function stateRoute(runtime: Pick<Runtime, 'state'>): FetchRoute {
 }
 
 /**
- * Whether one parsed body entry is a routing op this Host understands.
+ * Whether one parsed body entry is a store op this Host understands.
  *
- * Every {@link RoutingOp} variant must be accepted here: the route rejects a
- * whole batch for one unknown op, so a missing case silently disables a page
- * feature (a 备注 edit, say) while the client keeps offering it.
+ * Every {@link StoreOp} variant must be accepted here: the route rejects a whole
+ * batch for one unknown op, so a missing case silently disables a page feature (a
+ * 备注 edit, say) while the client keeps offering it.
  */
-export function isRoutingOp(value: unknown): value is RoutingOp {
+export function isStoreOp(value: unknown): value is StoreOp {
   if (!value || typeof value !== 'object') return false;
   const record = value as Record<string, unknown>;
   switch (record.op) {
@@ -64,19 +64,24 @@ export function isRoutingOp(value: unknown): value is RoutingOp {
       return typeof record.key === 'string';
     case 'label.set':
       return typeof record.key === 'string' && typeof record.label === 'string';
+    // The field-by-field validation belongs to `validateSettingsPatch`: this
+    // guard only answers "is this an op this Host knows at all".
+    case 'settings.set':
+      return Boolean(record.patch) && typeof record.patch === 'object' && !Array.isArray(record.patch);
     default:
       return false;
   }
 }
 
 /**
- * `POST /api/wecom-bot/routing` — apply settings-page edits to groups and
- * members. Same authenticated channel as the state route; the response carries
- * the fresh table so the page never has to guess what was applied.
+ * `POST /api/wecom-bot/store` — apply settings-page edits to the plugin's own
+ * document: the settings block, the groups, the members and the notes. Same
+ * authenticated channel as the state route; the response carries the fresh table
+ * so the page never has to guess what was applied.
  */
-export function routingRoute(runtime: Pick<Runtime, 'routingView' | 'applyRouting'>): FetchRoute {
+export function storeRoute(runtime: Pick<Runtime, 'routingView' | 'applyOps'>): FetchRoute {
   return {
-    path: ROUTING_ROUTE,
+    path: STORE_ROUTE,
     methods: ['POST'],
     requestBody: 'buffered',
     async fetch(request) {
@@ -84,22 +89,22 @@ export function routingRoute(runtime: Pick<Runtime, 'routingView' | 'applyRoutin
       try {
         body = await request.json();
       } catch {
-        return json({ ok: false, error: '请求体不是 JSON。' } satisfies RoutingResponse, 400);
+        return json({ ok: false, error: '请求体不是 JSON。' } satisfies StoreResponse, 400);
       }
       const ops = (body as { ops?: unknown } | null)?.ops;
       if (!Array.isArray(ops) || !ops.length) {
-        return json({ ok: false, error: '缺少要应用的修改。' } satisfies RoutingResponse, 400);
+        return json({ ok: false, error: '缺少要应用的修改。' } satisfies StoreResponse, 400);
       }
-      if (ops.length > MAX_OPS || !ops.every(isRoutingOp)) {
-        return json({ ok: false, error: '修改格式不正确。' } satisfies RoutingResponse, 400);
+      if (ops.length > MAX_OPS || !ops.every(isStoreOp)) {
+        return json({ ok: false, error: '修改格式不正确。' } satisfies StoreResponse, 400);
       }
       try {
-        const result = await runtime.applyRouting(ops);
+        const result = await runtime.applyOps(ops);
         const routing = await runtime.routingView();
-        return json({ ok: result.ok, ...(result.error ? { error: result.error } : {}), routing } satisfies RoutingResponse,
+        return json({ ok: result.ok, ...(result.error ? { error: result.error } : {}), routing } satisfies StoreResponse,
           result.ok ? 200 : 422);
       } catch {
-        return json({ ok: false, error: '修改失败，请查看插件日志。' } satisfies RoutingResponse, 500);
+        return json({ ok: false, error: '修改失败，请查看插件日志。' } satisfies StoreResponse, 500);
       }
     },
   };

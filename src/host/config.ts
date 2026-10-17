@@ -1,35 +1,31 @@
 import z from '@deepseek-ai/schemastery';
-import { DEFAULT_SECRET_REF } from '../shared/protocol.js';
+import {
+  DEFAULT_LOG_RETENTION_DAYS, DEFAULT_QUESTION_TIMEOUT_MS, DEFAULT_SECRET_REF,
+  MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS, MIN_QUESTION_TIMEOUT_MS,
+  type StoreSettings,
+} from '../shared/protocol.js';
 
 /**
- * Plugin Config: the connection, the administrators and the advanced knobs.
+ * Plugin Config: the connection identity, and only that.
  *
- * This is deliberately *not* the place for who may talk to the Bot, nor for
- * which Workspace/model a Session uses: authorization is group membership and
- * groups are edited live on the settings page, so they live in the routing
- * store (`routing-store.ts`) — see the convention in AGENTS.md. A Config write
- * rebuilds the bridge and reconnects the socket, which must not happen because
- * somebody was added to a group.
+ * This is the one part of the plugin a DSH profile declares, so it is the one
+ * part that must stay in the Config document: the Bot ID, and the *reference* to
+ * the Secret in DSH's credential store (the Secret itself is never written to
+ * any file). Everything else the operator edits — administrators, the
+ * notification scope, the WebSocket endpoint, the question timeout, remote
+ * approvals, the journal — lives in the plugin's own document
+ * (`store.ts`, `<DSH home>/wecom-bot/settings.json`) and is applied live.
+ *
+ * A Config write rebuilds the bridge and reconnects the socket, which is exactly
+ * right for an identity change and wrong for everything else: adding an
+ * administrator must not drop the WeCom connection while somebody is talking to
+ * the Bot from their phone. See the convention in AGENTS.md.
  */
 export const Config = z.object({
   botId: z.string().default('').volatile()
     .description('企业微信智能机器人的 Bot ID（必填）。'),
   secretEnv: z.string().role('credential-ref').default(DEFAULT_SECRET_REF).volatile()
     .description('Bot Secret 在 DSH 凭据库中的引用名；Secret 本身不写入配置。'),
-  adminUserIds: z.array(z.string()).default([]).volatile()
-    .description('管理员 userid：可切换会话，并按 Workspace 接收通知；同时始终有权给机器人发消息。'),
-  adminWorkspaces: z.array(z.string()).default([]).volatile()
-    .description('管理员可操作/接收通知的 Workspace 路径。留空 = 全部 Workspace。'),
-  wsUrl: z.string().default('').volatile()
-    .description('自定义 WebSocket 地址，仅接受 wss://；留空使用 SDK 默认地址。'),
-  questionTimeoutMs: z.number().min(1000).max(300000).default(60000).volatile()
-    .description('等待企微回答提问/审批的毫秒数，超时后回退到 DSH 页面。'),
-  remoteApprovals: z.boolean().default(false).volatile()
-    .description('允许在企微单聊中审批工具调用（默认关闭）。'),
-  logEnabled: z.boolean().default(true).volatile()
-    .description('在 DSH home 的 wecom-bot/logs 下写入 JSONL 对话日志。'),
-  logRetentionDays: z.number().min(1).max(365).default(14).volatile()
-    .description('JSONL 日志保留天数。'),
 });
 
 interface Volatile<T> { get(): T }
@@ -37,13 +33,6 @@ interface Volatile<T> { get(): T }
 export interface PluginConfig {
   readonly botId: Volatile<string>;
   readonly secretEnv: Volatile<string>;
-  readonly adminUserIds: Volatile<string[]>;
-  readonly adminWorkspaces: Volatile<string[]>;
-  readonly wsUrl: Volatile<string>;
-  readonly questionTimeoutMs: Volatile<number>;
-  readonly remoteApprovals: Volatile<boolean>;
-  readonly logEnabled: Volatile<boolean>;
-  readonly logRetentionDays: Volatile<number>;
 }
 
 /** Normalized settings consumed by the bridge. */
@@ -84,26 +73,37 @@ export function isTrustedWsUrl(value: string): boolean {
   }
 }
 
-function clamp(value: number, min: number, max: number, fallback: number): number {
+export function clamp(value: number, min: number, max: number, fallback: number): number {
   return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.round(value))) : fallback;
 }
 
-export function readBridgeSettings(config: PluginConfig): BridgeSettings {
+/**
+ * The connection identity plus the store's settings, as the bridge wants them.
+ *
+ * The identity comes from the Config (which DSH owns); everything else comes
+ * from the store, and the bridge re-reads it on every message rather than
+ * holding a snapshot, so a settings edit needs no rebuild.
+ */
+export function readBridgeSettings(config: PluginConfig, settings: StoreSettings): BridgeSettings {
   return {
     botId: config.botId.get().trim(),
     secretRef: config.secretEnv.get().trim(),
-    wsUrl: config.wsUrl.get().trim(),
-    adminUserIds: uniqueIds(config.adminUserIds.get()),
-    adminWorkspaces: uniqueIds(config.adminWorkspaces.get()),
-    questionTimeoutMs: clamp(config.questionTimeoutMs.get(), 1000, 300000, 60000),
-    remoteApprovals: config.remoteApprovals.get() === true,
+    wsUrl: settings.wsUrl,
+    adminUserIds: uniqueIds(settings.adminUserIds),
+    adminWorkspaces: uniqueIds(settings.adminWorkspaces),
+    questionTimeoutMs: clamp(
+      settings.questionTimeoutMs, MIN_QUESTION_TIMEOUT_MS, MAX_QUESTION_TIMEOUT_MS, DEFAULT_QUESTION_TIMEOUT_MS,
+    ),
+    remoteApprovals: settings.remoteApprovals === true,
   };
 }
 
-export function readJournalSettings(config: PluginConfig): JournalSettings {
+export function readJournalSettings(settings: StoreSettings): JournalSettings {
   return {
-    enabled: config.logEnabled.get() !== false,
-    retentionDays: clamp(config.logRetentionDays.get(), 1, 365, 14),
+    enabled: settings.logEnabled !== false,
+    retentionDays: clamp(
+      settings.logRetentionDays, MIN_LOG_RETENTION_DAYS, MAX_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS,
+    ),
   };
 }
 

@@ -3,10 +3,8 @@ import {
   Button, IconPlusOutlineRegular, IconShieldOutlineRegular, IconTrashOutlineRegular, Input, Modal, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { AdminView, BridgeStateView, WorkspaceOption } from '../../shared/protocol.ts';
-import { useConfigSave } from '../hooks.ts';
+import { useStoreApply, useStoreSettingsSave } from '../hooks.ts';
 import { displayPath, personKey, scopeIncludes, setLabel, toggle, toggleScope } from '../model.ts';
-import { useRoutingApply } from '../hooks.ts';
-import type { ConfigFormScope, StoredConfig } from '../types.ts';
 import { Card, CheckRow, Collapse, Empty, Fact, PersonDialog, PersonRow } from './ui.tsx';
 
 /**
@@ -17,47 +15,51 @@ import { Card, CheckRow, Collapse, Empty, Fact, PersonDialog, PersonRow } from '
  *
  * Administrators are also always allowed to message the Bot, so a fresh install
  * is never locked out of its own Bot. The list and the notification scope are
- * Config, and a Config write rebuilds the bridge and reconnects the socket — but
+ * the store's settings block, not the plugin Config: they live in the plugin's
+ * own document, where a write is applied live and never rebuilds the bridge. So
  * adding, removing or re-scoping an administrator is a decision the operator has
- * already made by clicking, so this card writes on every edit and has no 保存
+ * already made by clicking, and this card writes on every edit with no 保存
  * button at all. A person's 备注 is routing state and applies immediately,
  * exactly like a group member's.
  */
-export function AdminCard({ scope, base, state, disabled, onChanged }: {
-  scope: ConfigFormScope;
-  base: StoredConfig;
+export function AdminCard({ state, disabled, onChanged }: {
   state: BridgeStateView | undefined;
   disabled: boolean;
   onChanged(): void;
 }) {
-  const [draft, setDraft] = useState(() => ({
-    adminUserIds: [...base.adminUserIds],
-    adminWorkspaces: [...base.adminWorkspaces],
-  }));
+  const storedIds = state?.settings?.adminUserIds ?? [];
+  const storedScope = state?.settings?.adminWorkspaces ?? [];
+  const [draft, setDraft] = useState(() => ({ adminUserIds: [...storedIds], adminWorkspaces: [...storedScope] }));
   const [picking, setPicking] = useState(false);
   const [query, setQuery] = useState('');
   const [scopeOpen, setScopeOpen] = useState(false);
-  const save = useConfigSave(scope, onChanged);
-  const routing = useRoutingApply(onChanged);
+  const save = useStoreSettingsSave(onChanged);
+  const routing = useStoreApply(onChanged);
   const admins = state?.admins ?? [];
   const workspaces = state?.workspaces ?? [];
   const all = draft.adminWorkspaces.length === 0;
   const busy = disabled || save.saving;
 
+  // Rebase on the store's own copy whenever its values move — but keyed by the
+  // values, not by the polled object: a poll that answers with what this card
+  // already shows must not undo an optimistic click while its write is in
+  // flight. The separator keeps two lists from ever hashing alike.
+  const storedKey = `${storedIds.join('\u0000')}\u0001${storedScope.join('\u0000')}`;
   useEffect(() => {
-    setDraft({ adminUserIds: [...base.adminUserIds], adminWorkspaces: [...base.adminWorkspaces] });
-  }, [base]);
+    setDraft({ adminUserIds: [...storedIds], adminWorkspaces: [...storedScope] });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the key is the two lists
+  }, [storedKey]);
 
   /**
    * Write one edit now. The draft follows the click immediately — a checkbox
-   * must not lag behind the pointer — and rebases on the stored revision when
-   * the write fails, so the card never shows a change that was not saved.
+   * must not lag behind the pointer — and the arrays come back from the store
+   * when the write fails, so the card never shows a change that was not saved.
+   * Only the array that moved is part of the patch.
    */
   const apply = async (patch: Partial<{ adminUserIds: string[]; adminWorkspaces: string[] }>): Promise<void> => {
-    const next = { ...draft, ...patch };
-    setDraft(next);
-    if (!(await save.save(next))) {
-      setDraft({ adminUserIds: [...base.adminUserIds], adminWorkspaces: [...base.adminWorkspaces] });
+    setDraft(current => ({ ...current, ...patch }));
+    if (!(await save.save(patch))) {
+      setDraft({ adminUserIds: [...storedIds], adminWorkspaces: [...storedScope] });
     }
   };
 

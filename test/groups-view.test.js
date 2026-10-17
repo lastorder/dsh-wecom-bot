@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyRoutingOps, buildRoutingView } from '../dist/host/groups-view.js';
-import { createRoutingStore } from '../dist/host/routing-store.js';
+import { applyStoreOps, buildRoutingView } from '../dist/host/groups-view.js';
+import { createStore } from '../dist/host/store.js';
 import { createObservationStore } from '../dist/host/observation.js';
 import { createWorkspaceService } from '../dist/host/workspaces.js';
 import { fakeHost, scratchDirectory, TEST_WORKSPACE_PATH } from './helpers.js';
@@ -11,7 +11,7 @@ const silent = { warn() {} };
 /** A view context with a real store, the fake Workspace registry and a catalog-free provisioner. */
 async function context(extra = {}) {
   const ctx = fakeHost({ workspaces: [] });
-  const store = createRoutingStore({ directory: scratchDirectory(), onError: () => {} });
+  const store = createStore({ directory: scratchDirectory(), onError: () => {} });
   await store.load();
   const workspaces = createWorkspaceService({
     registry: () => ctx.registry,
@@ -50,7 +50,7 @@ async function context(extra = {}) {
   return {
     ctx, store, observations, workspaces, archived,
     view: () => buildRoutingView(deps),
-    apply: ops => applyRoutingOps(deps, ops),
+    apply: ops => applyStoreOps(deps, ops),
   };
 }
 
@@ -241,4 +241,64 @@ test('the Workspace list counts live Sessions only', async () => {
   ctx.registry.archivedSessionIds.push('s2', 's3');
   const listed = workspaces.list().find(workspace => workspace.title === 'Live');
   assert.deepEqual([listed.sessionCount, listed.archivedSessionCount], [1, 2]);
+});
+
+/* ------------------------------------------------------------------ *
+ * settings.set: the settings block, edited through the same ops route *
+ * as the groups it now shares a document with                         *
+ * ------------------------------------------------------------------ */
+
+test('a settings edit is applied to the store and reported as such', async () => {
+  const { store, apply } = await context();
+  const result = await apply([
+    { op: 'settings.set', patch: { adminUserIds: ['root', 'second'], adminWorkspaces: ['/w/a'] } },
+    { op: 'settings.set', patch: { remoteApprovals: true, questionTimeoutMs: 45000, logEnabled: false } },
+  ]);
+  assert.equal(result.ok, true);
+  assert.equal(result.settingsChanged, true);
+  assert.equal(result.changed, 2);
+  assert.deepEqual(store.settings().adminUserIds, ['root', 'second']);
+  assert.deepEqual(store.settings().adminWorkspaces, ['/w/a']);
+  assert.equal(store.settings().remoteApprovals, true);
+  assert.equal(store.settings().questionTimeoutMs, 45000);
+  assert.equal(store.settings().logEnabled, false);
+  assert.equal(store.settings().logRetentionDays, 14, 'a field the patch omitted keeps its value');
+});
+
+test('a settings patch that cannot be used is refused before it reaches the store', async () => {
+  const { store, apply } = await context();
+  const cases = [
+    [{ wsUrl: 'ws://plaintext.example' }, /wss:\/\//, 'a plaintext endpoint is not an endpoint'],
+    [{ wsUrl: 'wss://user:pass@openws.example' }, /wss:\/\//, 'a credentialed endpoint is refused too'],
+    [{ questionTimeoutMs: 999 }, /等待企微回复/, 'below the documented minimum'],
+    [{ questionTimeoutMs: 300001 }, /等待企微回复/, 'above the documented maximum'],
+    [{ logRetentionDays: 0 }, /日志保留天数/, 'not a day'],
+    [{ logRetentionDays: 1.5 }, /日志保留天数/, 'not a whole day'],
+    [{ adminUserIds: [42] }, /userid/, 'not an id at all'],
+    [{ adminUserIds: [''] }, /userid/, 'an empty id is not an id'],
+    [{ adminWorkspaces: [null] }, /Workspace 路径/, 'a scope entry must be a path'],
+    [{ remoteApprovals: 'yes' }, /远程审批/, 'a switch is on or off'],
+    [{ logEnabled: 1 }, /对话日志/, 'a switch is on or off'],
+    [{ logRetentionDays: 7, nope: true }, /无法识别的设置项/, 'an unknown field is a version mismatch, not a typo to ignore'],
+  ];
+  for (const [patch, pattern, why] of cases) {
+    const result = await apply([{ op: 'settings.set', patch }]);
+    assert.equal(result.ok, false, why);
+    assert.match(result.error, pattern, why);
+    assert.equal(result.changed, 0, why);
+  }
+  assert.equal(store.settings().wsUrl, '', 'nothing was half-applied');
+  assert.equal(store.settings().questionTimeoutMs, 60000);
+});
+
+test('a refused settings patch does not stop the ops that precede it', async () => {
+  const { store, apply } = await context();
+  const result = await apply([
+    { op: 'settings.set', patch: { adminUserIds: ['root'] } },
+    { op: 'settings.set', patch: { questionTimeoutMs: 1 } },
+  ]);
+  assert.equal(result.ok, false);
+  assert.equal(result.changed, 1);
+  assert.deepEqual(store.settings().adminUserIds, ['root'], 'the accepted op stays applied');
+  assert.equal(store.settings().questionTimeoutMs, 60000, 'the refused one changed nothing');
 });
