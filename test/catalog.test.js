@@ -109,9 +109,7 @@ test('observations are bounded, expire, and keep only refused text', () => {
   assert.deepEqual(store.rejected(() => false).map(row => row.id), ['room-1']);
 
   // A private chat is remembered by its sender.
-  assert.equal(store.isPrivateChat('user-9'), false);
   store.record({ chat: 'user-9', user: 'user-9', chatType: 'single', accepted: false, text: '你好' });
-  assert.equal(store.isPrivateChat('user-9'), true);
   assert.deepEqual(store.stats('user', 'user-9'), { messages: 1, lastSeenAt: 1000 });
   assert.deepEqual(store.rejected(() => false).map(row => row.key), ['user:user-9', 'group:room-1']);
 
@@ -122,7 +120,6 @@ test('observations are bounded, expire, and keep only refused text', () => {
   clock += 101;
   assert.deepEqual(store.rejected(() => false), []);
   assert.deepEqual(store.stats('group', 'room-3'), { messages: 0 });
-  assert.equal(store.isPrivateChat('user-9'), false);
 
   // The oldest principals are evicted once the cap is reached.
   const small = createObservationStore({ maxEntries: 2, now: () => clock });

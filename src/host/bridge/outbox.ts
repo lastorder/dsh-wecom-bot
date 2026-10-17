@@ -11,7 +11,10 @@ import { limitBytes, MAX_NOTICE_BYTES } from './format.js';
  * journal line with the exact request body and the server acknowledgement.
  */
 
-export type NoticeKind = 'turn-complete' | 'question' | 'review' | 'approval' | 'approval-request' | 'prompt-failed';
+export type NoticeKind =
+  | 'turn-complete' | 'question' | 'review' | 'approval' | 'approval-request' | 'prompt-failed'
+  /** Sent by the page when an operator authorizes a sender. */
+  | 'authorized';
 
 export interface Notice {
   readonly chat: string;

@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdirSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { createBridge } from '../dist/host/bridge/index.js';
 import { createCatalogService } from '../dist/host/catalog.js';
 import { extractSessionPointer } from '../dist/host/bridge/format.js';
@@ -9,12 +11,13 @@ import { createObservationStore } from '../dist/host/observation.js';
 import { createRoundTracker } from '../dist/host/rounds.js';
 import { createRouter } from '../dist/host/routing.js';
 import { createRoutingStore } from '../dist/host/routing-store.js';
+import { createSessionOperations } from '../dist/host/session-ops.js';
 import { createSessionProvisioner } from '../dist/host/sessions.js';
 import { summarizeTurn } from '../dist/host/turns.js';
 import { createWorkspaceService } from '../dist/host/workspaces.js';
 import {
   baseSettings, fakeClient, fakeHost, finishedSession, frame, memoryJournal, scratchDirectory,
-  settle, until, TEST_WORKSPACE_PATH,
+  scratchRoot, settle, until, TEST_WORKSPACE_PATH,
 } from './helpers.js';
 
 const silent = { warn() {}, error() {}, info() {} };
@@ -55,6 +58,7 @@ async function harness(settings = {}, hostOptions = {}, extra = {}) {
   });
   const resolved = { ...baseSettings, ...settings };
   const router = createRouter({ store, provisioner, log: silent });
+  const ops = createSessionOperations({ ctx, workspaces, catalogs, journal });
 
   await store.load();
   if (extra.group) await store.updateGroup('default', extra.group);
@@ -67,6 +71,7 @@ async function harness(settings = {}, hostOptions = {}, extra = {}) {
 
   const bridge = createBridge({
     ctx, client, settings: resolved, router, journal, observations, rounds, catalogs, log: silent,
+    ops, workspaces,
   });
   const stop = bridge.start();
   // `emit` is fire-and-forget, exactly like the socket in production — so wait
@@ -124,7 +129,7 @@ test('an authorized member gets a Session in their group Workspace on first cont
   assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1');
   await h.store.flush();
   const file = JSON.parse(await readFile(h.store.file, 'utf8'));
-  assert.equal(file.version, 4);
+  assert.equal(file.version, 5);
   assert.equal(file.bindings[0].sessionId, 'session-created-1');
   h.stop();
 });
@@ -170,10 +175,12 @@ test('private chats are per user; one group shares a single Session for all its 
   h.stop();
 });
 
-test('a sender in no group is refused: no reply, no member, no prompt', async () => {
+test('a sender in no group is refused with one reply and gets no member and no Session', async () => {
   const h = await harness({}, {}, { members: [] });
   await h.send('hello', { chat: 'mallory', user: 'mallory' });
-  assert.equal(h.client.replies.length, 0, 'silence does not confirm the Bot is reachable');
+  assert.equal(h.client.replies.length, 1, 'the sender is told to ask an operator');
+  assert.match(lastReply(h), /用户未授权/);
+  assert.match(lastReply(h), /请联系管理员/);
   assert.equal(h.ctx.prompts.length, 0);
   assert.equal(h.ctx.creates.length, 0, 'no Session is created for an unauthorized sender');
   assert.deepEqual(h.store.bindings(), []);
@@ -200,7 +207,8 @@ test('a refused sender is listed with the message it sent, and authorizing it cl
 test('a group chat is refused until the group itself is added to a group', async () => {
   const h = await harness({}, {}, { members: [['user', 'alice']] });
   await h.send('大家好', { chat: 'group-1', user: 'alice' });
-  assert.equal(h.client.replies.length, 0);
+  assert.equal(h.client.replies.length, 1);
+  assert.match(lastReply(h), /用户未授权/);
   assert.equal(h.ctx.prompts.length, 0);
   assert.deepEqual(h.observations.rejected(() => false).map(row => [row.key, row.chatType]),
     [['group:group-1', 'group']]);
@@ -310,18 +318,22 @@ test('an administrator may quote a notice to jump to that Session; a bad quote c
   h.stop();
 });
 
-test('/new drops the bound Session so the next message starts a fresh one', async () => {
-  const h = await harness();
-  await h.send('第一条');
-  assert.equal(h.store.get('user:alice').sessionId, 'session-created-1');
-  await h.send('/new');
-  assert.match(lastReply(h), /新的专属会话/);
-  assert.equal(h.store.get('user:alice').sessionId, '');
+test('/new is administrator-only, creates a Session and switches to it', async () => {
+  // A member cannot create arbitrary Sessions: that is what the operator commands are for.
+  const member = await harness({}, {}, { members: [['user', 'alice']] });
+  await member.send('/new');
+  assert.match(lastReply(member), /需要管理员权限/);
+  assert.equal(member.ctx.creates.length, 0);
+  member.stop();
+
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'alice']] });
+  await h.send('/new', { chat: 'root', user: 'root' });
+  assert.match(lastReply(h), /已创建并切换到新会话/);
   assert.equal(h.ctx.creates.length, 1);
-  await h.send('第二条');
-  assert.equal(h.ctx.creates.length, 2);
-  assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-2');
-  assert.equal(h.store.get('user:alice').sessionId, 'session-created-2');
+  assert.equal(h.ctx.creates[0].workspaceId, h.ctx.registry.list()[0].id, 'created in the plugin Workspace');
+  // The switch is what makes the next message continue the new Session.
+  await h.send('开始吧', { chat: 'root', user: 'root' });
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1');
   h.stop();
 });
 
@@ -388,8 +400,8 @@ test('a leading @mention in a group message is stripped before routing and promp
   const h = await harness({}, {}, { members: [['group', 'group-1']] });
   await h.send('@DSH 继续工作吧', { chat: 'group-1', user: 'alice' });
   assert.deepEqual(h.ctx.prompts.at(-1).content, [{ type: 'text', text: '继续工作吧' }]);
-  await h.send('@DSH /new', { chat: 'group-1', user: 'alice' });
-  assert.match(lastReply(h), /新的专属会话/);
+  await h.send('@DSH /status', { chat: 'group-1', user: 'alice' });
+  assert.match(lastReply(h), /当前状态/);
   h.stop();
 });
 
@@ -479,23 +491,25 @@ test('remote approval is off by default and never available to a group', async (
 });
 
 test('each remote approval has a fresh code; an old code cannot approve a later call', async () => {
-  const h = await harness({ remoteApprovals: true });
+  const h = await harness({ remoteApprovals: true, adminUserIds: ['root'] }, {}, {
+    members: [['user', 'root'], ['user', 'alice'], ['group', 'group-1']],
+  });
   h.client.emit('authenticated');
   await h.send('hi');
   const first = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash', callId: 'first' }, async () => 'unavailable');
   await settle();
   const firstCode = h.client.sends.at(-1).body.markdown.content.match(/\/approve ([a-z0-9]{6})/)[1];
-  await h.send(`/deny ${firstCode}`);
+  await h.send(`/deny ${firstCode}`, { chat: 'root', user: 'root' });
   assert.equal(await first, 'rejected');
   const second = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash', callId: 'second' }, async () => 'unavailable');
   await settle();
   const secondCode = h.client.sends.at(-1).body.markdown.content.match(/\/approve ([a-z0-9]{6})/)[1];
   assert.notEqual(secondCode, firstCode);
-  await h.send(`/approve ${firstCode}`);
+  await h.send(`/approve ${firstCode}`, { chat: 'root', user: 'root' });
   assert.match(lastReply(h), /没有可在此单聊审批的请求/);
   await h.send(`/approve ${secondCode}`, { chat: 'group-1', user: 'alice' });
   assert.match(lastReply(h), /没有可在此单聊审批/);
-  await h.send(`/approve ${secondCode}`);
+  await h.send(`/approve ${secondCode}`, { chat: 'root', user: 'root' });
   assert.equal(await second, 'allowed-once');
   h.stop();
 });
@@ -577,5 +591,145 @@ test('/whoami reports the group a sender belongs to', async () => {
   await h.send('/whoami');
   assert.match(lastReply(h), /- \*\*分组\*\*：默认分组/);
   assert.match(lastReply(h), /alice/);
+  h.stop();
+});
+
+test('/status reports the whole Session: Workspace, preset, model, effort, context, turn and state', async () => {
+  const h = await harness();
+  await h.send('你好');
+  const row = h.ctx.rows.at(-1);
+  row.running = true;
+  row.projections = {
+    values: {
+      title: '工作会话',
+      agentPreset: 'ptc',
+      modelSelection: {
+        lastUsed: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' },
+      },
+      contextPressure: { projectedTokens: 12300, contextWindow: 128000 },
+      turnOutline: [{ turn: 1 }, { turn: 3 }],
+      sessionStats: { turns: 3, steps: 7 },
+    },
+  };
+  await h.send('/status');
+  const text = lastReply(h);
+  assert.match(text, /工作会话/, 'the Session name');
+  assert.match(text, /preset.*ptc/, 'the preset it runs');
+  assert.match(text, /deepseek-account\/deepseek-reasoner/);
+  assert.match(text, /effort.*high/);
+  assert.match(text, /12\.3k \/ 128k（10%）/, 'context occupancy against the window');
+  assert.match(text, /第 3 轮 · 累计 7 步/, 'turn and step progress');
+  assert.match(text, /运行中/, 'and whether it is running right now');
+  h.stop();
+});
+
+test('/compact folds the Session history and reports what it replaced', async () => {
+  const h = await harness();
+  await h.send('你好');
+  await h.send('/compact');
+  assert.match(lastReply(h), /上下文已压缩/);
+  assert.match(lastReply(h), /合并.*3 条历史/);
+  assert.match(lastReply(h), /释放.*1234 tokens/);
+  assert.equal(h.ctx.compactions.length, 1);
+  assert.equal(h.ctx.compactions[0].agent.id, 'session-created-1');
+  assert.deepEqual(h.ctx.agentResolutions, ['session-created-1'], 'a cold Session is resumed through the controller');
+  h.stop();
+});
+
+test('/compact explains a busy Session instead of dumping a DSH error', async () => {
+  const busy = Object.assign(new Error('busy'), { code: 'busy' });
+  const h = await harness({}, { compactError: busy });
+  await h.send('你好');
+  await h.send('/compact');
+  assert.match(lastReply(h), /上下文压缩失败/);
+  assert.match(lastReply(h), /会话正忙/);
+  h.stop();
+});
+
+test('/compact says so when DSH finds nothing worth folding', async () => {
+  const h = await harness({}, { compactResult: null });
+  await h.send('你好');
+  await h.send('/compact');
+  assert.match(lastReply(h), /没有可压缩的历史/);
+  h.stop();
+});
+
+test('/delete warns first, then archives the Session and clears the binding', async () => {
+  const h = await harness();
+  await h.send('你好');
+  assert.equal(h.store.get('user:alice').sessionId, 'session-created-1');
+
+  await h.send('/delete');
+  assert.match(lastReply(h), /归档会话会清空它的记忆/);
+  assert.match(lastReply(h), /\/delete confirm/);
+  assert.equal(h.ctx.registry.archivedCalls.length, 0, 'nothing happens before the confirmation');
+
+  await h.send('/delete confirm');
+  assert.match(lastReply(h), /会话已归档/);
+  assert.deepEqual(h.ctx.registry.archivedCalls, [{ sessionId: 'session-created-1', options: { stopActivity: true } }]);
+  assert.equal(h.store.get('user:alice').sessionId, '', 'the next message creates a new Session');
+
+  // The new Session comes from the group's current defaults, as promised.
+  await h.send('再来一次');
+  assert.equal(h.ctx.creates.length, 2);
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-2');
+  h.stop();
+});
+
+test('/delete in a group chat needs an administrator', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['group', 'group-1'], ['user', 'root']] });
+  await h.send('大家好', { chat: 'group-1', user: 'alice' });
+  await h.send('/delete', { chat: 'group-1', user: 'alice' });
+  assert.match(lastReply(h), /需要管理员权限/);
+  await h.send('/delete', { chat: 'group-1', user: 'root' });
+  assert.match(lastReply(h), /归档会话会清空它的记忆/);
+  h.stop();
+});
+
+test('/workspaces lists every Workspace, remembers the choice, and /sessions follows it', async () => {
+  // A Workspace must resolve to a real directory: `/new` creates a Session there.
+  const alpha = join(scratchRoot, 'alpha');
+  const beta = join(scratchRoot, 'beta');
+  mkdirSync(alpha, { recursive: true });
+  mkdirSync(beta, { recursive: true });
+  const h = await harness({ adminUserIds: ['root'] }, {
+    workspaces: [
+      { id: 'w1', path: alpha, title: 'Alpha', sessionIds: ['s1'] },
+      { id: 'w2', path: beta, title: 'Beta', sessionIds: ['s2'] },
+    ],
+  }, { members: [['user', 'root']] });
+
+  await h.send('/workspaces', { chat: 'root', user: 'root' });
+  assert.match(lastReply(h), /Alpha/);
+  assert.match(lastReply(h), /Beta/);
+  assert.match(lastReply(h), /\/workspaces 序号/);
+
+  await h.send('/workspaces 1', { chat: 'root', user: 'root' });
+  assert.match(lastReply(h), /默认 Workspace 已设为 Alpha/);
+  assert.equal(h.store.adminWorkspace('root'), alpha);
+
+  await h.send('/sessions', { chat: 'root', user: 'root' });
+  assert.match(lastReply(h), /Alpha 任务/);
+  assert.doesNotMatch(lastReply(h), /Beta 任务/, 'only the chosen Workspace is listed');
+
+  await h.send('/new', { chat: 'root', user: 'root' });
+  assert.equal(h.ctx.creates.at(-1).workspaceId, 'w1', 'the new Session lands in the chosen Workspace');
+
+  await h.send('/workspaces 0', { chat: 'root', user: 'root' });
+  assert.match(lastReply(h), /已取消 Workspace 限定/);
+  assert.equal(h.store.adminWorkspace('root'), '');
+  await h.send('/sessions', { chat: 'root', user: 'root' });
+  assert.match(lastReply(h), /Beta 任务/, 'an unlimited administrator sees everything again');
+  h.stop();
+});
+
+test('tool approvals are announced to administrators only', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'root'], ['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi');
+  await h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
+  await settle();
+  assert.deepEqual(sentChats(h), ['root'], 'the member whose Session it is never receives it');
+  assert.match(h.client.sends.at(-1).body.markdown.content, /DSH 权限请求/);
   h.stop();
 });

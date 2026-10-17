@@ -34,13 +34,21 @@ async function context(extra = {}) {
     known: id => presetView.presets.some(preset => preset.id === id),
   };
   const presetView = extra.presets ?? { presets: [{ id: 'standard', isDefault: true }, { id: 'ptc', isDefault: false }], fetchedAt: 1 };
+  // Archiving reaches DSH through this seam; `null` means the deployment has none.
+  const archived = [];
+  const ops = extra.ops === null ? undefined : {
+    async archive(sessionId) {
+      if (extra.archiveError) throw extra.archiveError;
+      archived.push(sessionId);
+    },
+  };
   const deps = {
-    store, provisioner, workspaces, observations, presets,
+    store, provisioner, workspaces, observations, presets, ops,
     models: { snapshot: () => undefined }, catalogs: { async load() { throw new Error('unused'); } },
     isAdmin: user => user === 'root',
   };
   return {
-    ctx, store, observations, workspaces,
+    ctx, store, observations, workspaces, archived,
     view: () => buildRoutingView(deps),
     apply: ops => applyRoutingOps(deps, ops),
   };
@@ -181,6 +189,50 @@ test('a member row reports the preset and context of the Session it owns', async
   assert.equal(member.sessionPreset, 'ptc');
   assert.deepEqual(member.sessionContext, { used: 12_000, window: 200_000 });
   assert.equal(member.sessionRunning, true);
+});
+
+test('archiving a member Session is one op: DSH archives it and the binding is cleared', async () => {
+  const { store, apply, archived } = await context();
+  await store.create('user', 'alice', { groupId: 'default' });
+  await store.update('user:alice', { sessionId: 's1' });
+
+  const result = await apply([{ op: 'member.archive', key: 'user:alice' }]);
+  assert.equal(result.ok, true, result.error);
+  assert.deepEqual(archived, ['s1']);
+  assert.equal(store.get('user:alice').sessionId, '', 'the next message creates a fresh Session');
+
+  // Nothing to archive, an unknown principal and a DSH refusal are all explained.
+  const twice = await apply([{ op: 'member.archive', key: 'user:alice' }]);
+  assert.equal(twice.ok, false);
+  assert.match(twice.error, /还没有会话可以归档/);
+  const unknown = await apply([{ op: 'member.archive', key: 'user:nobody' }]);
+  assert.match(unknown.error, /成员不存在/);
+
+  const refused = await context({ archiveError: new Error('会话正在运行，无法归档') });
+  await refused.store.create('user', 'alice', { groupId: 'default' });
+  await refused.store.update('user:alice', { sessionId: 's1' });
+  const failed = await refused.apply([{ op: 'member.archive', key: 'user:alice' }]);
+  assert.equal(failed.ok, false);
+  assert.match(failed.error, /无法归档/);
+  assert.equal(refused.store.get('user:alice').sessionId, 's1', 'a refused archive keeps the binding');
+
+  const bare = await context({ ops: null });
+  await bare.store.create('user', 'alice', { groupId: 'default' });
+  await bare.store.update('user:alice', { sessionId: 's1' });
+  assert.match((await bare.apply([{ op: 'member.archive', key: 'user:alice' }])).error, /不支持归档会话/);
+});
+
+test('a created group reports its id, and an authorization reports who was let in', async () => {
+  const { apply } = await context();
+  const added = await apply([{ op: 'group.add', name: '朋友' }]);
+  assert.equal(added.ok, true);
+  assert.ok(added.createdGroupId, 'the page opens the new group form with this id');
+
+  const authorized = await apply([{ op: 'member.add', groupId: 'default', kind: 'user', id: 'alice' }]);
+  assert.deepEqual(authorized.authorized, [{ kind: 'user', id: 'alice', groupId: 'default' }],
+    'the Host greets exactly the principals it authorized');
+  const moved = await apply([{ op: 'member.update', key: 'user:alice', patch: { groupId: 'default' } }]);
+  assert.equal(moved.authorized, undefined, 'moving somebody is not an authorization');
 });
 
 test('the Workspace list counts live Sessions only', async () => {

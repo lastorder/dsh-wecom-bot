@@ -200,20 +200,15 @@ export const STYLES = /* css */ `
 }
 .wcb-code { font-family: var(--wcb-mono); font-size: 12px; background: var(--wcb-surface-2); padding: 1px 5px; border-radius: 5px; }
 
-/* Footer */
-.wcb-footer {
-  position: sticky; bottom: 12px; z-index: 2;
-  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
-  padding: 12px 14px 12px 18px; border-radius: 16px;
-  background: color-mix(in srgb, var(--wcb-surface) 88%, transparent);
-  border: .5px solid var(--wcb-line-2);
-  box-shadow: 0 10px 30px rgba(0, 0, 0, .12);
-  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+/* Per-section save row: a card saves itself, nothing waits at the bottom. */
+.wcb-savebar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 12px; border-top: .5px solid var(--wcb-line);
 }
-.wcb-footer-msg { flex: 1; min-width: 200px; display: flex; align-items: center; gap: 8px; color: var(--wcb-text-2); font-size: 13px; }
-.wcb-footer-msg[data-tone="error"] { color: var(--wcb-err); }
-.wcb-footer-msg[data-tone="success"] { color: var(--wcb-ok); }
-.wcb-footer-msg[data-tone="dirty"] { color: var(--wcb-warn); }
+.wcb-savebar-msg { flex: 1; min-width: 160px; color: var(--wcb-text-2); font-size: 12.5px; }
+.wcb-savebar-msg[data-tone="error"] { color: var(--wcb-err); }
+.wcb-savebar-msg[data-tone="success"] { color: var(--wcb-ok); }
+.wcb-savebar-msg[data-tone="dirty"] { color: var(--wcb-warn); }
 
 /* Selects and inline text */
 .wcb-select {
@@ -276,29 +271,49 @@ export const STYLES = /* css */ `
   border: .5px solid var(--wcb-line-2);
 }
 
-/* The session line a member owns: four read-only facts until it is clicked. */
-.wcb-session-block { display: flex; flex-direction: column; gap: 4px; margin-left: 34px; }
-.wcb-session {
-  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px;
-  width: 100%; padding: 5px 10px; border-radius: 8px; cursor: pointer;
-  border: .5px solid transparent; background: var(--wcb-surface-2);
-  color: inherit; font: inherit; text-align: left;
+/* One member, one line: badge, name, the Session's facts, its 归档 action. */
+.wcb-member-row {
+  display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap;
+  padding: 6px 8px; border-radius: 8px;
 }
-.wcb-session:hover:not(:disabled) { border-color: var(--wcb-line-2); }
-.wcb-session[data-open] { border-color: color-mix(in srgb, var(--wcb-brand) 45%, transparent); background: var(--wcb-surface); }
-.wcb-session:focus-visible { outline: 2px solid var(--wcb-brand); outline-offset: 1px; }
-.wcb-session:disabled { cursor: not-allowed; opacity: .7; }
-.wcb-session-fact { display: inline-flex; align-items: center; gap: 5px; min-width: 0; color: var(--wcb-text-2); font-size: 12px; }
-.wcb-session-key { color: var(--wcb-text-3); font-size: 11px; }
-.wcb-session-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; color: var(--wcb-text); }
-.wcb-session-icon { color: var(--wcb-icon-preset, var(--wcb-text-3)); }
-.wcb-session-hint { grid-column: 1 / -1; margin-top: 0; }
+.wcb-member-row:hover { background: var(--wcb-hover); }
+.wcb-member-name {
+  font-weight: 500; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 140px;
+}
+.wcb-member-facts { display: flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; min-width: 0; flex: 1; }
+.wcb-fact-inline {
+  display: inline-flex; align-items: center; gap: 5px; min-width: 0;
+  color: var(--wcb-text-2); font-size: 12px;
+}
+.wcb-fact-key { color: var(--wcb-text-3); font-size: 11px; }
+.wcb-fact-strong {
+  color: var(--wcb-text); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 170px;
+}
 .wcb-member-edit {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px;
   align-items: end; padding: 8px 10px; border-radius: 8px; background: var(--wcb-surface-2);
 }
 @media (max-width: 820px) { .wcb-member-edit { grid-template-columns: 1fr; } }
 .wcb-member-actions { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
+
+/* A picker list inside a dialog: one known person per row. */
+.wcb-picker-list {
+  display: flex; flex-direction: column; max-height: 300px; overflow: auto;
+  border: .5px solid var(--wcb-line); border-radius: 10px;
+}
+.wcb-picker-row {
+  display: flex; align-items: baseline; gap: 10px; width: 100%;
+  padding: 8px 12px; background: none; border: none; border-top: .5px solid var(--wcb-line);
+  color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.wcb-picker-row:first-child { border-top: none; }
+.wcb-picker-row:hover { background: var(--wcb-hover); }
+.wcb-picker-row[data-manual] { border: .5px dashed var(--wcb-line-2); border-radius: 10px; padding: 10px 12px; flex-wrap: wrap; }
+.wcb-picker-hint { color: var(--wcb-text-3); font-size: 12px; min-width: 0; }
+.wcb-confirm-body { color: var(--wcb-text-2); font-size: 13px; }
+.wcb-confirm-body p { margin: 0; }
 
 /* The person dialog (portalled, so it re-declares the page tokens). */
 .wcb-modal { padding: 0; }

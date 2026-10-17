@@ -14,6 +14,8 @@ import { createRoundTracker, type Round, type RoundTracker } from '../rounds.js'
 import { createStatusTracker, type StatusTracker } from '../status.js';
 import type { TurnSummary } from '../turns.js';
 import type { Router } from '../routing.js';
+import type { SessionOperations } from '../session-ops.js';
+import type { WorkspaceService } from '../workspaces.js';
 import { parseCommand, runCommand, type CommandServices, type TargetInfo } from './commands.js';
 import { createSessionDirectory, type SessionDirectory } from './directory.js';
 import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, extractSessionPointer } from './format.js';
@@ -21,6 +23,7 @@ import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.
 import { createInteractionRegistry } from './interactions.js';
 import {
   approvalNotice, code, promptFailedNotice, questionNotice, reviewNotice, sessionLabel, title, turnCompleteNotice,
+  unauthorizedText,
 } from './notices.js';
 import { ackSummary, createOutbox, type NoticeKind } from './outbox.js';
 import { createAccessPolicy } from './policy.js';
@@ -53,6 +56,9 @@ export interface BridgeDeps {
   readonly rounds?: RoundTracker;
   readonly catalogs?: CatalogService;
   readonly status?: StatusTracker;
+  /** DSH operations the Bot exposes (archive, compact, create). */
+  readonly ops: SessionOperations;
+  readonly workspaces: WorkspaceService;
   /** Removes secrets from SDK-provided text before it is shown or logged. */
   readonly scrub?: (text: string) => string;
 }
@@ -69,6 +75,8 @@ export interface Bridge {
   readonly directory: SessionDirectory;
   readonly observations: ObservationStore;
   readonly rounds: RoundTracker;
+  /** Send one proactive message (used when the page authorizes somebody). */
+  notify(chat: string, text: string, kind: NoticeKind): void;
 }
 
 export function createBridge(deps: BridgeDeps): Bridge {
@@ -143,11 +151,6 @@ export function createBridge(deps: BridgeDeps): Bridge {
     return { ok: true, sessionId: routed.sessionId };
   }
 
-  /** Single chats are the only place a tool call may be authorized. */
-  function isPrivateChat(chat: string): boolean {
-    return Boolean(router.store.get(bindingKey('user', chat))) || observations.isPrivateChat(chat);
-  }
-
   /**
    * Conversations that may receive automatic messages about this Session:
    * every binding pointing at it, plus the administrators whose Workspace
@@ -197,16 +200,20 @@ export function createBridge(deps: BridgeDeps): Bridge {
   const commandServices: CommandServices = {
     policy, directory, selection, interactions, journal,
     sessionController: ctx.sessionController,
+    ops: deps.ops,
+    workspaces: deps.workspaces,
+    adminWorkspaces: router.store,
     current: currentTarget,
-    async reset(message) {
+    async archiveSession(message, sessionId) {
+      // Archive first: if DSH refuses, the binding must not be cleared.
+      await deps.ops.archive(sessionId);
       selection.clear(message.chat, message.user);
-      const binding = router.store.get(bindingKeyFor(parts(message)));
-      if (!binding) {
-        await router.ensure(parts(message), DEFAULT_GROUP_ID);
-        return;
+      for (const binding of router.store.forSession(sessionId)) {
+        await router.store.update(bindingKey(binding.kind, binding.id), { sessionId: '' });
+        journal.write({
+          event: 'binding.session.reset', binding: bindingKey(binding.kind, binding.id), sessionId, reason: 'archived-by-command',
+        });
       }
-      if (binding.sessionId) await router.store.update(bindingKey(binding.kind, binding.id), { sessionId: '' });
-      journal.write({ event: 'binding.session.reset', binding: bindingKey(binding.kind, binding.id), sessionId: binding.sessionId });
     },
     stale,
     ticket: () => generation,
@@ -372,10 +379,12 @@ export function createBridge(deps: BridgeDeps): Bridge {
       frame: message.frame,
     });
     if (!decision.accepted) {
-      // Never answer a rejected sender: silence does not confirm the Bot's reach.
-      // The settings page lists it under 「未授权用户」, where assigning it to a
-      // group is what authorizes it.
+      // A refused sender is told once per message that it needs an operator:
+      // the reply is the only way a person learns the Bot exists but will not
+      // answer yet. The settings page lists it under 「未授权用户」, where
+      // assigning it to a group is what authorizes it.
       status.count('rejected');
+      await reply(message, round, unauthorizedText());
       rounds.complete(round, 'rejected', { response: { reason: decision.reason } });
       return;
     }
@@ -457,27 +466,30 @@ export function createBridge(deps: BridgeDeps): Bridge {
   async function onApproval(request: ApprovalRequest, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
     const sessionId = request.agent?.id;
     if (closed || !sessionId) return next();
-    const chats = await recipients(sessionId, 'approval');
-    if (closed || !chats.length) return next();
+    // A tool call belongs to whoever operates the deployment, not to the person
+    // whose message triggered it: every administrator is told, no group member
+    // (and no non-administrator private chat) ever is.
+    const admins = [...settings.adminUserIds];
+    if (!admins.length) {
+      journal.write({ event: 'dsh.approval', sessionId, toolName: request.toolName, remote: false, chats: [] });
+      return next();
+    }
     const info = await directory.describe(sessionId);
-    // Only a single chat with an allowlisted person may authorize a tool call;
-    // group members never can.
-    const privateChats = chats.filter(chat => isPrivateChat(chat));
     const meta = { sessionId, toolName: request.toolName, ...(request.callId ? { callId: request.callId } : {}) };
-    if (!settings.remoteApprovals || !privateChats.length) {
-      journal.write({ event: 'dsh.approval', ...meta, remote: false, chats });
-      notify(chats, approvalNotice(sessionId, info.title, request), 'approval', sessionId);
+    if (!settings.remoteApprovals) {
+      journal.write({ event: 'dsh.approval', ...meta, remote: false, chats: admins });
+      notify(admins, approvalNotice(sessionId, info.title, request), 'approval', sessionId);
       return next();
     }
     const wait = interactions.waitApproval(sessionId, {
-      toolName: request.toolName, privateChats, ...(request.callId ? { callId: request.callId } : {}),
+      toolName: request.toolName, privateChats: admins, ...(request.callId ? { callId: request.callId } : {}),
     }, settings.questionTimeoutMs, request.signal);
     if (!wait) {
-      notify(chats, approvalNotice(sessionId, info.title, request), 'approval', sessionId);
+      notify(admins, approvalNotice(sessionId, info.title, request), 'approval', sessionId);
       return next();
     }
-    journal.write({ event: 'dsh.approval', ...meta, remote: true, nonce: wait.nonce, chats: privateChats, timeoutMs: settings.questionTimeoutMs });
-    notify(privateChats, approvalNotice(sessionId, info.title, request, wait.nonce, settings.questionTimeoutMs), 'approval-request', sessionId);
+    journal.write({ event: 'dsh.approval', ...meta, remote: true, nonce: wait.nonce, chats: admins, timeoutMs: settings.questionTimeoutMs });
+    notify(admins, approvalNotice(sessionId, info.title, request, wait.nonce, settings.questionTimeoutMs), 'approval-request', sessionId);
     const outcome = await wait.result;
     journal.write({ event: 'dsh.approval.result', ...meta, nonce: wait.nonce, outcome: outcome ?? 'fallback' });
     return outcome ?? next();
@@ -543,5 +555,11 @@ export function createBridge(deps: BridgeDeps): Bridge {
     return stop;
   }
 
-  return { start, handleFrame, whenIdle, onTurnEnd, onQuestion, onApproval, directory, observations, rounds };
+  return {
+    start, handleFrame, whenIdle, onTurnEnd, onQuestion, onApproval, directory, observations, rounds,
+    notify(chat, text, kind) {
+      if (closed) return;
+      outbox.enqueue({ chat, text, kind });
+    },
+  };
 }

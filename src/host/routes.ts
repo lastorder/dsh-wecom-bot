@@ -60,6 +60,7 @@ export function isRoutingOp(value: unknown): value is RoutingOp {
     case 'member.update':
       return typeof record.key === 'string' && Boolean(record.patch) && typeof record.patch === 'object';
     case 'member.remove':
+    case 'member.archive':
       return typeof record.key === 'string';
     case 'label.set':
       return typeof record.key === 'string' && typeof record.label === 'string';

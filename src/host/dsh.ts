@@ -99,6 +99,13 @@ export interface SessionSummary {
       readonly modelSelection?: { readonly lastUsed?: unknown; readonly next?: unknown } | null;
       /** Preset projection: the preset the Session actually runs. */
       readonly agentPreset?: string | null;
+      /** Whole-log turn/step counts, from the `sessionStats` fold. */
+      readonly sessionStats?: {
+        readonly turns?: number;
+        readonly steps?: number;
+      } | null;
+      /** One entry per turn, in turn order, from the `turnOutline` fold. */
+      readonly turnOutline?: readonly { readonly turn?: number }[] | null;
       /** Token meter's occupancy fold: prompt-side tokens against the window. */
       readonly contextPressure?: {
         readonly contextWindow?: number;
@@ -155,8 +162,39 @@ export interface SessionController {
   create(request: SessionCreateRequest): Promise<{ readonly sessionId: string; readonly agentPreset?: string }>;
   /** Install a Session-local model; also saves the deployment default. */
   selectModel(request: ModelSelectionValue & { readonly sessionId: string }): Promise<{ readonly selected: ModelSelectionValue }>;
+  /** Resume (or find) the Agent that owns one Session, for a Host API domain. */
+  resolveAgent(sessionId: string): Promise<ApiSessionAgentResult>;
   /** Every currently routable provider/model pair. */
   modelCatalog(): Promise<ModelCatalog>;
+}
+
+/** One live Agent handle; enough to reach the Session-domain services. */
+export interface AgentRef {
+  readonly id: string;
+}
+
+export interface ApiSessionAgentError {
+  readonly code: string;
+  readonly message?: string;
+}
+
+export type ApiSessionAgentResult = { readonly agent: AgentRef } | { readonly error: ApiSessionAgentError };
+
+/** `ctx.agents`: the live Agent table. A cold Session has no entry until resumed. */
+export interface AgentService {
+  get(id: string): AgentRef | undefined;
+}
+
+export interface CompactionResult {
+  readonly compactionId: string;
+  readonly summarySeq: number;
+  readonly shadowedSeqs: readonly number[];
+  readonly shadowedTokenCount: number;
+}
+
+/** `ctx.compaction`: manual context compaction over one idle Agent. */
+export interface CompactionService {
+  compactNow(agent: AgentRef, signal: AbortSignal, sourceCommandId?: string): Promise<CompactionResult | null>;
 }
 
 /** `ctx.agentDefaultModel`: the deployment-wide default model selection. */

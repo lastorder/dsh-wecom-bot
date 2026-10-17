@@ -1,5 +1,5 @@
 import type { CatalogEntry, CatalogService, SessionCatalog } from '../catalog.js';
-import type { HiddenSelection, ModelSelection } from '../../shared/protocol.js';
+import type { ContextUsage, HiddenSelection, ModelSelection } from '../../shared/protocol.js';
 
 /**
  * The Sessions an *administrator* may operate: the visible DSH catalog (no
@@ -38,11 +38,15 @@ export interface SessionDescription {
   readonly workspacePath?: string;
   readonly running?: boolean;
   readonly model?: ModelSelection;
+  readonly preset?: string;
+  readonly context?: ContextUsage;
+  readonly turns?: number;
+  readonly steps?: number;
 }
 
 export interface SessionDirectory {
-  /** Grouped by Workspace in DSH sidebar order. */
-  groups(): Promise<readonly OperableGroup[]>;
+  /** Grouped by Workspace in DSH sidebar order; one Workspace when filtered. */
+  groups(filter?: { readonly workspacePath?: string }): Promise<readonly OperableGroup[]>;
   /** `token`: 1-based index into `listing`, a full Session id, or a unique id prefix (≥ 6 chars). */
   resolve(token: string, listing?: readonly string[]): Promise<ResolveResult>;
   permitted(sessionId: string): Promise<boolean>;
@@ -75,9 +79,11 @@ export function createSessionDirectory(catalogs: CatalogService, options: Sessio
   }
 
   return {
-    async groups() {
+    async groups(filter) {
       const result = new Map<string, { title: string; sessions: OperableSession[] }>();
+      const scope = filter?.workspacePath;
       for (const session of operable(await catalogs.load({ force: true }))) {
+        if (scope && session.workspacePath !== scope) continue;
         const group = result.get(session.groupKey) ?? { title: session.workspace, sessions: [] };
         group.sessions.push(session);
         result.set(session.groupKey, group);
@@ -113,7 +119,11 @@ export function createSessionDirectory(catalogs: CatalogService, options: Sessio
       try {
         const catalog = await lookup(sessionId);
         const entry = catalog.get(sessionId);
-        return Boolean(entry) && options.allow(entry!);
+        if (entry) return options.allow(entry);
+        // A Session created a moment ago is `blank` until its first turn: the
+        // catalog hides it from the sidebar, but the administrator who just
+        // created it (or the member it belongs to) must be able to use it.
+        return catalog.hiddenReason(sessionId) === 'blank';
       } catch {
         return false;
       }
@@ -129,6 +139,10 @@ export function createSessionDirectory(catalogs: CatalogService, options: Sessio
           workspacePath: entry.group.path ?? '',
           running: entry.running,
           ...(entry.model ? { model: entry.model } : {}),
+          ...(entry.preset ? { preset: entry.preset } : {}),
+          ...(entry.context ? { context: entry.context } : {}),
+          ...(entry.turns !== undefined ? { turns: entry.turns } : {}),
+          ...(entry.steps !== undefined ? { steps: entry.steps } : {}),
         };
       } catch {
         return { title: null };

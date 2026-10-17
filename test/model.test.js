@@ -2,39 +2,40 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  changedOperations, choiceLabel, contextLabel, displayPath, draftFrom, dshDefaultLabel, effortLabel,
-  effortsFor, formatTokens, groupModelLabel, isDirty, modelKey, modelLabel, parseModelKey, personKey, personTitle,
-  presetLabel, presetName, relativeTime, setLabel, updateMember,
-  sessionOptions, setAll, storedFrom, toggle, validate,
+  changedOperations, choiceLabel, contextLabel, displayPath, dshDefaultLabel, effortLabel,
+  effortsFor, formatTokens, groupModelLabel, modelKey, modelLabel, modelName, parseModelKey, personKey,
+  presetLabel, presetName, relativeTime, scopeIncludes, setLabel, storedFrom, toggle, toggleScope,
+  updateMember, validateAdvanced, validateCredentials,
 } from '../src/client/model.ts';
 
-test('drafts diff into minimal Config operations and never include the Secret', () => {
+test('one section diffs into minimal Config operations and never includes the Secret', () => {
   const base = storedFrom({ botId: 'bot', adminUserIds: ['root'] });
   const draft = {
-    ...draftFrom(base),
+    ...base,
     botId: ' bot-2 ',
     adminUserIds: ['root', 'second', 'second', ' '],
-    secret: 'new-secret',
   };
   assert.deepEqual(changedOperations(draft, base), [
     { op: 'set', path: ['botId'], value: 'bot-2' },
     { op: 'set', path: ['adminUserIds'], value: ['root', 'second'] },
   ]);
-  assert.equal(isDirty(draft, base), true);
-  assert.equal(isDirty(draftFrom(base), base), false);
-  assert.equal(isDirty({ ...draftFrom(base), adminUserIds: ['root', ' root '] }, base), false, 'normalization is not a change');
-  assert.equal(isDirty({ ...draftFrom(base), secret: 'x' }, base), true, 'a new Secret alone is a change');
-  assert.equal(isDirty({ ...draftFrom(base), adminWorkspaces: ['/w'] }, base), true, 'admin scope is Config too');
+  // Normalization alone is not a change, so 保存 stays disabled.
+  assert.deepEqual(changedOperations({ ...base, adminUserIds: ['root', ' root '] }, base), []);
+  assert.deepEqual(changedOperations({ ...base, adminWorkspaces: ['/w'] }, base),
+    [{ op: 'set', path: ['adminWorkspaces'], value: ['/w'] }], 'the admin scope is Config too');
 });
 
-test('validation covers the credential, the connection URL and the advanced numbers', () => {
-  const empty = draftFrom(storedFrom({}));
-  assert.deepEqual(Object.keys(validate(empty, false)).sort(), ['botId', 'secret']);
-  assert.deepEqual(validate({ ...empty, botId: 'bot' }, true), {});
-  assert.deepEqual(Object.keys(validate({ ...empty, botId: 'bot', wsUrl: 'ws://x' }, true)), ['wsUrl']);
-  assert.deepEqual(Object.keys(validate({ ...empty, botId: 'bot', wsUrl: 'wss://u:p@x' }, true)), ['wsUrl']);
-  assert.deepEqual(validate({ ...empty, botId: 'bot', wsUrl: 'wss://openws.example' }, true), {});
-  assert.deepEqual(Object.keys(validate({ ...empty, botId: 'bot', questionTimeoutMs: 0, logRetentionDays: 0.5 }, true)).sort(),
+test('each Config card validates only its own fields', () => {
+  assert.deepEqual(Object.keys(validateCredentials({ botId: '', secret: '' }, false)).sort(), ['botId', 'secret']);
+  assert.deepEqual(validateCredentials({ botId: 'bot', secret: 's' }, false), {});
+  assert.deepEqual(validateCredentials({ botId: 'bot', secret: '' }, true), {}, 'a stored Secret may be kept');
+
+  const advanced = { wsUrl: '', questionTimeoutMs: 60000, logRetentionDays: 14 };
+  assert.deepEqual(validateAdvanced(advanced), {});
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, wsUrl: 'ws://x' })), ['wsUrl']);
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, wsUrl: 'wss://u:p@x' })), ['wsUrl']);
+  assert.deepEqual(validateAdvanced({ ...advanced, wsUrl: 'wss://openws.example' }), {});
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: 0, logRetentionDays: 0.5 })).sort(),
     ['logRetentionDays', 'questionTimeoutMs']);
 });
 
@@ -56,7 +57,9 @@ test('model helpers round-trip the provider/model key and label the default', ()
   assert.equal(choiceLabel(CATALOG.choices[0]), 'Model（m）');
   assert.equal(modelLabel(CATALOG, { provider: 'p', model: 'r' }), 'Reasoner（r）');
   assert.equal(modelLabel(CATALOG, { provider: 'x', model: 'y' }), 'x/y');
-  assert.equal(dshDefaultLabel(CATALOG), '跟随 DSH 默认模型（Model（m））');
+  assert.equal(dshDefaultLabel(CATALOG), '跟随 DSH 默认模型（Model）', 'the id is left out where space is tight');
+  assert.equal(modelName(CATALOG, { provider: 'p', model: 'r' }), 'Reasoner');
+  assert.equal(modelName(CATALOG, { provider: 'x', model: 'y' }), 'y');
   assert.equal(dshDefaultLabel(null), '跟随 DSH 默认模型');
   assert.deepEqual(effortsFor(CATALOG, 'p', 'r').map(effort => effort.id), ['low']);
   assert.deepEqual(effortsFor(CATALOG, 'p', 'm'), []);
@@ -75,13 +78,11 @@ const MEMBER = {
 
 test('a group label falls back to the DSH default, and a member to its WeCom id', () => {
   assert.equal(groupModelLabel(CATALOG, GROUP), 'Reasoner（r）');
-  assert.equal(groupModelLabel(CATALOG, { ...GROUP, effectiveProvider: '', effectiveModel: '' }), '跟随 DSH 默认模型（Model（m））');
-  assert.equal(personTitle({ label: '爱丽丝', id: 'alice' }), '爱丽丝');
-  assert.equal(personTitle({ label: '', id: 'alice' }), 'alice');
+  assert.equal(groupModelLabel(CATALOG, { ...GROUP, effectiveProvider: '', effectiveModel: '' }), '跟随 DSH 默认模型（Model）');
   assert.equal(personKey('user', 'alice'), 'user:alice');
   assert.deepEqual(setLabel('user:alice', '爱丽丝'), { op: 'label.set', key: 'user:alice', label: '爱丽丝' });
-  assert.deepEqual(updateMember('user:alice', { sessionId: 's1' }), {
-    op: 'member.update', key: 'user:alice', patch: { sessionId: 's1' },
+  assert.deepEqual(updateMember('user:alice', { groupId: 'g1' }), {
+    op: 'member.update', key: 'user:alice', patch: { groupId: 'g1' },
   });
 });
 
@@ -119,32 +120,21 @@ test('an effort is named from the catalog, and context occupancy is compact', ()
   assert.equal(contextLabel(undefined), '');
 });
 
-test('session options list the group Workspace Sessions and keep an unlisted bound one', () => {
-  const groups = [
-    { key: 'w1', kind: 'workspace', title: '企业微信', path: '/home/.dsh/wecom-bot/workspace', sessions: [
-      { sessionId: 'session-1', title: '修复登录', running: false, pinned: false, updatedAt: 1 },
-      { sessionId: 'session-2', title: null, running: true, pinned: false, updatedAt: 2 },
-    ] },
-    { key: 'w2', kind: 'workspace', title: 'App', path: '/repo/app', sessions: [
-      { sessionId: 'other', title: '别的', running: false, pinned: false, updatedAt: 3 },
-    ] },
-  ];
-  assert.deepEqual(sessionOptions(MEMBER, GROUP, groups).map(option => option.sessionId), ['session-1', 'session-2']);
-  assert.deepEqual(sessionOptions({ ...MEMBER, sessionId: '', sessionTitle: null }, GROUP, groups).map(option => option.sessionId),
-    ['session-1', 'session-2']);
-  assert.deepEqual(sessionOptions({ ...MEMBER, sessionId: 'gone', sessionTitle: '归档的' }, GROUP, groups)
-    .map(option => [option.sessionId, option.stale ?? false]),
-  [['gone', true], ['session-1', false], ['session-2', false]]);
-  assert.deepEqual(sessionOptions(MEMBER, GROUP, undefined).map(option => option.sessionId), ['session-1']);
-  assert.deepEqual(sessionOptions(MEMBER, { ...GROUP, workspacePath: '/repo/app' }, groups).map(option => option.sessionId),
-    ['session-1', 'other'], 'a member Session outside its group Workspace is offered first');
+test('the notification scope is all-or-nothing: checking everything stores an empty list', () => {
+  const all = ['/w/a', '/w/b'];
+  assert.equal(scopeIncludes([], '/w/a'), true, 'empty means every Workspace');
+  assert.equal(scopeIncludes(['/w/a'], '/w/a'), true);
+  assert.equal(scopeIncludes(['/w/a'], '/w/b'), false, 'an explicit list excludes the rest');
+  // Unchecking one of two stores the remaining path; rechecking collapses to [].
+  assert.deepEqual(toggleScope([], all, '/w/a', false), ['/w/b']);
+  assert.deepEqual(toggleScope(['/w/b'], all, '/w/a', true), []);
+  assert.deepEqual(toggleScope(['/w/a'], all, '/w/b', true), [], 'a list covering everything is the default');
+  assert.deepEqual(toggleScope([], all, '/w/b', false), ['/w/a']);
 });
 
-test('list helpers toggle, select all and shorten paths and times', () => {
+test('list helpers toggle and shorten paths and times', () => {
   assert.deepEqual(toggle(['a'], 'b'), ['a', 'b']);
   assert.deepEqual(toggle(['a', 'b'], 'a', false), ['b']);
-  assert.deepEqual(setAll(['a'], ['a', 'b', 'c'], true), ['a', 'b', 'c']);
-  assert.deepEqual(setAll(['a', 'b', 'x'], ['a', 'b'], false), ['x']);
   assert.equal(displayPath('/Users/me/work/app'), '~/work/app');
   assert.equal(displayPath('/srv/app'), '/srv/app');
   assert.equal(relativeTime(Date.now() - 10), '刚刚');

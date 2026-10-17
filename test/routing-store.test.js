@@ -47,7 +47,7 @@ test('the default group always exists and cannot be removed', async () => {
   assert.equal(await store.updateGroup('default', { workspace: '/srv/app' }) !== undefined, true);
   await store.flush();
   const parsed = JSON.parse(await readFile(store.file, 'utf8'));
-  assert.equal(parsed.version, 4);
+  assert.equal(parsed.version, 5);
   assert.deepEqual(parsed.groups.map(group => group.id), ['default']);
 });
 
@@ -171,7 +171,7 @@ test('a file of another version is set aside instead of being read or overwritte
   await store.create('user', 'bob', { groupId: 'default' });
   await store.flush();
   const parsed = JSON.parse(await readFile(store.file, 'utf8'));
-  assert.equal(parsed.version, 4);
+  assert.equal(parsed.version, 5);
   assert.deepEqual(parsed.bindings.map(record => record.id), ['bob']);
   await stat(join(dir, 'bindings.json.v3'));
 });
@@ -203,7 +203,7 @@ test('a group keeps its Workspace, model, effort and preset across a reload', as
 test('corrupt entries and duplicates are dropped while loading', async () => {
   const dir = await directory();
   await writeFile(join(dir, 'bindings.json'), JSON.stringify({
-    version: 4,
+    version: 5,
     groups: [{ id: 'g1', name: ' 朋友 ' }, { id: 'g1', name: '重复' }, null, { id: 'x'.repeat(80) }, { name: '没有 id' }],
     bindings: [
       { kind: 'user', id: 'alice', groupId: 'missing', sessionId: 'session-1', createdAt: 1, updatedAt: 2 },

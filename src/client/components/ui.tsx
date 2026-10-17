@@ -1,7 +1,7 @@
 /** Small layout pieces shared by the page sections. */
 import type { ReactNode, SelectHTMLAttributes } from 'react';
 import {
-  IconChevronRightOutlineRegular, IconEditOutlineRegular, IconUserOutlineRegular, IconUsersOutlineRegular,
+  Button, IconChevronRightOutlineRegular, IconEditOutlineRegular, IconUserOutlineRegular, IconUsersOutlineRegular,
   Input, Modal, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { BindingKind } from '../../shared/protocol.ts';
@@ -232,6 +232,58 @@ export function PersonDialog({ open, onClose, title, typeLabel, id, label, noteL
       <div className="wcb-hint">备注即时生效，会代替企微 ID 显示；它属于这个人，移出分组后仍然保留。</div>
       {children}
       {footer && <div className="wcb-dialog-actions">{footer}</div>}
+    </Modal>
+  );
+}
+
+/**
+ * One card's save row: its own fields, its own button. There is no page-wide
+ * 保存配置 any more — a section is saved where it is edited, and a successful
+ * write needs no lasting banner (the form simply stops being dirty).
+ */
+export function SaveBar({ dirty, saving, saved, error, disabled, onSave, onDiscard }: {
+  dirty: boolean;
+  saving: boolean;
+  saved: boolean;
+  error?: string;
+  disabled?: boolean;
+  onSave(): void;
+  onDiscard(): void;
+}) {
+  if (!dirty && !saved && !error) return null;
+  return (
+    <div className="wcb-savebar">
+      <span className="wcb-savebar-msg" data-tone={error ? 'error' : saved && !dirty ? 'success' : dirty ? 'dirty' : undefined} role="status">
+        {error ?? (saved && !dirty ? '已保存。' : '有未保存的更改')}
+      </span>
+      <Button variant="ghost" size="sm" disabled={disabled || saving || !dirty} onClick={onDiscard}>放弃</Button>
+      <Button variant="primary" size="sm" disabled={disabled || saving || !dirty} onClick={onSave}>
+        {saving ? '保存中…' : '保存'}
+      </Button>
+    </div>
+  );
+}
+
+/** A confirmation step for a destructive edit that has no form of its own. */
+export function ConfirmDialog({ open, title, children, confirmLabel, busy, disabled, onCancel, onConfirm }: {
+  open: boolean;
+  title: ReactNode;
+  children?: ReactNode;
+  confirmLabel: string;
+  busy?: boolean;
+  disabled?: boolean;
+  onCancel(): void;
+  onConfirm(): void;
+}) {
+  return (
+    <Modal open={open} onClose={onCancel} title={title} closeLabel="关闭" className="wcb-modal" contentClassName="wcb-modal-content">
+      <div className="wcb-confirm-body">{children}</div>
+      <div className="wcb-dialog-actions">
+        <Button variant="ghost" size="sm" disabled={busy} onClick={onCancel}>取消</Button>
+        <Button variant="primary" size="sm" disabled={busy || disabled} onClick={onConfirm}>
+          {busy ? '处理中…' : confirmLabel}
+        </Button>
+      </div>
     </Modal>
   );
 }

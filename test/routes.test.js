@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  addGroup, addMember, deleteGroup, removeMember, setLabel, updateGroup, updateMember,
+  addGroup, addMember, archiveMember, deleteGroup, removeMember, setLabel, updateGroup, updateMember,
 } from '../src/client/model.ts';
 import { isRoutingOp } from '../dist/host/routes.js';
 
@@ -24,6 +24,7 @@ const SAMPLE_OPS = [
   updateMember('user:alice', { sessionId: 's1' }),
   updateMember('user:alice', { groupId: 'g1' }),
   removeMember('user:alice'),
+  archiveMember('user:alice'),
   setLabel('user:alice', '爱丽丝'),
   setLabel('user:alice', ''),
 ];
@@ -35,7 +36,8 @@ test('every op the page can build is accepted by the route', () => {
 test('every op variant is represented, so a new one cannot slip through', () => {
   const covered = new Set(SAMPLE_OPS.map(op => op.op));
   assert.deepEqual([...covered].sort(), [
-    'group.add', 'group.delete', 'group.update', 'label.set', 'member.add', 'member.remove', 'member.update',
+    'group.add', 'group.delete', 'group.update', 'label.set', 'member.add', 'member.archive',
+    'member.remove', 'member.update',
   ]);
 });
 
@@ -47,7 +49,7 @@ test('junk is rejected before it reaches the store', () => {
     { op: 'member.add', groupId: 'default', kind: 'nonsense', id: 'x' },
     { op: 'member.add', kind: 'user', id: 'x' },
     { op: 'member.update', key: 'user:alice' },
-    { op: 'member.remove' },
+    { op: 'member.remove' }, { op: 'member.archive' }, { op: 'member.archive', key: 7 },
     { op: 'label.set', key: 'user:alice' }, { op: 'label.set', label: 'x' },
     { op: 'label.set', key: 'user:alice', label: 42 },
     { op: 'group.add', name: 42 },

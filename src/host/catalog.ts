@@ -84,6 +84,26 @@ export function sessionContext(summary: SessionSummary | undefined): ContextUsag
   return { used, ...(window ? { window } : {}) };
 }
 
+/**
+ * How far the Session's log has come: its latest turn and its step count.
+ *
+ * `turnOutline` is one entry per turn (so its last entry is the latest turn the
+ * log recorded — including a running one), while `sessionStats` counts entered
+ * steps over the whole log. Neither is required: a Session whose events predate
+ * these folds simply reports nothing.
+ */
+export function sessionProgress(summary: SessionSummary | undefined): { turns?: number; steps?: number } {
+  const values = summary?.projections?.values;
+  const outline = Array.isArray(values?.turnOutline) ? values.turnOutline as { turn?: unknown }[] : undefined;
+  const last = outline && outline.length ? outline[outline.length - 1] : undefined;
+  const stats = (values?.sessionStats ?? undefined) as { turns?: unknown; steps?: unknown } | undefined;
+  const count = (raw: unknown): number | undefined =>
+    typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? Math.round(raw) : undefined;
+  const turns = count(last?.turn) ?? count(stats?.turns);
+  const steps = count(stats?.steps);
+  return { ...(turns !== undefined ? { turns } : {}), ...(steps !== undefined ? { steps } : {}) };
+}
+
 export function buildCatalog(
   items: readonly SessionSummary[], registry: WorkspaceRegistry | undefined, generatedAt = Date.now(),
 ): SessionCatalog {
@@ -103,6 +123,7 @@ export function buildCatalog(
     const model = sessionModel(summary);
     const preset = sessionPreset(summary);
     const context = sessionContext(summary);
+    const progress = sessionProgress(summary);
     return {
       sessionId: summary.sessionId,
       title: sessionTitle(summary),
@@ -112,6 +133,7 @@ export function buildCatalog(
       ...(model ? { model } : {}),
       ...(preset ? { preset } : {}),
       ...(context ? { context } : {}),
+      ...progress,
     };
   };
   const byDisplayOrder = (a: CatalogSession, b: CatalogSession) =>

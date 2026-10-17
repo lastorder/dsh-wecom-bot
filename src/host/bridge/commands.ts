@@ -1,13 +1,17 @@
-import type { BindingRecord, GroupRecord } from '../../shared/protocol.js';
+import type { BindingRecord, GroupRecord, WorkspaceOption } from '../../shared/protocol.js';
 import type { SessionController } from '../dsh.js';
 import type { Journal } from '../journal.js';
 import type { Round } from '../rounds.js';
+import type { SessionOperations } from '../session-ops.js';
+import type { WorkspaceService } from '../workspaces.js';
 import type { SessionDirectory } from './directory.js';
-import { shortId } from './format.js';
+import { formatContext, shortId } from './format.js';
 import type { InboundMessage } from './inbound.js';
 import { parseAnswer, type InteractionRegistry } from './interactions.js';
 import {
-  adminOnlyText, code, field, HELP_TEXT, inline, sessionLabel, sessionListText, sessionRef, title,
+  adminOnlyText, code, compactedText, deleteWarningText, deletedText, field, HELP_TEXT, inline,
+  newSessionText, noWorkspaceText, nothingToCompactText, sessionLabel, sessionListText, sessionRef,
+  title, workspaceListText,
 } from './notices.js';
 import type { AccessPolicy } from './policy.js';
 import type { SelectionStore } from './selection.js';
@@ -49,6 +53,12 @@ export interface TargetInfo {
   readonly switched: boolean;
 }
 
+/** The administrator preference the Bot itself writes (`/workspaces`). */
+export interface AdminWorkspaceStore {
+  adminWorkspace(user: string): string;
+  setAdminWorkspace(user: string, path: string): Promise<void>;
+}
+
 export interface CommandServices {
   readonly policy: AccessPolicy;
   readonly directory: SessionDirectory;
@@ -56,10 +66,14 @@ export interface CommandServices {
   readonly interactions: InteractionRegistry;
   readonly sessionController: SessionController;
   readonly journal: Journal;
+  /** DSH operations the Bot exposes: archive, compact, create. */
+  readonly ops: SessionOperations;
+  readonly workspaces: WorkspaceService;
+  readonly adminWorkspaces: AdminWorkspaceStore;
   /** The Session this sender talks to right now; never creates one. */
   current(message: InboundMessage): Promise<TargetInfo>;
-  /** Give the sender a fresh Session on their own binding. */
-  reset(message: InboundMessage): Promise<void>;
+  /** Archive `sessionId` and stop pointing any member at it. */
+  archiveSession(message: InboundMessage, sessionId: string): Promise<void>;
   /** True once the bridge stopped or was replaced after `ticket` was taken. */
   stale(ticket: number): boolean;
   ticket(): number;
@@ -87,12 +101,34 @@ function bullet(label: string, value: string): string {
   return `- ${field(label, value)}`;
 }
 
+/** The Workspace a command should default to for one administrator. */
+function preferredWorkspace(services: CommandServices, user: string): string {
+  return services.adminWorkspaces.adminWorkspace(user);
+}
+
+/** Title of one Workspace path, falling back to the path itself. */
+async function workspaceTitle(services: CommandServices, path: string): Promise<string> {
+  if (!path) {
+    try {
+      return (await services.workspaces.describe('')).title;
+    } catch {
+      return '插件默认 Workspace';
+    }
+  }
+  const listed = services.workspaces.list().find(workspace => workspace.path === path);
+  return listed?.title ?? path;
+}
+
 export async function runCommand(services: CommandServices, scope: CommandScope, command: ParsedCommand): Promise<void> {
   const { message, reply } = scope;
   const { directory, selection, interactions, policy } = services;
   const ticket = services.ticket();
   const current = () => !services.stale(ticket);
   const isAdmin = policy.isAdmin(message.user);
+  // A private chat is one person's own conversation; a group chat's Session is
+  // shared, so changing or clearing its history needs an administrator.
+  const allowed = (): boolean => isAdmin || message.chatType === 'single';
+  const deny = async (): Promise<void> => { await reply(adminOnlyText()); };
 
   switch (command.name) {
     case 'help':
@@ -119,8 +155,8 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
       lines.push(
         '',
         isAdmin
-          ? '你是本插件的管理员：可以切换会话，并按 Workspace 接收通知。'
-          : `你不是本插件的管理员：消息只会进入你自己的专属会话，如需新的会话请发送 ${code('/new')}。`,
+          ? `你是本插件的管理员：可以切换会话、选择默认 Workspace，并按 Workspace 接收通知。`
+          : `你不是本插件的管理员：消息只会进入你自己的专属会话，发送 ${code('/delete')} 可以清空它的记忆。`,
         '',
         '分组、Workspace 与模型都可以在 DSH 的插件主页里查看和调整。',
       );
@@ -134,6 +170,7 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
       if (!current()) return;
       const questions = [...interactions.questions.values()].filter(q => q.sessionId === target.sessionId).length;
       const approvals = [...interactions.approvals.values()].filter(a => a.privateChats.has(message.chat)).length;
+      const running = info?.running === true;
       const lines = [
         title('🧭', '当前状态'),
         '',
@@ -141,7 +178,16 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
           ? bullet('会话', sessionRef(info?.title, target.sessionId))
           : bullet('会话', '尚未创建（发送任意消息即会自动创建）'),
         ...(info?.workspace ? [bullet('Workspace', inline(info.workspace, 120))] : []),
+        ...(target.sessionId ? [bullet('preset', info?.preset ? code(inline(info.preset, 60)) : 'DSH 默认')] : []),
         ...(info?.model ? [bullet('模型', code(`${info.model.provider}/${info.model.model}`))] : []),
+        ...(info?.model?.reasoningEffort ? [bullet('effort', code(inline(info.model.reasoningEffort, 40)))] : []),
+        ...(info?.context ? [bullet('上下文', formatContext(info.context.used, info.context.window))] : []),
+        ...(info?.turns !== undefined || info?.steps !== undefined
+          ? [bullet('进度', `第 ${info?.turns ?? 0} 轮 · 累计 ${info?.steps ?? 0} 步`)]
+          : []),
+        ...(target.sessionId
+          ? [bullet('运行状态', questions ? '等待回答提问' : running ? '运行中' : '空闲')]
+          : []),
       ];
       if (target.group) lines.push(bullet('分组', inline(target.group.name, 60)));
       if (target.binding) {
@@ -156,14 +202,58 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
       return;
     }
 
-    case 'new':
-    case 'reset-self': {
-      await services.reset(message);
+    case 'new': {
+      if (!isAdmin) { await deny(); return; }
+      const path = preferredWorkspace(services, message.user);
+      try {
+        const created = await services.ops.create({ workspace: path });
+        if (!current()) return;
+        selection.set(message.chat, message.user, created.sessionId);
+        const label = await workspaceTitle(services, path);
+        if (!current()) return;
+        services.journal.write({
+          event: 'wecom.session.new', roundId: scope.round.id, chatId: message.chat,
+          userId: message.user, sessionId: created.sessionId, workspace: path,
+        });
+        await reply(newSessionText(label, created.sessionId));
+      } catch (error) {
+        if (current()) await reply(notice('⚠️', '新建会话失败', inline(error instanceof Error ? error.message : String(error), 300)));
+      }
+      return;
+    }
+
+    case 'workspaces':
+    case 'ws': {
+      if (!isAdmin) { await deny(); return; }
+      const selected = preferredWorkspace(services, message.user);
+      const list: readonly WorkspaceOption[] = services.workspaces.list();
+      const token = command.args[0];
+      if (!token) {
+        await reply(workspaceListText(list, selected).text);
+        return;
+      }
+      if (!list.length) { await reply(noWorkspaceText()); return; }
+      if (token === '0' || token.toLowerCase() === 'all') {
+        await services.adminWorkspaces.setAdminWorkspace(message.user, '');
+        if (!current()) return;
+        await reply(notice('🗂', '已取消 Workspace 限定', `之后的 ${code('/sessions')} 会列出所有 Workspace 的会话，${code('/new')} 使用插件默认 Workspace。`));
+        return;
+      }
+      const index = /^\d{1,3}$/.test(token) ? Number(token) : undefined;
+      const picked = index !== undefined ? list[index - 1] : list.find(workspace => workspace.path === token);
+      if (!picked) {
+        await reply(notice('⚠️', '没有这个 Workspace', `发送 ${code('/workspaces')} 查看序号。`));
+        return;
+      }
+      await services.adminWorkspaces.setAdminWorkspace(message.user, picked.path);
       if (!current()) return;
+      services.journal.write({ event: 'wecom.workspace.select', roundId: scope.round.id, chatId: message.chat, userId: message.user, workspace: picked.path });
       await reply([
-        title('🌱', '已换用新的专属会话'),
+        title('🗂', `默认 Workspace 已设为 ${inline(picked.title, 60)}`),
         '',
-        '下一条消息会在一个全新的 DSH 会话里开始；旧会话仍然保留在 DSH 中。',
+        bullet('路径', inline(picked.path, 200)),
+        '',
+        `${code('/sessions')} 只列出这个 Workspace 的会话，${code('/new')} 也在这里创建。发送 ${code('/workspaces 0')} 取消限定。`,
       ].join('\n'));
       return;
     }
@@ -171,12 +261,15 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
     case 'sessions':
     case 'list':
     case 'ls': {
-      if (!isAdmin) { await reply(adminOnlyText()); return; }
+      if (!isAdmin) { await deny(); return; }
+      const scopePath = preferredWorkspace(services, message.user);
       try {
-        const groups = await directory.groups();
+        const groups = await directory.groups(scopePath ? { workspacePath: scopePath } : undefined);
         if (!current()) return;
         const target = await services.current(message);
-        const { text, listing } = sessionListText(groups, target.sessionId);
+        const label = scopePath ? await workspaceTitle(services, scopePath) : undefined;
+        if (!current()) return;
+        const { text, listing } = sessionListText(groups, target.sessionId, 30, label);
         selection.setListing(message.chat, message.user, listing);
         await reply(text);
       } catch {
@@ -186,7 +279,7 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
     }
 
     case 'use': {
-      if (!isAdmin) { await reply(adminOnlyText()); return; }
+      if (!isAdmin) { await deny(); return; }
       const token = command.args[0];
       if (!token) {
         await reply(notice('ℹ️', '用法', `${code('/use 序号')} 或 ${code('/use 会话ID前缀')}；先发送 ${code('/sessions')} 查看序号。`));
@@ -218,7 +311,7 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
     }
 
     case 'reset': {
-      if (!isAdmin) { await reply(adminOnlyText()); return; }
+      if (!isAdmin) { await deny(); return; }
       selection.clear(message.chat, message.user);
       if (!current()) return;
       const target = await services.current(message);
@@ -229,6 +322,46 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
       const info = await directory.describe(target.sessionId);
       if (!current()) return;
       await reply(`${title('↩️', '已放弃切换')} · 回到你自己的专属会话${sessionLabel(info.title)}`);
+      return;
+    }
+
+    case 'compact': {
+      const target = await services.current(message);
+      if (!target.sessionId) { await reply(notice('ℹ️', '你还没有专属会话', '发送任意消息即可创建。')); return; }
+      if (!allowed()) { await deny(); return; }
+      try {
+        const outcome = await services.ops.compact(target.sessionId);
+        if (!current()) return;
+        await reply(outcome ? compactedText(outcome.items, outcome.tokens) : nothingToCompactText());
+      } catch (error) {
+        if (current()) await reply(notice('⚠️', '上下文压缩失败', inline(error instanceof Error ? error.message : String(error), 300)));
+      }
+      return;
+    }
+
+    case 'delete': {
+      const target = await services.current(message);
+      if (!target.sessionId) { await reply(notice('ℹ️', '你还没有专属会话', '发送任意消息即可创建。')); return; }
+      if (!allowed()) { await deny(); return; }
+      const confirmed = (command.args[0] ?? '').toLowerCase() === 'confirm';
+      if (!confirmed) {
+        const info = await directory.describe(target.sessionId);
+        if (!current()) return;
+        await reply(deleteWarningText(info.title, target.sessionId));
+        return;
+      }
+      try {
+        const info = await directory.describe(target.sessionId);
+        await services.archiveSession(message, target.sessionId);
+        if (!current()) return;
+        services.journal.write({
+          event: 'wecom.session.delete', roundId: scope.round.id, chatId: message.chat,
+          userId: message.user, sessionId: target.sessionId,
+        });
+        await reply(`${deletedText()}\n\n> 已归档${sessionLabel(info.title)}`);
+      } catch (error) {
+        if (current()) await reply(notice('⚠️', '归档会话失败', inline(error instanceof Error ? error.message : String(error), 300)));
+      }
       return;
     }
 
@@ -287,10 +420,10 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
     case 'approve':
     case 'deny': {
       const state = command.args[0] ? interactions.findApproval(command.args[0]) : undefined;
-      // Tool execution may only be authorized by an allowlisted person in a single chat.
+      // Tool execution may only be authorized by an administrator in a single chat.
       if (!state || command.args.length !== 1 || message.chatType !== 'single' || message.chat !== message.user
-        || !state.privateChats.has(message.chat)) {
-        await reply(notice('⚠️', '没有可在此单聊审批的请求', '验证码可能无效或已经过期。'));
+        || !state.privateChats.has(message.chat) || !isAdmin) {
+        await reply(notice('⚠️', '没有可在此单聊审批的请求', '只有管理员可以在单聊里用验证码审批；验证码也可能已经过期。'));
         return;
       }
       const outcome = command.name === 'approve' ? 'allowed-once' : 'rejected';

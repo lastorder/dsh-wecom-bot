@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { byteLength, extractSessionPointer, MAX_NOTICE_BYTES, MAX_REPLY_BYTES } from '../dist/host/bridge/format.js';
 import {
-  adminOnlyText, approvalNotice, HELP_TEXT, promptFailedNotice, questionNotice, quotePointer,
-  reviewNotice, sessionListText, turnCompleteNotice,
+  adminOnlyText, approvalNotice, authorizedNotice, compactedText, deleteWarningText, deletedText,
+  HELP_TEXT, newSessionText, nothingToCompactText, promptFailedNotice, questionNotice, quotePointer,
+  reviewNotice, sessionListText, turnCompleteNotice, unauthorizedText, workspaceListText,
 } from '../dist/host/bridge/notices.js';
 
 /**
@@ -32,6 +33,16 @@ test('every template fits the reply budget', () => {
   const texts = [
     HELP_TEXT,
     adminOnlyText(),
+    unauthorizedText(),
+    authorizedNotice('默认分组'),
+    deleteWarningText('修复登录 Bug', 'session-9f3a1c7b2d4e'),
+    deletedText(),
+    nothingToCompactText(),
+    newSessionText('企业微信', 'session-9f3a1c7b2d4e'),
+    workspaceListText(Array.from({ length: 40 }, (_, index) => ({
+      id: `w${index}`, path: `/Users/me/workspace-${index}`, title: `Workspace ${index}`,
+      pluginOwned: false, sessionCount: index, archivedSessionCount: 0,
+    })), '/Users/me/workspace-3').text,
     sessionListText(groups, 'session-9f3a1c7b2d4e').text,
     turnCompleteNotice(summary({ assistantText: long }), { title: '修复登录 Bug', workspace: '企业微信' }),
     questionNotice('session-9f3a1c7b2d4e', '修复登录 Bug', [
@@ -68,7 +79,11 @@ test('a hint is the only /use occurrence the quote parser can pick up', () => {
   const listing = sessionListText(groups, undefined);
   assert.deepEqual(listing.listing, ['session-9f3a1c7b2d4e', 'session-77aa88bb99cc']);
   assert.equal(extractSessionPointer(listing.text), undefined);
-  for (const text of [HELP_TEXT, adminOnlyText()]) assert.equal(extractSessionPointer(text), undefined);
+  for (const text of [HELP_TEXT, adminOnlyText(), unauthorizedText(), authorizedNotice('默认分组')]) {
+    assert.equal(extractSessionPointer(text), undefined);
+  }
+  // A member's /sessions footer and every refusal name `序号`, never `/use <word>`.
+  assert.match(HELP_TEXT, /\/use/);
   assert.equal(extractSessionPointer(quotePointer('session-9f3a1c7b2d4e')), 'session-9f3a1c7b2d4e');
   assert.equal(extractSessionPointer(quotePointer('session-abcdefghijklmnop')), 'session-abcdefghijkl');
 });
@@ -95,10 +110,47 @@ test('untrusted titles cannot inject Markdown, mentions or tags', () => {
 });
 
 test('/help documents every command the bridge answers to', () => {
-  for (const command of ['/help', '/status', '/whoami', '/new', '/cancel', '/answer', '/approve', '/deny',
-    '/sessions', '/use', '/reset']) {
+  for (const command of ['/help', '/status', '/whoami', '/compact', '/delete', '/cancel', '/answer', '/approve', '/deny',
+    '/new', '/workspaces', '/sessions', '/use', '/reset']) {
     assert.ok(HELP_TEXT.includes(command), `/help mentions ${command}`);
   }
+});
+
+test('a refused sender is told to ask an operator, and an operator greeting names the group', () => {
+  assert.match(unauthorizedText(), /\*\*🔒 用户未授权\*\*/);
+  assert.match(unauthorizedText(), /请联系管理员/);
+  assert.match(authorizedNotice('默认分组'), /管理员已授权，可以开始使用了/);
+  assert.match(authorizedNotice('默认分组'), /默认分组/);
+  assert.match(authorizedNotice('默认分组'), /`\/help`/);
+});
+
+test('/delete warns what it clears and how to confirm', () => {
+  const warning = deleteWarningText('修复登录 Bug', 'session-9f3a1c7b2d4e');
+  assert.match(warning, /归档会话会清空它的记忆/);
+  assert.match(warning, /\/delete confirm/);
+  assert.match(warning, /《修复登录 Bug》/);
+  assert.equal(extractSessionPointer(warning), undefined, 'it must not double as a jump hint');
+  assert.match(deletedText(), /会话已归档/);
+  assert.match(deletedText(), /下一条消息.*新/);
+});
+
+test('/compact reports what it folded, and says when there was nothing', () => {
+  assert.match(compactedText(3, 1234), /3 条历史/);
+  assert.match(compactedText(3, 1234), /1234 tokens/);
+  assert.match(nothingToCompactText(), /没有可压缩的历史/);
+});
+
+test('/workspaces numbers every Workspace and marks the chosen one', () => {
+  const list = Array.from({ length: 3 }, (_, index) => ({
+    id: `w${index}`, path: `/Users/me/ws-${index}`, title: `WS ${index}`,
+    pluginOwned: false, sessionCount: 0, archivedSessionCount: 0,
+  }));
+  const { text, listing } = workspaceListText(list, '/Users/me/ws-1');
+  assert.deepEqual(listing, list.map(workspace => workspace.path));
+  assert.match(text, /1\. WS 0/);
+  assert.match(text, /2\. WS 1 — ~\/ws-1（当前默认）/);
+  assert.match(text, /\/workspaces 序号/);
+  assert.match(workspaceListText([], '').text, /还没有注册任何 Workspace/);
 });
 
 test('a long session list is truncated but still reports the real total', () => {

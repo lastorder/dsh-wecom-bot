@@ -62,7 +62,7 @@ const STATE = {
         members: [{
           key: 'user:alice', kind: 'user', id: 'alice', label: '爱丽丝', displayName: '爱丽丝', admin: false,
           sessionId: 'session-aaaa', sessionTitle: '企业微信插件开发', sessionState: 'bound', sessionRunning: true,
-          sessionModel: { provider: 'deepseek-account', model: 'deepseek-chat', reasoningEffort: 'high' },
+          sessionModel: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' },
           sessionPreset: 'standard', sessionContext: { used: 12_300, window: 200_000 },
           messages: 2, lastSeenAt: Date.now(), createdAt: 1,
         }],
@@ -109,6 +109,7 @@ const STATE = {
 };
 
 function mount({ stored = {}, secretConfigured = true, state = STATE } = {}) {
+  let current = state;
   let entry;
   const fetches = [];
   const intervals = [];
@@ -122,7 +123,11 @@ function mount({ stored = {}, secretConfigured = true, state = STATE } = {}) {
     },
     async fetch(url, options) {
       fetches.push({ url, options });
-      const body = options?.method === 'POST' ? { ok: true, routing: state.routing } : state;
+      let body = current;
+      if (options?.method === 'POST') {
+        const added = JSON.parse(options.body).ops.some(op => op.op === 'group.add');
+        body = { ok: true, routing: current.routing, ...(added ? { createdGroupId: 'g-new' } : {}) };
+      }
       return { ok: true, status: 200, json: async () => body };
     },
     setInterval(fn) { intervals.push(fn); return intervals.length; },
@@ -179,7 +184,11 @@ function mount({ stored = {}, secretConfigured = true, state = STATE } = {}) {
     })[name],
     effect(fn) { effects.push(fn()); },
   });
-  return { entry, plugin, registration, mutations, credentialWrites, fetches, style, intervals };
+  return {
+    entry, plugin, registration, mutations, credentialWrites, fetches, style, intervals,
+    /** Replace what the next read answers with (a Host write landing between two polls). */
+    setState(next) { current = next; },
+  };
 }
 
 async function render(harness) {
@@ -261,8 +270,9 @@ test('a person row names nobody by type: the badge colors a person from a group 
   assert.ok(kinds.includes('user'), 'alice is a private chat');
   assert.ok(kinds.includes('group'), 'wrOgAAAA is a group chat');
   // Every person-ish row (two members, one refused sender) drops the type word.
-  const memberRows = root.findAll(node => node.type === 'div' && node.props.className === 'wcb-member');
-  assert.ok(memberRows.length >= 3);
+  const memberRows = root.findAll(node => node.type === 'div'
+    && (node.props.className === 'wcb-member-row' || node.props.className === 'wcb-member'));
+  assert.ok(memberRows.length >= 3, `found ${memberRows.length} person rows`);
   for (const row of memberRows) {
     const line = text(row);
     assert.equal(line.includes('个人'), false, 'the row no longer spells the type out');
@@ -271,35 +281,48 @@ test('a person row names nobody by type: the badge colors a person from a group 
   renderer.unmount();
 });
 
-test('a member Session line reports name, preset, model, effort and context until clicked', async () => {
+test('a member is one line: its Session facts, and 归档 as the only action', async () => {
   const harness = mount();
   const renderer = await render(harness);
   const root = renderer.root;
   await act(async () => { buttonWithText(root, '默认分组').props.onClick(); });
-  const row = text(renderer.toJSON());
-  assert.ok(row.includes('企业微信插件开发'), 'the Session name');
-  assert.ok(row.includes('标准'), 'the preset it runs');
-  assert.ok(row.includes('DeepSeek Chat'), 'the model of its last request');
-  assert.ok(row.includes('高'), 'and the effort it uses');
-  assert.ok(row.includes('12.3k / 200k'), 'and how full its context is');
-  assert.equal(queryByLabel(root, 'alice 的会话选择'), undefined, 'nothing is editable until the line is clicked');
+  const row = root.find(node => node.type === 'div' && node.props.className === 'wcb-member-row');
+  const line = text(row);
+  assert.ok(line.includes('爱丽丝'), 'the name');
+  assert.ok(line.includes('企业微信插件开发'), 'the Session name');
+  assert.ok(line.includes('标准'), 'the preset it runs');
+  assert.ok(line.includes('DeepSeek Reasoner'), 'the model of its last request');
+  assert.ok(line.includes('高'), 'and the effort it uses');
+  assert.ok(line.includes('12.3k / 200k'), 'and how full its context is');
+  assert.equal(queryByLabel(root, 'alice 的会话选择'), undefined, 'a Session picker is gone');
+  assert.equal(line.includes('+ 添加成员'), false);
+  assert.equal(text(renderer.toJSON()).includes('添加成员'), false, 'members are authorized from 未授权用户 only');
 
-  await act(async () => { buttonByLabel(root, '爱丽丝 的会话').props.onClick(); });
-  assert.ok(byLabel(root, 'alice 的会话选择'), 'clicking reveals the Session picker');
+  // 归档 is the one action: a confirmation first, then the Host archives it.
+  await act(async () => { buttonByLabel(root, '归档 爱丽丝 的会话').props.onClick(); });
+  assert.ok(text(renderer.toJSON()).includes('归档后这个会话不再被继续'));
+  await act(async () => { await buttonByText(root, '确认归档').props.onClick(); });
+  await flush();
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'member.archive', key: 'user:alice' }]);
   renderer.unmount();
 });
 
-test('only Bot ID and Secret are required; nothing is saved until they are present', async () => {
+const buttonByText = (root, label) => root.findAll(node => node.type === 'button' && text(node) === label)[0];
+
+test('a card saves only its own section, and nothing is saved while it is untouched', async () => {
   const harness = mount({ secretConfigured: false });
   const renderer = await render(harness);
   const root = renderer.root;
-  await act(async () => { buttonWithText(root, '保存配置').props.onClick(); });
-  assert.equal(harness.mutations.length, 0);
-  assert.ok(text(renderer.toJSON()).includes('请填写企业微信 Bot ID'));
-  assert.ok(text(renderer.toJSON()).includes('首次配置需要填写 Bot Secret'));
+  assert.equal(buttonByText(root, '保存'), undefined, 'no section is dirty, so no save button is offered');
+
   await act(async () => { byLabel(root, 'Bot ID').props.onChange({ target: { value: 'aib-123' } }); });
+  await act(async () => { await buttonByText(root, '保存').props.onClick(); });
+  await flush();
+  assert.equal(harness.mutations.length, 0, 'a missing Secret blocks the write');
+  assert.ok(text(renderer.toJSON()).includes('首次配置需要填写 Bot Secret'));
+
   await act(async () => { byLabel(root, 'Bot Secret').props.onChange({ target: { value: 's3cr3t' } }); });
-  await act(async () => { await buttonWithText(root, '保存配置').props.onClick(); });
+  await act(async () => { await buttonByText(root, '保存').props.onClick(); });
   await flush();
   assert.equal(harness.mutations.length, 1);
   assert.deepEqual(JSON.parse(JSON.stringify(harness.mutations[0].ops)), [
@@ -307,58 +330,89 @@ test('only Bot ID and Secret are required; nothing is saved until they are prese
   ]);
   assert.equal(JSON.stringify(harness.mutations).includes('s3cr3t'), false, 'the Secret never enters Config');
   assert.deepEqual(harness.credentialWrites, [{ ref: 'WECOM_BOT_SECRET', value: 's3cr3t' }]);
+  assert.ok(text(renderer.toJSON()).includes('已保存。'), 'the card confirms its own save');
   renderer.unmount();
 });
 
-test('the administrator list and its Workspace scope only appear on demand', async () => {
+test('adding an administrator searches known people by note and saves with its own card', async () => {
   const harness = mount({ stored: { botId: 'bot', adminUserIds: ['alice'] } });
   const renderer = await render(harness);
   const root = renderer.root;
   const all = text(renderer.toJSON());
   assert.ok(all.includes('alice'), 'the configured administrator is listed');
-  assert.equal(queryByLabel(root, '新增管理员 userid'), undefined, 'no input until 添加管理员 is clicked');
-  assert.equal(queryByLabel(root, '管理员接收 dsh-wecom-bot 的通知'), undefined, 'the scope is folded shut');
-  assert.ok(all.includes('全部 Workspace（会比较吵）'), 'the folded summary still says what the scope is');
+  assert.equal(all.includes('未设置'), false, 'the empty tag became an add button');
 
-  await act(async () => { buttonWithText(root, '添加管理员').props.onClick(); });
-  await act(async () => { byLabel(root, '新增管理员 userid').props.onChange({ target: { value: ' root ' } }); });
   await act(async () => { exactButton(root, '添加').props.onClick(); });
-  assert.equal(queryByLabel(root, '新增管理员 userid'), undefined, 'the input closes again');
+  assert.ok(byLabel(root, '搜索已知用户'), 'the picker has a search box');
+  assert.ok(text(renderer.toJSON()).includes('mallory'), 'a refused sender is a candidate');
+  assert.ok(text(renderer.toJSON()).includes('未授权用户'), 'and says where it comes from');
 
-  await act(async () => { buttonWithText(root, '可接收通知的 Workspace').props.onClick(); });
-  await act(async () => { byLabel(root, '管理员接收 dsh-wecom-bot 的通知').props.onChange({ target: { checked: true } }); });
+  await act(async () => { byLabel(root, '搜索已知用户').props.onChange({ target: { value: 'mal' } }); });
+  await act(async () => {
+    root.findAll(node => node.type === 'button' && node.props.className === 'wcb-picker-row')[0].props.onClick();
+  });
   await flush();
-  await act(async () => { await buttonWithText(root, '保存配置').props.onClick(); });
-  const ops = JSON.parse(JSON.stringify(harness.mutations[0].ops));
-  assert.deepEqual(ops.find(op => op.path[0] === 'adminUserIds').value, ['alice', 'root']);
-  assert.deepEqual(ops.find(op => op.path[0] === 'adminWorkspaces').value, ['/Users/me/dsh-wecom-bot']);
+  assert.equal(harness.mutations.length, 0, 'the picker only fills the draft');
+  assert.ok(text(renderer.toJSON()).includes('mallory'), 'the new administrator is listed');
+
+  await act(async () => { await buttonByText(root, '保存').props.onClick(); });
+  await flush();
+  const ops = JSON.parse(JSON.stringify(harness.mutations.at(-1).ops));
+  assert.deepEqual(ops.find(op => op.path[0] === 'adminUserIds').value, ['alice', 'mallory']);
   renderer.unmount();
 });
 
-test('group and member edits are posted immediately, without touching the Config form', async () => {
+test('the notification scope is all-checked by default and narrows only when unchecked', async () => {
+  const harness = mount({ stored: { botId: 'bot', adminUserIds: ['alice'] } });
+  const renderer = await render(harness);
+  const root = renderer.root;
+  assert.ok(text(renderer.toJSON()).includes('全部 Workspace'), 'the folded summary says the default');
+
+  await act(async () => { buttonWithText(root, '可接收通知的 Workspace').props.onClick(); });
+  const all = text(renderer.toJSON());
+  assert.ok(all.includes('dsh-wecom-bot'));
+  assert.ok(all.includes('orion-agent'), 'a Workspace whose Sessions are all archived is still listed');
+  assert.ok(all.includes('暂无会话'));
+  assert.ok(all.includes('2 个会话'), 'the live count excludes the 4 archived Sessions');
+  assert.equal(byLabel(root, '管理员接收 dsh-wecom-bot 的通知').props.checked, true, 'empty scope = every box checked');
+  assert.equal(byLabel(root, '管理员接收 orion-agent 的通知').props.checked, true);
+
+  // Unchecking one Workspace stores the remaining path, not a list of all of them.
+  await act(async () => { byLabel(root, '管理员接收 dsh-wecom-bot 的通知').props.onChange({ target: { checked: false } }); });
+  await flush();
+  await act(async () => { await buttonByText(root, '保存').props.onClick(); });
+  await flush();
+  const ops = JSON.parse(JSON.stringify(harness.mutations.at(-1).ops));
+  assert.deepEqual(ops.find(op => op.path[0] === 'adminWorkspaces').value, ['/Users/me/orion-agent']);
+  renderer.unmount();
+});
+
+test('a group is edited as one draft: 编辑 becomes 保存 and posts a single patch', async () => {
   const harness = mount({ stored: { botId: 'bot' } });
   const renderer = await render(harness);
   const root = renderer.root;
   await act(async () => { buttonByLabel(root, '编辑 默认分组').props.onClick(); });
+  assert.equal(root.findAll(node => node.props?.['aria-label'] === '编辑 默认分组').length, 0, 'the edit button became 保存');
+  assert.ok(buttonByText(root, '保存'));
+
   await act(async () => { byLabel(root, '默认分组 的模型').props.onChange({ target: { value: 'deepseek-account\u0000deepseek-reasoner' } }); });
+  await act(async () => { byLabel(root, '默认分组 的 Workspace').props.onChange({ target: { value: '/Users/me/dsh-wecom-bot' } }); });
+  await act(async () => { byLabel(root, '默认分组 的 preset').props.onChange({ target: { value: 'ptc' } }); });
+  await flush();
+  assert.equal(posts(harness).length, 0, 'nothing is written until 保存');
+
+  await act(async () => { await buttonByText(root, '保存').props.onClick(); });
   await flush();
   assert.equal(harness.fetches.find(call => call.options?.method === 'POST').url, 'api/wecom-bot/routing');
   assert.deepEqual(posts(harness).at(-1), [{
     op: 'group.update', id: 'default',
-    patch: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: '' },
+    patch: {
+      provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: '',
+      workspace: '/Users/me/dsh-wecom-bot', preset: 'ptc',
+    },
   }]);
   assert.equal(harness.mutations.length, 0, 'groups never go through the Config form');
-  assert.ok(text(renderer.toJSON()).includes('模型已生效'));
-
-  // The group's Workspace is edited in the same card.
-  await act(async () => { byLabel(root, '默认分组 的 Workspace').props.onChange({ target: { value: '/Users/me/dsh-wecom-bot' } }); });
-  await flush();
-  assert.deepEqual(posts(harness).at(-1), [{ op: 'group.update', id: 'default', patch: { workspace: '/Users/me/dsh-wecom-bot' } }]);
-
-  // The group's preset is edited in the same card.
-  await act(async () => { byLabel(root, '默认分组 的 preset').props.onChange({ target: { value: 'ptc' } }); });
-  await flush();
-  assert.deepEqual(posts(harness).at(-1), [{ op: 'group.update', id: 'default', patch: { preset: 'ptc' } }]);
+  assert.equal(text(renderer.toJSON()).includes('已生效'), false, 'and no banner outlives the edit');
 
   // A member's note is edited from the person details the badge opens.
   await act(async () => { buttonByLabel(root, '爱丽丝 的详情').props.onClick(); });
@@ -388,27 +442,41 @@ test('the effort of a group is adjustable next to its model, and reported in the
 
   await act(async () => { buttonByLabel(root, '编辑 默认分组').props.onClick(); });
   await act(async () => { byLabel(root, '默认分组 的 effort').props.onChange({ target: { value: 'high' } }); });
+  await act(async () => { await buttonByText(root, '保存').props.onClick(); });
   await flush();
   assert.deepEqual(posts(harness).at(-1), [{
     op: 'group.update', id: 'default',
-    patch: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' },
+    patch: { reasoningEffort: 'high' },
   }]);
   renderer.unmount();
 });
 
-test('a group can be added and removed, but the default group offers no delete', async () => {
+test('a new group opens its complete form at once, and can be removed later', async () => {
   const harness = mount({ stored: { botId: 'bot' } });
   const renderer = await render(harness);
   const root = renderer.root;
+  // The Host answers with the new group; the page opens it in edit mode.
+  harness.setState({
+    ...STATE,
+    routing: {
+      ...STATE.routing,
+      groups: [...STATE.routing.groups, {
+        id: 'g-new', name: '分组 2', isDefault: false, workspace: '', workspaceTitle: '企业微信',
+        workspacePath: '/Users/me/.dsh/wecom-bot/workspace', provider: '', model: '',
+        effectiveProvider: '', effectiveModel: '', preset: '', memberCount: 0, messages: 0, members: [],
+      }],
+    },
+  });
   await act(async () => { buttonWithText(root, '添加分组').props.onClick(); });
-  await act(async () => { byLabel(root, '新分组名称').props.onChange({ target: { value: '同事' } }); });
-  await act(async () => { buttonWithText(root, '创建').props.onClick(); });
   await flush();
-  assert.deepEqual(posts(harness).at(-1), [{ op: 'group.add', name: '同事' }]);
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'group.add' }], 'no name prompt: the group is created with defaults');
+  assert.ok(byLabel(root, '分组 2 的名称'), 'the new group is already in its form');
+  assert.ok(byLabel(root, '分组 2 的 Workspace'));
+  assert.ok(byLabel(root, '分组 2 的 preset'));
 
-  assert.equal(root.findAll(node => node.type === 'button' && text(node) === '删除分组').length, 1,
-    'only the non-default group can be deleted');
-  await act(async () => { buttonWithText(root, '删除分组').props.onClick(); });
+  // The default group offers no delete; the two created ones do.
+  assert.equal(root.findAll(node => node.type === 'button' && text(node) === '删除分组').length, 2);
+  await act(async () => { root.findAll(node => node.type === 'button' && text(node) === '删除分组')[0].props.onClick(); });
   await act(async () => { await buttonWithText(root, '确认删除').props.onClick(); });
   await flush();
   assert.deepEqual(posts(harness).at(-1), [{ op: 'group.delete', id: 'g1' }]);
@@ -450,18 +518,6 @@ test('a person with a note is shown by the note, and the id only in the details'
   await flush();
   assert.deepEqual(posts(harness).at(-1), [{ op: 'label.set', key: 'user:root', label: '运维' }]);
   assert.equal(harness.mutations.length, 0, 'a note never touches the Config form');
-  renderer.unmount();
-});
-
-test('the notification scope lists only Workspaces that still have live Sessions', async () => {
-  const harness = mount({ stored: { botId: 'bot', adminUserIds: ['alice'] } });
-  const renderer = await render(harness);
-  const root = renderer.root;
-  await act(async () => { buttonWithText(root, '可接收通知的 Workspace').props.onClick(); });
-  const all = text(renderer.toJSON());
-  assert.ok(all.includes('dsh-wecom-bot'));
-  assert.ok(all.includes('2 个会话'), 'the count excludes the 4 archived Sessions');
-  assert.equal(all.includes('orion-agent'), false, 'a Workspace whose Sessions are all archived cannot notify anybody');
   renderer.unmount();
 });
 

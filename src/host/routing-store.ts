@@ -22,6 +22,10 @@ import {
  * about who somebody is, so it survives being moved between groups, being
  * removed, and belonging to no group at all (an administrator).
  *
+ * Administrators also keep one preference here: the Workspace their operator
+ * commands (`/sessions`, `/new`) default to. It belongs to the person, like
+ * the note, and is written by the Bot itself rather than the page.
+ *
  * There is deliberately no migration path from the pre-group versions: the
  * plugin has no deployed users on them, and a file of another version is set
  * aside rather than half-read, so a future change only has to describe the
@@ -69,6 +73,10 @@ export interface RoutingStore {
   label(key: string): string;
   /** Set (or clear) one principal's note; survives membership changes. */
   setLabel(key: string, label: string): Promise<string>;
+  /** The Workspace one administrator's commands default to; empty means all. */
+  adminWorkspace(user: string): string;
+  /** Point one administrator's commands at one Workspace ('' clears it). */
+  setAdminWorkspace(user: string, path: string): Promise<void>;
   /** Every member currently pointing at one Session. */
   forSession(sessionId: string): readonly BindingRecord[];
   /** True when no new member may be created. */
@@ -91,6 +99,8 @@ interface StoredFile {
   readonly groups?: unknown;
   readonly bindings?: unknown;
   readonly labels?: unknown;
+  /** Per-administrator default Workspace, keyed by userid. */
+  readonly adminDefaults?: unknown;
 }
 
 /** `user:<userid>` for private chats, `group:<chatid>` for groups. */
@@ -175,6 +185,8 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
   const bindings = new Map<string, BindingRecord>();
   /** Notes by principal key (`user:<id>` / `group:<id>`), members or not. */
   const labels = new Map<string, string>();
+  /** Per-administrator default Workspace, keyed by userid. */
+  const adminWorkspaces = new Map<string, string>();
   let loaded: Promise<void> | undefined;
   let chain: Promise<void> = Promise.resolve();
   let dropped = false;
@@ -241,6 +253,10 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
       if (!note || !parseBindingKey(key)) continue;
       labels.set(key, note);
     }
+    for (const [user, value] of Object.entries((parsed.adminDefaults ?? {}) as Record<string, unknown>)) {
+      const path = text(value);
+      if (path && validBindingId(user)) adminWorkspaces.set(user, path);
+    }
     for (const entry of parsed.bindings) {
       const record = normalizeBinding(entry);
       if (!record) continue;
@@ -259,6 +275,7 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
       groups: [...groups.values()],
       bindings: [...bindings.values()],
       labels: Object.fromEntries(labels),
+      adminDefaults: Object.fromEntries(adminWorkspaces),
     }, undefined, 2);
     chain = chain.then(async () => {
       const temporary = `${file}.${process.pid}.tmp`;
@@ -390,6 +407,14 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
     async setLabel(key, value) {
       await loadOnce();
       return await writeLabel(key, value);
+    },
+    adminWorkspace: user => adminWorkspaces.get(user) ?? '',
+    async setAdminWorkspace(user, path) {
+      await loadOnce();
+      const clean = path.trim();
+      if (clean) adminWorkspaces.set(user, clean);
+      else adminWorkspaces.delete(user);
+      await persist();
     },
     forSession: sessionId => [...bindings.values()].filter(record => record.sessionId && record.sessionId === sessionId),
     full: () => bindings.size >= max,

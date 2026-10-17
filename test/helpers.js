@@ -92,8 +92,14 @@ export const fakeModelCatalog = {
 
 export function fakeWorkspaceRegistry(workspaces = [], archived = [], pinned = []) {
   const rows = workspaces.map(workspace => ({ sessionIds: [], ...workspace }));
+  const archivedCalls = [];
   return {
     rows,
+    archivedCalls,
+    async archiveSession(sessionId, options) {
+      archivedCalls.push({ sessionId, options });
+      if (!archived.includes(sessionId)) archived.push(sessionId);
+    },
     list: () => rows,
     get: id => rows.find(row => row.id === id),
     async create(path, title) {
@@ -115,7 +121,7 @@ export function fakeWorkspaceRegistry(workspaces = [], archived = [], pinned = [
  * Sessions are appended (and attached to their Workspace) so the catalog sees
  * them exactly like the real registry would.
  */
-export function fakeHost({ sessions, workspaces, archived = [], pinned = [], defaultModel } = {}) {
+export function fakeHost({ sessions, workspaces, archived = [], pinned = [], defaultModel, compactResult, compactError } = {}) {
   const handlers = new Map();
   const prompts = [];
   const cancels = [];
@@ -123,6 +129,12 @@ export function fakeHost({ sessions, workspaces, archived = [], pinned = [], def
   const creates = [];
   const selections = [];
   const defaultSaves = [];
+  const compactions = [];
+  const agentResolutions = [];
+  const liveAgents = new Map();
+  const compacted = compactResult === undefined
+    ? { compactionId: 'c1', summarySeq: 30, shadowedSeqs: [1, 2, 3], shadowedTokenCount: 1234 }
+    : compactResult;
   let currentDefault = defaultModel ?? { provider: 'deepseek-account', model: 'deepseek-chat' };
   const rows = sessions ?? [
     { sessionId: 's1', updatedAt: 200, running: false, blank: false, cwd: '/w/alpha', projections: { values: { title: 'Alpha 任务' } } },
@@ -134,12 +146,22 @@ export function fakeHost({ sessions, workspaces, archived = [], pinned = [], def
     async saveSelection(next) { defaultSaves.push({ ...next }); currentDefault = { ...next }; },
   };
   const ctx = {
-    handlers, prompts, cancels, listCalls, creates, selections, defaultSaves,
-    rows, registry, defaultModelService,
+    handlers, prompts, cancels, listCalls, creates, selections, defaultSaves, compactions,
+    agentResolutions, liveAgents, rows, registry, defaultModelService,
     on(name, fn) { handlers.set(name, fn); return () => { if (handlers.get(name) === fn) handlers.delete(name); }; },
     get(name) {
       if (name === 'workspaceRegistry') return registry;
       if (name === 'agentDefaultModel') return defaultModelService;
+      if (name === 'agents') return { get: id => liveAgents.get(id) };
+      if (name === 'compaction') {
+        return {
+          async compactNow(agent, signal) {
+            compactions.push({ agent, aborted: signal.aborted });
+            if (compactError) throw compactError;
+            return compacted;
+          },
+        };
+      }
       return undefined;
     },
     sessionController: {
@@ -175,6 +197,12 @@ export function fakeHost({ sessions, workspaces, archived = [], pinned = [], def
         return { selected };
       },
       async modelCatalog() { return fakeModelCatalog; },
+      async resolveAgent(sessionId) {
+        agentResolutions.push(sessionId);
+        const agent = { id: sessionId, session: { id: sessionId } };
+        liveAgents.set(sessionId, agent);
+        return { agent };
+      },
     },
   };
   return ctx;

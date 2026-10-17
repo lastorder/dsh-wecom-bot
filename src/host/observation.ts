@@ -29,8 +29,6 @@ export interface SenderStats {
 export interface ObservationStore {
   /** Record one message from a valid Bot callback, accepted or refused. */
   record(sighting: MessageSighting): void;
-  /** True when this chat is known to be a private (single) chat. */
-  isPrivateChat(chat: string): boolean;
   /** Activity of one member row. */
   stats(kind: BindingKind, id: string): SenderStats;
   /**
@@ -102,10 +100,6 @@ export function createObservationStore(options: ObservationOptions = {}): Observ
       if (text) entry.text = text; else delete entry.text;
       entries.set(key, entry);
       if (entries.size > max) entries.delete(entries.keys().next().value!);
-    },
-    isPrivateChat(chat) {
-      prune(now());
-      return entries.get(bindingKey('user', chat))?.chatType === 'single';
     },
     stats(kind, id) {
       prune(now());

@@ -90,6 +90,27 @@ export function validIdentifier(value: unknown, maxBytes = 256): value is string
     && byteLength(value) <= maxBytes && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
 }
 
+/** Shorten a home-directory prefix for display: /Users/me/x → ~/x. */
+export function displayPath(path: string | undefined): string {
+  return (path ?? '').replace(/^(\/Users|\/home)\/[^/]+(?=\/|$)/, '~').replace(/^[A-Za-z]:\\Users\\[^\\]+(?=\\|$)/, '~');
+}
+
+/** Compact token count: 812, 12.3k, 200k, 1.2M. */
+export function formatTokens(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '0';
+  if (value < 1000) return String(Math.round(value));
+  if (value < 100_000) return `${(value / 1000).toFixed(1)}k`;
+  if (value < 1_000_000) return `${Math.round(value / 1000)}k`;
+  return `${(value / 1_000_000).toFixed(1)}M`;
+}
+
+/** `12.3k / 200k（6%）`, or the bare used count when no window is known. */
+export function formatContext(used: number, window: number | undefined): string {
+  const tokens = formatTokens(used);
+  if (!window) return tokens;
+  return `${tokens} / ${formatTokens(window)}（${Math.round((used / window) * 100)}%）`;
+}
+
 export function formatDuration(ms: number | undefined): string {
   if (ms === undefined || !Number.isFinite(ms) || ms < 0) return '';
   const seconds = Math.round(ms / 1000);

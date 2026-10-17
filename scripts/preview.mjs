@@ -16,20 +16,24 @@ const advanced = process.argv.includes('--advanced');
 // A separate shot of the person dialog: the badge is the only way in, and the
 // dialog is where the note and the group move live.
 const dialog = process.argv.includes('--dialog');
+// The two dialogs this revision introduced: the administrator picker, and the
+// confirmation that archives a member's Session.
+const picker = process.argv.includes('--picker');
+const archive = process.argv.includes('--archive');
 const read = path => readFile(resolve(root, path), 'utf8');
 
 const now = Date.now();
 const REPO = '/Users/me/Workspace/learn/dsh-wecom-bot';
 const PLUGIN_WS = '/Users/me/.dsh/wecom-bot/workspace';
 const state = {
-  version: 4,
+  version: 5,
   connection: empty ? { phase: 'unconfigured', since: now - 30_000, detail: '缺少 Bot ID' } : { phase: 'online', since: now - 25 * 60_000 },
   traffic: empty ? { since: now, received: 0, rejected: 0, prompts: 0, notifications: 0, failures: 0 }
     : { since: now - 3_600_000, received: 21, rejected: 2, prompts: 9, notifications: 11, failures: 0, lastMessageAt: now - 90_000 },
   rejected: empty ? [] : [
     {
-      key: 'user:LiSi', kind: 'user', id: 'LiSi', chatType: 'single',
-      label: '', displayName: 'LiSi',
+      key: 'user:WangWu', kind: 'user', id: 'WangWu', chatType: 'single',
+      label: '', displayName: 'WangWu',
       text: '帮我看下这个仓库的登录问题，谢谢！', messages: 3,
       firstSeenAt: now - 1_800_000, lastSeenAt: now - 240_000,
     },
@@ -132,11 +136,13 @@ const state = {
   workspaces: [
     { id: 'w1', path: REPO, title: 'dsh-wecom-bot', pluginOwned: false, sessionCount: 3, archivedSessionCount: 4 },
     { id: 'w3', path: PLUGIN_WS, title: '企业微信', pluginOwned: true, sessionCount: 2, archivedSessionCount: 7 },
-    // Every Session archived: the settings page never lists it.
+    // Every Session archived: it can never notify anybody, but the list still
+    // shows it so the operator can see the whole Workspace set.
     { id: 'w9', path: '/Users/me/Workspace/orion-agent', title: 'orion-agent', pluginOwned: false, sessionCount: 0, archivedSessionCount: 32 },
   ],
   admins: empty ? [] : [{ id: 'ZhangSan', label: '张三', displayName: '张三', groupName: '默认分组' }],
-  adminWorkspaces: empty ? [] : [PLUGIN_WS],
+  // Empty is the documented default: every Workspace, every box checked.
+  adminWorkspaces: [],
   notices: [],
   journal: { enabled: true, directory: '/Users/me/.dsh/wecom-bot/logs', file: '/Users/me/.dsh/wecom-bot/logs/2026-10-16.jsonl', retentionDays: 14 },
 };
@@ -144,7 +150,7 @@ const state = {
 if (empty) state.routing.groups = state.routing.groups.filter(group => group.isDefault);
 const stored = empty
   ? { botId: '', adminUserIds: [], adminWorkspaces: [] }
-  : { botId: 'aibAbCdEfGh123456', adminUserIds: ['ZhangSan'], adminWorkspaces: [PLUGIN_WS] };
+  : { botId: 'aibAbCdEfGh123456', adminUserIds: ['ZhangSan'], adminWorkspaces: [] };
 
 // Light/dark values of the DSH tokens the page and the primitives read.
 const TOKENS = {
@@ -297,10 +303,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(page({ view: 'page' 
 if (!${empty}) setTimeout(() => { document.querySelectorAll('.wcb-group-toggle')[0]?.click(); }, 200);
 // The dialog shot keeps the group folded back to its member list: the point is
 // the person, not the group form.
-if (!${empty} && !${dialog}) setTimeout(() => { document.querySelector('[aria-label="编辑 默认分组"]')?.click(); }, 350);
+if (!${empty} && !${dialog} && !${archive} && !${picker}) setTimeout(() => { document.querySelector('[aria-label="编辑 默认分组"]')?.click(); }, 350);
 // The --dialog variant goes one step further: the badge opens the person
 // details, which is where the 备注 and the group move live.
 if (${dialog}) setTimeout(() => { document.querySelector('[aria-label="张三 的详情"]')?.click(); }, 500);
+if (${archive}) setTimeout(() => { document.querySelector('[aria-label="归档 张三 的会话"]')?.click(); }, 500);
+if (${picker}) setTimeout(() => { document.querySelector('[aria-label="添加管理员"]')?.click(); }, 500);
 if (${advanced}) setTimeout(() => {
   document.querySelector('details').open = true;
   // Also open the notification scope, so the variant shows which Workspaces it
@@ -320,7 +328,7 @@ console.log(file);
 
 const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 if (existsSync(chrome)) {
-  const png = resolve(out, `settings${dark ? '-dark' : ''}${empty ? '-empty' : ''}${advanced ? '-advanced' : ''}${dialog ? '-dialog' : ''}.png`);
+  const png = resolve(out, `settings${dark ? '-dark' : ''}${empty ? '-empty' : ''}${advanced ? '-advanced' : ''}${dialog ? '-dialog' : ''}${picker ? '-picker' : ''}${archive ? '-archive' : ''}.png`);
   const flags = ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1', '--virtual-time-budget=3000'];
   // Measure at the real width first (the page has a <820px breakpoint), then
   // screenshot exactly that tall, so the PNG has no empty band at the bottom.

@@ -21,11 +21,12 @@ export const PLUGIN_WORKSPACE_DIRECTORY = 'workspace';
 /** Sidebar title of the plugin's own Workspace. */
 export const PLUGIN_WORKSPACE_TITLE = '企业微信';
 /**
- * Persisted groups+bindings file version (4 = groups own Workspace, model and
- * preset; notes live on the person). A file of any other version is set aside
+ * Persisted groups+bindings file version (5 = groups own Workspace, model and
+ * preset; notes live on the person; an administrator keeps the Workspace their
+ * operator commands default to). A file of any other version is set aside
  * instead of migrated — there is no earlier deployment to keep working.
  */
-export const ROUTING_VERSION = 4;
+export const ROUTING_VERSION = 5;
 /** Upper bound on persisted members across all groups. */
 export const MAX_BINDINGS = 500;
 /** Upper bound on user groups. */
@@ -94,6 +95,10 @@ export interface CatalogSession {
   /** Agent preset the Session runs, when DSH reports one. */
   readonly preset?: string;
   readonly context?: ContextUsage;
+  /** Latest turn number the Session log shows, when DSH reports one. */
+  readonly turns?: number;
+  /** Steps the Session has entered, when DSH reports one. */
+  readonly steps?: number;
 }
 
 export interface CatalogGroup {
@@ -353,6 +358,13 @@ export type RoutingOp =
   }
   | { readonly op: 'member.remove'; readonly key: string }
   /**
+   * Archive the member's bound Session and clear the binding, so the next
+   * message creates a fresh Session from the group's defaults. Archiving is
+   * what DSH offers instead of deletion: the Session stops being resumed, its
+   * context no longer reaches any request.
+   */
+  | { readonly op: 'member.archive'; readonly key: string }
+  /**
    * Set (or clear) a person's 备注. Independent of membership: an
    * administrator who is in no group still has a name, and the note survives
    * being removed from a group.
@@ -367,10 +379,12 @@ export interface RoutingResponse {
   readonly ok: boolean;
   readonly error?: string;
   readonly routing?: RoutingView;
+  /** The group a `group.add` op created, so the page can open its new form. */
+  readonly createdGroupId?: string;
 }
 
 export interface BridgeStateView {
-  readonly version: 4;
+  readonly version: 5;
   readonly connection: ConnectionStatus;
   readonly traffic: TrafficStats;
   /** Senders refused since Host start, newest first. */

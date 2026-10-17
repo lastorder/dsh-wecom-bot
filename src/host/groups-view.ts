@@ -1,5 +1,5 @@
 import {
-  DEFAULT_GROUP_ID, MAX_GROUPS, type BindingRecord, type BindingSessionState, type ContextUsage,
+  DEFAULT_GROUP_ID, MAX_GROUPS, type BindingKind, type BindingRecord, type BindingSessionState, type ContextUsage,
   type GroupMemberView, type GroupRecord, type GroupView, type ModelSelection, type RoutingOp,
   type RoutingView,
 } from '../shared/protocol.js';
@@ -33,6 +33,8 @@ export interface RoutingViewDeps {
   readonly observations?: ObservationStore;
   readonly isAdmin: (user: string) => boolean;
   readonly router?: Pick<Router, 'reapplyGroup'>;
+  /** Archiving a Session needs a DSH service the view itself does not hold. */
+  readonly ops?: { archive(sessionId: string): Promise<void> };
   readonly log?: { warn(message: string): void };
 }
 
@@ -147,11 +149,17 @@ export interface RoutingOpResult {
   readonly error?: string;
   /** Number of records the ops changed. */
   readonly changed: number;
+  /** The group `group.add` created, so the page can open its form. */
+  readonly createdGroupId?: string;
+  /** Principals `member.add` authorized, so the Bot can greet them. */
+  readonly authorized?: readonly { readonly kind: BindingKind; readonly id: string; readonly groupId: string }[];
 }
 
 /** Apply settings-page edits; the first failing op aborts the rest. */
 export async function applyRoutingOps(deps: RoutingViewDeps, ops: readonly RoutingOp[]): Promise<RoutingOpResult> {
   let changed = 0;
+  let createdGroupId: string | undefined;
+  const authorized: { kind: BindingKind; id: string; groupId: string }[] = [];
   // A model edit is only worth accepting against the real catalog; read it
   // once when the page has never asked for it on this process yet.
   const touchesModel = ops.some(op => op.op === 'group.update'
@@ -181,7 +189,8 @@ export async function applyRoutingOps(deps: RoutingViewDeps, ops: readonly Routi
           return { ok: false, error: `最多只能有 ${MAX_GROUPS} 个分组。`, changed };
         }
         try {
-          await deps.store.createGroup(op.name);
+          const created = await deps.store.createGroup(op.name);
+          createdGroupId = created.id;
           changed++;
         } catch (error) {
           return { ok: false, error: `无法新增分组：${error instanceof Error ? error.message : String(error)}`, changed };
@@ -244,6 +253,7 @@ export async function applyRoutingOps(deps: RoutingViewDeps, ops: readonly Routi
         if (!deps.store.group(op.groupId)) return { ok: false, error: `分组不存在：${op.groupId}`, changed };
         try {
           await deps.store.create(op.kind, id, { groupId: op.groupId, ...(op.label === undefined ? {} : { label: op.label }) });
+          authorized.push({ kind: op.kind, id, groupId: op.groupId });
           changed++;
         } catch (error) {
           return { ok: false, error: `无法加入分组：${error instanceof Error ? error.message : String(error)}`, changed };
@@ -275,6 +285,25 @@ export async function applyRoutingOps(deps: RoutingViewDeps, ops: readonly Routi
         changed++;
         break;
       }
+      case 'member.archive': {
+        const parsed = parseBindingKey(op.key);
+        if (!parsed) return { ok: false, error: `无法识别的成员 id：${op.key}`, changed };
+        const key = bindingKey(parsed.kind, parsed.id);
+        const binding = deps.store.get(key);
+        if (!binding) return { ok: false, error: `成员不存在：${op.key}`, changed };
+        if (!binding.sessionId) return { ok: false, error: '这个成员还没有会话可以归档。', changed };
+        if (!deps.ops) return { ok: false, error: '当前 DSH 不支持归档会话。', changed };
+        try {
+          await deps.ops.archive(binding.sessionId);
+        } catch (error) {
+          return { ok: false, error: error instanceof Error ? error.message : String(error), changed };
+        }
+        // Clearing the binding is what makes the next message create a fresh
+        // Session from the group's current Workspace/model/preset.
+        await deps.store.update(key, { sessionId: '' });
+        changed++;
+        break;
+      }
       case 'member.remove': {
         const parsed = parseBindingKey(op.key);
         if (!parsed) return { ok: false, error: `无法识别的成员 id：${op.key}`, changed };
@@ -295,5 +324,9 @@ export async function applyRoutingOps(deps: RoutingViewDeps, ops: readonly Routi
       deps.log?.warn(`WeCom could not apply the group model: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  return { ok: true, changed };
+  return {
+    ok: true, changed,
+    ...(createdGroupId ? { createdGroupId } : {}),
+    ...(authorized.length ? { authorized } : {}),
+  };
 }

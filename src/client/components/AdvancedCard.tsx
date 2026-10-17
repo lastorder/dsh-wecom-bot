@@ -1,23 +1,36 @@
-import { Button, IconChevronRightOutlineRegular, IconCopyOutlineRegular, Input, Switch, Tag, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import {
+  Button, IconChevronRightOutlineRegular, IconCopyOutlineRegular, Input, Switch, Tag, writeClipboard,
+} from '@deepseek-ai/dsh-client-ui-primitives';
 import type { JournalInfo } from '../../shared/protocol.ts';
-import type { Draft, FieldErrors } from '../model.ts';
-import { CardHead, Field } from './ui.tsx';
+import { useConfigSave } from '../hooks.ts';
+import { changedOperations, validateAdvanced } from '../model.ts';
+import type { ConfigFormScope, StoredConfig } from '../types.ts';
+import { CardHead, Field, SaveBar } from './ui.tsx';
 
 /** Step 5 (collapsed): approvals, timeouts, custom endpoint and the JSONL journal. */
-export function AdvancedCard({ draft, errors, journal, disabled, onChange }: {
-  draft: Draft;
-  errors: FieldErrors;
+export function AdvancedCard({ scope, base, journal, disabled, onChanged }: {
+  scope: ConfigFormScope;
+  base: StoredConfig;
   journal: JournalInfo | undefined;
   disabled: boolean;
-  onChange(patch: Partial<Draft>): void;
+  onChanged(): void;
 }) {
+  const [draft, setDraft] = useState(() => slice(base));
+  const [attempted, setAttempted] = useState(false);
   const [copied, setCopied] = useState(false);
-  const copy = async () => {
+  const save = useConfigSave(scope, onChanged);
+  const dirty = changedOperations({ ...base, ...draft }, base).length > 0;
+  const errors = attempted ? validateAdvanced(draft) : {};
+
+  useEffect(() => { setDraft(slice(base)); }, [base]);
+
+  const copy = async (): Promise<void> => {
     if (!journal?.directory) return;
     setCopied(await writeClipboard(journal.directory));
     setTimeout(() => setCopied(false), 1500);
   };
+
   return (
     <details className="wcb-card wcb-details">
       <summary>
@@ -31,10 +44,10 @@ export function AdvancedCard({ draft, errors, journal, disabled, onChange }: {
 
       <Field
         label="远程审批工具调用"
-        hint="开启后，DSH 请求执行工具时会向已允许用户的单聊发送带验证码的审批消息，回复 /approve 或 /deny 即生效；群聊永远不能审批。不需要时请保持关闭。"
+        hint="开启后，DSH 请求执行工具时会通知所有管理员，管理员在单聊里回复 /approve 或 /deny 即生效；群聊永远不能审批。关闭时只通知，审批仍需到 DSH 页面完成。"
       >
         <Switch checked={draft.remoteApprovals} disabled={disabled} label="远程审批工具调用"
-          onChange={next => onChange({ remoteApprovals: next })} />
+          onChange={next => setDraft(current => ({ ...current, remoteApprovals: next }))} />
       </Field>
 
       <Field label="等待企微回复（秒）" error={errors.questionTimeoutMs}
@@ -45,7 +58,7 @@ export function AdvancedCard({ draft, errors, journal, disabled, onChange }: {
           value={Math.round(draft.questionTimeoutMs / 1000)}
           disabled={disabled}
           aria-label="等待企微回复的秒数"
-          onChange={event => onChange({ questionTimeoutMs: Number(event.target.value) * 1000 })}
+          onChange={event => setDraft(current => ({ ...current, questionTimeoutMs: Number(event.target.value) * 1000 }))}
         />
       </Field>
 
@@ -57,7 +70,7 @@ export function AdvancedCard({ draft, errors, journal, disabled, onChange }: {
           spellCheck={false}
           disabled={disabled}
           aria-label="WebSocket 地址"
-          onChange={event => onChange({ wsUrl: event.target.value })}
+          onChange={event => setDraft(current => ({ ...current, wsUrl: event.target.value }))}
         />
       </Field>
 
@@ -67,7 +80,7 @@ export function AdvancedCard({ draft, errors, journal, disabled, onChange }: {
       >
         <div className="wcb-field-row">
           <Switch checked={draft.logEnabled} disabled={disabled} label="记录对话日志"
-            onChange={next => onChange({ logEnabled: next })} />
+            onChange={next => setDraft(current => ({ ...current, logEnabled: next }))} />
           <span style={{ color: 'var(--wcb-text-2)', fontSize: 13 }}>保留</span>
           <Input
             className="wcb-number"
@@ -75,7 +88,7 @@ export function AdvancedCard({ draft, errors, journal, disabled, onChange }: {
             value={draft.logRetentionDays}
             disabled={disabled || !draft.logEnabled}
             aria-label="日志保留天数"
-            onChange={event => onChange({ logRetentionDays: Number(event.target.value) })}
+            onChange={event => setDraft(current => ({ ...current, logRetentionDays: Number(event.target.value) }))}
           />
           <span style={{ color: 'var(--wcb-text-2)', fontSize: 13 }}>天</span>
         </div>
@@ -89,6 +102,28 @@ export function AdvancedCard({ draft, errors, journal, disabled, onChange }: {
           </div>
         )}
       </Field>
+
+      <SaveBar
+        dirty={dirty}
+        saving={save.saving}
+        saved={save.saved}
+        error={save.error}
+        disabled={disabled}
+        onSave={() => { setAttempted(true); void save.save(draft); }}
+        onDiscard={() => { setDraft(slice(base)); setAttempted(false); }}
+      />
     </details>
   );
+}
+
+type AdvancedSlice = Pick<StoredConfig, 'remoteApprovals' | 'questionTimeoutMs' | 'wsUrl' | 'logEnabled' | 'logRetentionDays'>;
+
+function slice(base: StoredConfig): AdvancedSlice {
+  return {
+    remoteApprovals: base.remoteApprovals,
+    questionTimeoutMs: base.questionTimeoutMs,
+    wsUrl: base.wsUrl,
+    logEnabled: base.logEnabled,
+    logRetentionDays: base.logRetentionDays,
+  };
 }

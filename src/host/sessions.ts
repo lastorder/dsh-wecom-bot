@@ -32,6 +32,10 @@ export interface SessionDescription {
   readonly model?: ModelSelection;
   readonly preset?: string;
   readonly context?: ContextUsage;
+  /** Latest turn number, when the Session's projections report one. */
+  readonly turns?: number;
+  /** Steps the Session has entered, when reported. */
+  readonly steps?: number;
 }
 
 export interface Provisioned {
@@ -183,6 +187,8 @@ export function createSessionProvisioner(options: SessionProvisionerOptions): Se
             ...(entry.model ? { model: entry.model } : {}),
             ...(entry.preset ? { preset: entry.preset } : {}),
             ...(entry.context ? { context: entry.context } : {}),
+            ...(entry.turns !== undefined ? { turns: entry.turns } : {}),
+            ...(entry.steps !== undefined ? { steps: entry.steps } : {}),
           };
         }
         const hidden = catalog.hiddenReason(sessionId);

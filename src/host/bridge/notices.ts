@@ -1,8 +1,9 @@
 import type { ApprovalRequest, Question } from '../dsh.js';
 import type { TurnSummary } from '../turns.js';
 import type { OperableGroup } from './directory.js';
+import type { WorkspaceOption } from '../../shared/protocol.js';
 import {
-  displayTitle, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, sessionToken, shortId,
+  displayPath, displayTitle, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, sessionToken, shortId,
 } from './format.js';
 
 /**
@@ -85,9 +86,10 @@ export const HELP_TEXT = [
   '直接把消息发给我，就会进入你的专属 DSH 会话；本轮结束后，我会把结果发回这里。',
   '',
   bold('💬 常用命令'),
-  '- **/status** — 查看当前会话、分组、Workspace 与模型',
+  '- **/status** — 当前会话的 Workspace、preset、模型、effort、上下文与运行状态',
   '- **/whoami** — 查看你的 userid、所属分组与管理员身份',
-  '- **/new** — 换一个全新的专属会话（旧会话仍保留在 DSH 中）',
+  `- **/compact** — 压缩当前会话的上下文：${code('/compact')}`,
+  `- **/delete** — 归档当前会话，清空它的记忆：${code('/delete')} 后再发 ${code('/delete confirm')}`,
   '- **/cancel** — 停止你的会话正在运行的回合',
   `- **/answer** — 回答 DSH 的提问：${code('/answer 验证码 选项序号或文字')}`,
   `- **/approve** — 允许本次工具调用：${code('/approve 验证码')}（需开启远程审批）`,
@@ -99,6 +101,8 @@ export const HELP_TEXT = [
   '',
   bold('🔒 管理员命令'),
   '只有插件配置中列出的管理员可用：',
+  '- **/new** — 在默认 Workspace 中新建一个会话并切换过去',
+  '- **/workspaces** — 查看 DSH 的 Workspace 列表，并选择你的默认 Workspace',
   '- **/sessions** — 按 Workspace 列出可切换的会话',
   `- **/use** — 切换要操作的会话：${code('/use 序号')} 或 ${code('/use 会话ID前缀')}`,
   '- **/reset** — 放弃切换，回到自己的专属会话',
@@ -108,11 +112,112 @@ export function adminOnlyText(): string {
   return [
     title('🔒', '需要管理员权限'),
     '',
-    '只有插件配置里列出的管理员可以切换会话。你的消息始终路由到自己的专属会话；如需新的会话请发送 **/new**。',
+    '这个命令只有插件配置里列出的管理员可以使用。你的消息会进入自己的专属会话；需要清空记忆时发送 **/delete**。',
   ].join('\n');
 }
 
-export function sessionListText(groups: readonly OperableGroup[], selected: string | undefined, limit = 30): { text: string; listing: string[] } {
+/** A sender that is in no group: the Bot answers instead of staying silent. */
+export function unauthorizedText(): string {
+  return [
+    title('🔒', '用户未授权'),
+    '',
+    '请联系管理员把你加入分组后再试。',
+  ].join('\n');
+}
+
+/** Sent once, when the page authorizes a principal into its first group. */
+export function authorizedNotice(groupName: string): string {
+  return [
+    title('✅', '管理员已授权，可以开始使用了'),
+    '',
+    `你已经被加入「${inline(groupName, 60)}」，直接发消息即可。`,
+    `> 回复 ${code('/help')} 可以获取更多信息。`,
+  ].join('\n');
+}
+
+/** `/workspaces` reply: the DSH Workspace list and the operator's choice. */
+export function workspaceListText(workspaces: readonly WorkspaceOption[], selected: string): { text: string; listing: string[] } {
+  const listing = workspaces.map(workspace => workspace.path);
+  if (!workspaces.length) {
+    return {
+      text: [
+        title('🗂', 'DSH Workspace'),
+        '',
+        '还没有注册任何 Workspace：DSH 在第一次创建会话时才会注册它。直接发送 /new 可以在插件自带的 Workspace 里建一个，然后这里就会列出来。',
+      ].join('\n'),
+      listing,
+    };
+  }
+  const rows = workspaces.map((workspace, index) => {
+    const mark = selected && workspace.path === selected ? '（当前默认）' : '';
+    return `${index + 1}. ${inline(workspace.title, 60)} — ${inline(displayPath(workspace.path), 120)}${mark}`;
+  });
+  return {
+    text: [
+      `${title('🗂', 'DSH Workspace')} · 共 ${workspaces.length} 个`,
+      '',
+      ...rows,
+      '',
+      `发送 ${code('/workspaces 序号')} 选择默认 Workspace；${code('/sessions')} 与 ${code('/new')} 都在它里面操作。发送 ${code('/workspaces 0')} 取消限定。`,
+    ].join('\n'),
+    listing,
+  };
+}
+
+/** `/delete` first reply: what is about to be lost, and how to confirm. */
+export function deleteWarningText(sessionTitle: string | null, sessionId: string): string {
+  return [
+    `${title('🗑', '归档会话会清空它的记忆')} · ${sessionLabel(sessionTitle)}`,
+    '',
+    `确认后将归档 ${code(shortId(sessionId))}：这个会话不再被继续，历史不会再进入任何请求，下一条消息会在新会话里开始。`,
+    '',
+    `再发送一次 ${code('/delete confirm')} 确认；其它消息不会执行这个操作。`,
+  ].join('\n');
+}
+
+export function deletedText(): string {
+  return [
+    title('🗑', '会话已归档'),
+    '',
+    '它的上下文记忆不会再被使用；下一条消息会按当前分组的 Workspace、模型与 preset 新建一个会话。',
+  ].join('\n');
+}
+
+export function compactedText(items: number, tokens: number): string {
+  return [
+    title('🧹', '上下文已压缩'),
+    '',
+    `- ${field('合并', `${items} 条历史`)}`,
+    `- ${field('释放', `约 ${tokens} tokens`)}`,
+  ].join('\n');
+}
+
+export function nothingToCompactText(): string {
+  return `${title('🧹', '没有可压缩的历史')} · 这个会话还很短，暂时不需要压缩。`;
+}
+
+export function newSessionText(workspaceTitle: string, sessionId: string): string {
+  return [
+    title('🆕', '已创建并切换到新会话'),
+    '',
+    `- ${field('Workspace', inline(workspaceTitle, 120))}`,
+    `- ${field('会话', code(shortId(sessionId)))}`,
+    '',
+    '直接发消息即可开始；发送 /reset 可以回到自己的专属会话。',
+  ].join('\n');
+}
+
+export function noWorkspaceText(): string {
+  return [
+    title('⚠️', '还没有注册任何 Workspace'),
+    '',
+    '先发送 /new 在插件自带的 Workspace 里建一个会话（DSH 会顺带注册它），再回来选序号。',
+  ].join('\n');
+}
+
+export function sessionListText(
+  groups: readonly OperableGroup[], selected: string | undefined, limit = 30, scope?: string,
+): { text: string; listing: string[] } {
   const listing: string[] = [];
   const blocks: string[] = [];
   let truncated = 0;
@@ -129,16 +234,18 @@ export function sessionListText(groups: readonly OperableGroup[], selected: stri
   if (!listing.length) {
     return {
       text: [
-        title('🗂', '可切换的会话'),
+        `${title('🗂', '可切换的会话')}${scope ? ` · ${inline(scope, 60)}` : ''}`,
         '',
-        '没有找到可切换的会话。请在 DSH 中创建会话，或检查管理员的 Workspace 范围。',
+        scope
+          ? '这个 Workspace 里没有可切换的会话。发送 /workspaces 0 可以取消 Workspace 限定。'
+          : '没有找到可切换的会话。请在 DSH 中创建会话，或检查管理员的 Workspace 范围。',
       ].join('\n'),
       listing,
     };
   }
   return {
     text: [
-      `${title('🗂', '可切换的会话')} · 共 ${listing.length + truncated} 个`,
+      `${title('🗂', '可切换的会话')} · 共 ${listing.length + truncated} 个${scope ? ` · ${inline(scope, 60)}` : ''}`,
       '',
       blocks.join('\n\n'),
       '',

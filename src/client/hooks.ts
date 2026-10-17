@@ -1,8 +1,9 @@
 /** React hooks binding the page to DSH Config forms, credentials and the state route. */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { BridgeStateView, RoutingOp } from '../shared/protocol.ts';
+import type { BridgeStateView, RoutingOp, RoutingResponse } from '../shared/protocol.ts';
 import { describeCredential, fetchState, postRouting } from './api.ts';
-import type { ClientRemote, ConfigFormScope, FormSnapshot } from './types.ts';
+import { changedOperations, storedFrom } from './model.ts';
+import type { ClientRemote, ConfigFormScope, FormSnapshot, StoredConfig } from './types.ts';
 
 export function useFormSnapshot(scope: ConfigFormScope): FormSnapshot {
   return useSyncExternalStore(listener => scope.subscribe(listener), () => scope.getSnapshot());
@@ -90,40 +91,98 @@ export function useSecretStatus(remote: ClientRemote | undefined, ref: string): 
 export interface RoutingApply {
   /** Key of the edit in flight; empty when idle. */
   readonly busy: string;
-  readonly feedback?: { readonly tone: 'ok' | 'error'; readonly text: string };
-  /** Apply immediate group/member edits; resolves false (and shows why) on failure. */
-  apply(key: string, ops: readonly RoutingOp[], label: string): Promise<boolean>;
+  /** Why the last edit failed; cleared by the next one. */
+  readonly error?: string;
+  /**
+   * Apply one immediate group/member edit. Resolves to the Host's answer (the
+   * fresh table, plus the id of a group it created) or undefined on failure.
+   */
+  apply(key: string, ops: readonly RoutingOp[]): Promise<RoutingResponse | undefined>;
   dismiss(): void;
 }
 
 /**
- * Apply one immediate edit and report the outcome.
+ * Apply one immediate edit.
  *
- * The groups, the rejected senders and the administrator notes all edit Host
- * state rather than the Config form, so they share the same "it is already
- * applied" feedback — and the same rule that a failed edit is shown in place
- * instead of silently snapping back.
+ * Groups, refused senders and notes are Host state, not part of the Config
+ * form, so an edit is already in effect when the request returns. Nothing
+ * confirms it: the table the page re-reads *is* the confirmation, and a notice
+ * that stays on screen after the fact only gets in the way. A failure is the
+ * exception — it is shown in place until the next attempt.
  */
 export function useRoutingApply(onChanged: () => void): RoutingApply {
   const [busy, setBusy] = useState('');
-  const [feedback, setFeedback] = useState<RoutingApply['feedback']>();
+  const [error, setError] = useState<string>();
 
-  const apply = useCallback(async (key: string, ops: readonly RoutingOp[], label: string): Promise<boolean> => {
+  const apply = useCallback(async (key: string, ops: readonly RoutingOp[]): Promise<RoutingResponse | undefined> => {
     setBusy(key);
-    setFeedback(undefined);
+    setError(undefined);
     try {
-      await postRouting(ops);
-      setFeedback({ tone: 'ok', text: `${label}已生效。` });
+      const response = await postRouting(ops);
       onChanged();
-      return true;
+      return response;
     } catch (cause) {
-      setFeedback({ tone: 'error', text: cause instanceof Error ? cause.message : String(cause) });
-      return false;
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return undefined;
     } finally {
       setBusy('');
     }
   }, [onChanged]);
 
-  const dismiss = useCallback(() => setFeedback(undefined), []);
-  return { busy, feedback, apply, dismiss };
+  const dismiss = useCallback(() => setError(undefined), []);
+  return { busy, error, apply, dismiss };
+}
+
+export interface ConfigSave {
+  readonly saving: boolean;
+  /** Why the last save failed; cleared by the next attempt. */
+  readonly error?: string;
+  /** True for a moment after a successful write. */
+  readonly saved: boolean;
+  /** Write one section's fields; false when the write failed. */
+  save(patch: Partial<StoredConfig>): Promise<boolean>;
+}
+
+/**
+ * Save one card's slice of the plugin Config.
+ *
+ * Every section writes only its own fields, diffed against the *newest* stored
+ * revision, so two cards can be dirty at once without overwriting each other.
+ * A revision conflict means something else wrote the namespace (another
+ * window, the raw Config editor): re-read and rebase the same diff.
+ */
+export function useConfigSave(scope: ConfigFormScope, onSaved: () => void): ConfigSave {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string>();
+  const [saved, setSaved] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>();
+
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+
+  const save = useCallback(async (patch: Partial<StoredConfig>): Promise<boolean> => {
+    setSaving(true);
+    setError(undefined);
+    if (timer.current) clearTimeout(timer.current);
+    try {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const latest = scope.getSnapshot();
+        const stored = storedFrom(latest.value);
+        const ops = changedOperations({ ...stored, ...patch }, stored);
+        if (!ops.length) break;
+        if (await scope.mutate(ops, latest.revision)) break;
+        if (attempt === 2) throw new Error('配置已在别处被修改，请刷新页面后重试。');
+      }
+      setSaved(true);
+      timer.current = setTimeout(() => setSaved(false), 2000);
+      onSaved();
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }, [scope, onSaved]);
+
+  return { saving, error, saved, save };
 }

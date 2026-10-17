@@ -4,7 +4,7 @@
  * directly.
  */
 import type {
-  AgentPresetOption, BindingKind, CatalogGroup, CatalogSession, ContextUsage, GroupMemberView, GroupView,
+  AgentPresetOption, BindingKind, ContextUsage, GroupMemberView, GroupView,
   ModelCatalogView, ModelChoice, ModelSelection, PresetCatalogView, RoutingOp,
 } from '../shared/protocol.ts';
 import { DEFAULT_SECRET_REF } from '../shared/protocol.ts';
@@ -21,12 +21,6 @@ export const DEFAULTS: StoredConfig = {
   logEnabled: true,
   logRetentionDays: 14,
 };
-
-/** Editable copy of the Config plus the write-only Secret. */
-export interface Draft extends StoredConfig {
-  /** New Secret typed by the user; empty keeps the stored one. */
-  readonly secret: string;
-}
 
 const LIST_KEYS = ['adminUserIds', 'adminWorkspaces'] as const;
 const SCALAR_KEYS = [
@@ -53,15 +47,6 @@ export function storedFrom(value: Partial<StoredConfig> | undefined): StoredConf
     remoteApprovals: v.remoteApprovals === true,
     logEnabled: v.logEnabled !== false,
     logRetentionDays: typeof v.logRetentionDays === 'number' ? v.logRetentionDays : DEFAULTS.logRetentionDays,
-  };
-}
-
-export function draftFrom(stored: StoredConfig): Draft {
-  return {
-    ...stored,
-    adminUserIds: [...stored.adminUserIds],
-    adminWorkspaces: [...stored.adminWorkspaces],
-    secret: '',
   };
 }
 
@@ -93,19 +78,22 @@ export function changedOperations(draft: StoredConfig, base: StoredConfig): Form
   return ops;
 }
 
-export function isDirty(draft: Draft, base: StoredConfig): boolean {
-  return Boolean(draft.secret.trim()) || changedOperations(draft, base).length > 0;
-}
-
 export type FieldErrors = Partial<Record<
   'botId' | 'secret' | 'wsUrl' | 'questionTimeoutMs' | 'logRetentionDays',
   string
 >>;
 
-export function validate(draft: Draft, secretConfigured: boolean): FieldErrors {
+/** The 连接 card's own validation: both credentials, nothing else. */
+export function validateCredentials(draft: { readonly botId: string; readonly secret: string }, secretConfigured: boolean): FieldErrors {
   const errors: FieldErrors = {};
   if (!draft.botId.trim()) errors.botId = '请填写企业微信 Bot ID。';
   if (!draft.secret.trim() && !secretConfigured) errors.secret = '首次配置需要填写 Bot Secret。';
+  return errors;
+}
+
+/** The 高级设置 card's own validation: a safe endpoint and the two ranges. */
+export function validateAdvanced(draft: Pick<StoredConfig, 'wsUrl' | 'questionTimeoutMs' | 'logRetentionDays'>): FieldErrors {
+  const errors: FieldErrors = {};
   const wsUrl = draft.wsUrl.trim();
   if (wsUrl) {
     try {
@@ -131,10 +119,26 @@ export function toggle(values: readonly string[], id: string, on?: boolean): str
   return want ? [...values, id] : values.filter(value => value !== id);
 }
 
-export function setAll(values: readonly string[], ids: readonly string[], on: boolean): string[] {
-  if (on) return [...new Set([...values, ...ids])];
-  const remove = new Set(ids);
-  return values.filter(value => !remove.has(value));
+/**
+ * Whether one Workspace is inside the administrator notification scope.
+ * An empty stored list is the default and means every Workspace.
+ */
+export function scopeIncludes(values: readonly string[], path: string): boolean {
+  return values.length === 0 || values.includes(path);
+}
+
+/**
+ * The stored scope after toggling one Workspace.
+ *
+ * A list that covers every offered Workspace collapses back to `[]` — the
+ * canonical "all" the Config documents, so checking everything does not
+ * silently pin today's Workspace set into the file.
+ */
+export function toggleScope(values: readonly string[], allPaths: readonly string[], path: string, on: boolean): string[] {
+  const next = new Set(values.length ? values : allPaths);
+  if (on) next.add(path); else next.delete(path);
+  if (next.size >= allPaths.length) return [];
+  return allPaths.filter(item => next.has(item));
 }
 
 /* ------------------------------- models ------------------------------- */
@@ -165,6 +169,13 @@ export function modelLabel(catalog: ModelCatalogView | null | undefined, selecti
   if (!selection) return '';
   const choice = catalog?.choices.find(item => item.provider === selection.provider && item.model === selection.model);
   return choice ? choiceLabel(choice) : `${selection.provider}/${selection.model}`;
+}
+
+/** A model's display name without its id, for space-tight rows. */
+export function modelName(catalog: ModelCatalogView | null | undefined, selection: ModelSelection | undefined): string {
+  if (!selection) return '';
+  const choice = catalog?.choices.find(item => item.provider === selection.provider && item.model === selection.model);
+  return choice ? choice.name : selection.model;
 }
 
 /** The effort's display name, or the raw id when the catalog does not know it. */
@@ -218,7 +229,7 @@ export function contextLabel(context: ContextUsage | undefined): string {
 export function dshDefaultLabel(catalog: ModelCatalogView | null | undefined): string {
   const value = catalog?.dshDefault;
   if (!value) return '跟随 DSH 默认模型';
-  return `跟随 DSH 默认模型（${modelLabel(catalog, value)}）`;
+  return `跟随 DSH 默认模型（${modelName(catalog, value)}）`;
 }
 
 /* ------------------------- groups and members ------------------------- */
@@ -234,11 +245,6 @@ export const SESSION_STATE_LABEL: Record<GroupMemberView['sessionState'], string
   unusable: '会话不可用',
 };
 
-/** What any person row shows first: the operator note, else the WeCom id. */
-export function personTitle(person: { readonly label: string; readonly id: string }): string {
-  return person.label || person.id;
-}
-
 /** `user:<userid>` / `group:<chatid>`: the key a note is stored under. */
 export function personKey(kind: BindingKind, id: string): string {
   return `${kind}:${id}`;
@@ -248,28 +254,6 @@ export function personKey(kind: BindingKind, id: string): string {
 export function groupModelLabel(catalog: ModelCatalogView | null | undefined, group: GroupView): string {
   if (!group.effectiveProvider || !group.effectiveModel) return dshDefaultLabel(catalog);
   return modelLabel(catalog, { provider: group.effectiveProvider, model: group.effectiveModel });
-}
-
-export interface SessionOption {
-  readonly sessionId: string;
-  readonly title: string | null;
-  /** True when the Session is not part of the current catalog. */
-  readonly stale?: boolean;
-}
-
-/** Sessions the page may offer for one member: its group's, plus its own. */
-export function sessionOptions(
-  member: Pick<GroupMemberView, 'sessionId' | 'sessionTitle'>,
-  group: Pick<GroupView, 'workspacePath'>,
-  catalogGroups: readonly CatalogGroup[] | undefined,
-): SessionOption[] {
-  const found = (catalogGroups ?? []).find(catalog => (catalog.path ?? '') === group.workspacePath);
-  const options: SessionOption[] = (found?.sessions ?? [])
-    .map((session: CatalogSession) => ({ sessionId: session.sessionId, title: session.title }));
-  if (member.sessionId && !options.some(option => option.sessionId === member.sessionId)) {
-    options.unshift({ sessionId: member.sessionId, title: member.sessionTitle, stale: true });
-  }
-  return options;
 }
 
 /* ------------------------------- display ------------------------------ */
@@ -314,7 +298,7 @@ export function addMember(groupId: string, kind: BindingKind, id: string, label?
   return { op: 'member.add', groupId, kind, id, ...(label ? { label } : {}) };
 }
 
-export function updateMember(key: string, patch: { groupId?: string; sessionId?: string }): RoutingOp {
+export function updateMember(key: string, patch: { groupId?: string }): RoutingOp {
   return { op: 'member.update', key, patch };
 }
 
@@ -325,4 +309,9 @@ export function setLabel(key: string, label: string): RoutingOp {
 
 export function removeMember(key: string): RoutingOp {
   return { op: 'member.remove', key };
+}
+
+/** Archive one member's Session; the next message creates a fresh one. */
+export function archiveMember(key: string): RoutingOp {
+  return { op: 'member.archive', key };
 }

@@ -1,5 +1,6 @@
 import { WSClient } from '@wecom/aibot-node-sdk';
 import { createBridge, type Bridge, type BridgeClient } from './bridge/index.js';
+import { authorizedNotice } from './bridge/notices.js';
 import { createAccessPolicy } from './bridge/policy.js';
 import { applyRoutingOps, buildRoutingView, type RoutingOpResult } from './groups-view.js';
 import { createRoutingStore, type RoutingStore } from './routing-store.js';
@@ -16,6 +17,7 @@ import { createObservationStore, type ObservationStore } from './observation.js'
 import { createPresetService, type PresetService } from './presets.js';
 import { createRoundTracker, type RoundTracker } from './rounds.js';
 import { createRouter, type Router } from './routing.js';
+import { createSessionOperations, type SessionOperations } from './session-ops.js';
 import { createSessionProvisioner, type SessionProvisioner } from './sessions.js';
 import { createStatusTracker, type StatusTracker } from './status.js';
 import { summarizeTurn, type TurnSummary } from './turns.js';
@@ -109,6 +111,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
   const presets: PresetService = createPresetService({
     registry: () => ctx.get?.('agentPresets') as AgentPresetRegistry | undefined,
   });
+  const sessionOps: SessionOperations = createSessionOperations({ ctx, workspaces, catalogs, journal });
   const provisioner: SessionProvisioner = createSessionProvisioner({
     sessionController: ctx.sessionController,
     models,
@@ -202,6 +205,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     });
     const created = createBridge({
       ctx, client, settings, router, log, journal, observations, rounds, catalogs, status, scrub,
+      ops: sessionOps, workspaces,
     });
     stopBridge = created.start();
     bridge = created;
@@ -275,6 +279,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     const policy = createAccessPolicy(readBridgeSettings(config), { memberOf: () => undefined });
     return await buildRoutingView({
       store, provisioner, workspaces, models, presets, catalogs, observations, router,
+      ops: sessionOps,
       isAdmin: user => policy.isAdmin(user),
     });
   }
@@ -307,9 +312,23 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       const policy = createAccessPolicy(readBridgeSettings(config), { memberOf: () => undefined });
       const result = await applyRoutingOps({
         store, provisioner, workspaces, models, presets, router, catalogs, observations, log,
+        ops: sessionOps,
         isAdmin: user => policy.isAdmin(user),
       }, ops);
-      if (result.ok) catalogs.invalidate();
+      if (result.ok) {
+        catalogs.invalidate();
+        // Authorization is what the person was waiting for: tell them once, in
+        // the chat they already messaged from. An offline bridge simply drops
+        // it — the next thing they send will work anyway.
+        for (const entry of result.authorized ?? []) {
+          const group = store.group(entry.groupId);
+          bridge?.notify(entry.id, authorizedNotice(group?.name ?? '默认分组'), 'authorized');
+          journal.write({
+            event: 'wecom.authorized', kind: entry.kind, chatId: entry.id, group: entry.groupId,
+            notified: Boolean(bridge),
+          });
+        }
+      }
       return result;
     },
     async state(stateOptions = {}) {
@@ -349,7 +368,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       }
       if (routing?.full) notices.push('成员数量已达上限，新成员不会被记录；请在下方清理。');
       return {
-        version: 4,
+        version: 5,
         connection: status.connection(),
         traffic: status.traffic(),
         rejected: observations.rejected(key => Boolean(store.get(key))).map(row => {

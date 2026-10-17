@@ -1,18 +1,47 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Button, Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives';
-import type { Draft, FieldErrors } from '../model.ts';
-import { Card, Field } from './ui.tsx';
+import { storeCredential } from '../api.ts';
+import { useConfigSave, useSecretStatus } from '../hooks.ts';
+import { validateCredentials } from '../model.ts';
+import type { ClientRemote, ConfigFormScope, StoredConfig } from '../types.ts';
+import { Card, Field, SaveBar } from './ui.tsx';
 
-/** Step 1: the only required inputs, Bot ID and Bot Secret. */
-export function CredentialsCard({ draft, errors, secretConfigured, disabled, onChange }: {
-  draft: Draft;
-  errors: FieldErrors;
-  secretConfigured: boolean;
+/** Step 1: the only required inputs, Bot ID and Bot Secret. Saves on its own. */
+export function CredentialsCard({ scope, base, disabled, remote, onChanged }: {
+  scope: ConfigFormScope;
+  base: StoredConfig;
   disabled: boolean;
-  onChange(patch: Partial<Draft>): void;
+  remote?: ClientRemote;
+  onChanged(): void;
 }) {
   const [reveal, setReveal] = useState(false);
-  const ready = Boolean(draft.botId.trim()) && (secretConfigured || Boolean(draft.secret.trim()));
+  const [secret, setSecret] = useState('');
+  const [botId, setBotId] = useState(base.botId);
+  const [error, setError] = useState<string>();
+  const [attempted, setAttempted] = useState(false);
+  const save = useConfigSave(scope, onChanged);
+  const status = useSecretStatus(remote, base.secretEnv);
+  const ready = Boolean(botId.trim()) && (status.configured || Boolean(secret.trim()));
+  const dirty = botId.trim() !== base.botId || Boolean(secret.trim());
+  const errors = attempted ? validateCredentials({ botId, secret }, status.configured) : {};
+
+  useEffect(() => { setBotId(base.botId); }, [base.botId]);
+
+  async function onSave(): Promise<void> {
+    setAttempted(true);
+    setError(undefined);
+    if (Object.keys(validateCredentials({ botId, secret }, status.configured)).length) return;
+    if (!(await save.save({ botId: botId.trim() }))) return;
+    if (!secret.trim()) return;
+    try {
+      await storeCredential(remote?.credentials, base.secretEnv, secret.trim());
+      setSecret('');
+      status.refresh();
+    } catch (cause) {
+      setError(`其它配置已保存，但 Secret 保存失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    }
+  }
+
   return (
     <Card
       step={1}
@@ -23,39 +52,48 @@ export function CredentialsCard({ draft, errors, secretConfigured, disabled, onC
       <Field label="Bot ID" required error={errors.botId} hint="机器人的唯一标识，可公开显示。">
         <Input
           className="wcb-grow"
-          value={draft.botId}
+          value={botId}
           placeholder="例如 aib0xxxxxxxxxxxx"
           spellCheck={false}
           autoComplete="off"
           disabled={disabled}
           aria-label="Bot ID"
-          onChange={event => onChange({ botId: event.target.value })}
+          onChange={event => setBotId(event.target.value)}
         />
       </Field>
       <Field
         label="Bot Secret"
-        required={!secretConfigured}
+        required={!status.configured}
         error={errors.secret}
-        hint={<>保存到 DSH 凭据库（引用名 <span className="wcb-code">{draft.secretEnv}</span>），不会写入插件配置，也不会回显。{secretConfigured ? '留空表示保持当前 Secret。' : ''}</>}
+        hint={<>保存到 DSH 凭据库（引用名 <span className="wcb-code">{base.secretEnv}</span>），不会写入插件配置，也不会回显。{status.configured ? '留空表示保持当前 Secret。' : ''}</>}
       >
         <div className="wcb-field-row">
           <Input
             className="wcb-grow"
             type={reveal ? 'text' : 'password'}
-            value={draft.secret}
-            placeholder={secretConfigured ? '已保存 · 输入新值以替换' : '粘贴 Bot Secret'}
+            value={secret}
+            placeholder={status.configured ? '已保存 · 输入新值以替换' : '粘贴 Bot Secret'}
             autoComplete="new-password"
             spellCheck={false}
             disabled={disabled}
             aria-label="Bot Secret"
-            onChange={event => onChange({ secret: event.target.value })}
+            onChange={event => setSecret(event.target.value)}
           />
-          <Button variant="ghost" size="sm" type="button" onClick={() => setReveal(value => !value)} disabled={!draft.secret}>
+          <Button variant="ghost" size="sm" type="button" onClick={() => setReveal(value => !value)} disabled={!secret}>
             {reveal ? '隐藏' : '显示'}
           </Button>
-          {secretConfigured ? <Tag tone="success">已保存</Tag> : <Tag tone="warning">未设置</Tag>}
+          {status.configured ? <Tag tone="success">已保存</Tag> : <Tag tone="warning">未设置</Tag>}
         </div>
       </Field>
+      <SaveBar
+        dirty={dirty}
+        saving={save.saving}
+        saved={save.saved}
+        error={error ?? save.error}
+        disabled={disabled}
+        onSave={() => { void onSave(); }}
+        onDiscard={() => { setBotId(base.botId); setSecret(''); setError(undefined); setAttempted(false); }}
+      />
     </Card>
   );
 }
