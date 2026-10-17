@@ -15,11 +15,11 @@ import type { TurnSummary } from '../turns.js';
 import type { Router } from '../routing.js';
 import { parseCommand, runCommand, type CommandServices, type TargetInfo } from './commands.js';
 import { createSessionDirectory, type SessionDirectory } from './directory.js';
-import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, displayTitle, extractSessionPointer, oneLine } from './format.js';
+import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, extractSessionPointer } from './format.js';
 import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.js';
 import { createInteractionRegistry } from './interactions.js';
 import {
-  approvalNotice, promptFailedNotice, questionNotice, reviewNotice, turnCompleteNotice,
+  approvalNotice, code, promptFailedNotice, questionNotice, reviewNotice, sessionLabel, title, turnCompleteNotice,
 } from './notices.js';
 import { ackSummary, createOutbox, type NoticeKind } from './outbox.js';
 import { createAccessPolicy } from './policy.js';
@@ -216,7 +216,11 @@ export function createBridge(deps: BridgeDeps): Bridge {
     }
     const sessionId = target.sessionId;
     if (interactions.questions.has(sessionId)) {
-      await reply(message, round, '该会话正在等待回答提问，请用 /answer <验证码> … 作答；普通消息不会被当作答案。');
+      await reply(message, round, [
+        title('⏸', '该会话正在等待回答提问'),
+        '',
+        `请先用 ${code('/answer 验证码 选项')} 作答；普通消息不会被当作答案。`,
+      ].join('\n'));
       rounds.complete(round, 'blocked', { response: { reason: 'question-pending' } });
       return;
     }
@@ -225,7 +229,10 @@ export function createBridge(deps: BridgeDeps): Bridge {
     round.sessionTitle = info.title;
     if (info.workspace) round.workspace = info.workspace;
     // The callback req_id is short-lived: acknowledge before activating the Session.
-    await reply(message, round, `已提交到《${oneLine(displayTitle(info.title))}》，本轮完成后会通知你。`);
+    await reply(message, round, [
+      `${title('🚀', '已提交给 DSH')} · ${sessionLabel(info.title)}`,
+      '> 本轮完成后我会在这里通知你；发送 /cancel 可以停止本轮。',
+    ].join('\n'));
     if (stale(ticket) || lifetime.signal.aborted || !policy.evaluate(message.chat, message.user).accepted) {
       rounds.complete(round, 'interrupted');
       return;
@@ -326,24 +333,24 @@ export function createBridge(deps: BridgeDeps): Bridge {
       await router.ensure(parts(message));
     } catch (error) {
       journal.write({ event: 'binding.error', level: 'warn', chatId: message.chat, userId: message.user, error });
-      await reply(message, round, '本插件的会话绑定数量已达上限，请在配置页清理后再试。');
+      await reply(message, round, `${title('⚠️', '会话绑定数量已达上限')}\n\n请在 DSH 插件的配置页清理绑定后再试。`);
       rounds.complete(round, 'blocked', { response: { reason: 'binding-limit' } });
       return;
     }
     if (stale(ticket)) return;
     if (message.msgtype !== 'text') {
-      await reply(message, round, '目前只支持文本消息。');
+      await reply(message, round, `${title('⚠️', '目前只支持文本消息')}\n\n图片、语音、文件暂时无法提交给 DSH。`);
       rounds.complete(round, 'unsupported');
       return;
     }
     const content = message.text?.trim() ?? '';
     if (!content) {
-      await reply(message, round, '消息内容为空。');
+      await reply(message, round, `${title('⚠️', '消息内容为空')}\n\n发送文字内容即可继续这个会话。`);
       rounds.complete(round, 'unsupported');
       return;
     }
     if (byteLength(content) > MAX_INBOUND_BYTES) {
-      await reply(message, round, '消息过长，请缩短后再发送。');
+      await reply(message, round, title('⚠️', '消息过长') + '\n\n请缩短后再发送。');
       rounds.complete(round, 'blocked', { response: { reason: 'too-long' } });
       return;
     }

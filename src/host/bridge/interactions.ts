@@ -129,7 +129,7 @@ export type ParsedAnswer =
 /** Map `1`, `1,3`, an exact option label, or free text onto one answer item. */
 export function parseAnswer(question: Question, raw: string): ParsedAnswer {
   const value = raw.trim();
-  if (!value) return { ok: false, error: '答案不能为空。' };
+  if (!value) return { ok: false, error: '答案不能为空' };
   const options = question.options ?? [];
   const indices = value.split(/[,，、\s]+/).filter(Boolean).map(Number);
   let selected: string[] = [];
@@ -138,6 +138,6 @@ export function parseAnswer(question: Question, raw: string): ParsedAnswer {
   } else if (options.some(option => option.label === value)) {
     selected = [value];
   }
-  if (selected.length > 1 && !question.multiSelect) return { ok: false, error: '这道题只能选择一个选项。' };
+  if (selected.length > 1 && !question.multiSelect) return { ok: false, error: '这道题只能选择一个选项' };
   return { ok: true, item: { id: question.id, selected, ...(selected.length ? {} : { custom: value }) } };
 }

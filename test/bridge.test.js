@@ -92,7 +92,7 @@ test('first contact creates a binding, a Session in the plugin Workspace, and pr
   assert.equal(binding.kind, 'user');
   assert.equal(binding.id, 'alice');
   assert.equal(binding.sessionId, 'session-created-1');
-  assert.match(lastReply(h), /已提交到/);
+  assert.match(lastReply(h), /已提交给 DSH/);
   assert.equal(h.journal.find('binding.session.created').length, 1);
 
   // The binding is durable: a second message reuses the same Session.
@@ -335,7 +335,7 @@ test('a stale code can never answer a newer question with the same id', async ()
   const secondCode = h.client.sends.at(-1).body.markdown.content.match(/\/answer ([a-z0-9]{6})/)[1];
   assert.notEqual(secondCode, firstCode);
   await h.send(`/answer ${firstCode} stale`);
-  assert.match(lastReply(h), /验证码无效/);
+  assert.match(lastReply(h), /没有对应的待回答提问/);
   await h.send(`/answer ${secondCode} fresh`);
   assert.equal((await second).answers[0].custom, 'fresh');
   h.stop();
@@ -383,7 +383,7 @@ test('each remote approval has a fresh code; an old code cannot approve a later 
   const secondCode = h.client.sends.at(-1).body.markdown.content.match(/\/approve ([a-z0-9]{6})/)[1];
   assert.notEqual(secondCode, firstCode);
   await h.send(`/approve ${firstCode}`);
-  assert.match(lastReply(h), /验证码无效/);
+  assert.match(lastReply(h), /没有可在此单聊审批的请求/);
   await h.send(`/approve ${secondCode}`, { chat: 'group-1', user: 'alice' });
   assert.match(lastReply(h), /没有可在此单聊审批/);
   await h.send(`/approve ${secondCode}`);
@@ -416,7 +416,7 @@ test('a prompt round records the request, the reply, the DSH response and the tu
   assert.equal(round.sessionId, 'session-created-1');
   assert.equal(round.request.text, '请修复登录');
   assert.equal(round.response.assistant, '已修复');
-  assert.match(round.response.replies[0], /已提交到/);
+  assert.match(round.response.replies[0], /已提交给 DSH/);
   assert.deepEqual(round.response.notifiedChats, ['alice']);
   assert.deepEqual(round.metadata.toolCalls, { bash: 1 });
   assert.equal(round.metadata.turnDurationMs, 3000);

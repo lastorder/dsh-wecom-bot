@@ -91,6 +91,27 @@ DSH 加载 `dist/` 中的构建产物：Host 入口 `dist/host/index.js`，浏�
 - 验证码为 6 位一次性随机码，绑定到具体的那次提问/审批，过期或旧码无法重放。
 - **引用定位的原理**：企业微信的引用回调只回传被引用消息的内容，不回传它的 ID，所以每条通知末尾都带一行 `/use <会话ID片段>` 的提示；插件在收到引用时从这段被回传的文字里把 ID 片段抠出来，按 `/use` 同样的规则解析成会话。无法解析（比如引用了一条无关消息，或该会话不在你的 Workspace 范围内）时什么都不会改变。
 
+### 消息排版
+
+命令回复与通知都由同一套模板生成（[`notices.ts`](src/host/bridge/notices.ts)），结构固定、一眼能扫：
+
+```markdown
+**🔄 已切换到《Alpha 任务》**
+
+- **Workspace**：dsh-workpet
+- **会话 ID**：`session-1ab2cd3ef4…`
+
+现在直接发送消息即可继续该会话；发送 `/reset` 可以回到自己的专属会话。
+```
+
+- 第一行是 `**🏷 标题** · 《会话名》`——谁在说话、哪件事、属于哪个会话；命令名用 **粗体**，ID 与可以照抄的命令用 `行内代码`；
+- 上下文（Workspace、用时、步数、`/cancel` 提示）放在引用块（`>`）里；
+- 明细一律是扁平的 `- **字段**：值`，**不用表格、不用嵌套列表**（企业微信的 Markdown 渲染器不支持，会原样输出）；
+- 每条与会话有关的通知末尾都带 `引用（回复）这条消息，或发送 /use <会话ID片段>`，引用它就能继续那个会话；
+- 所有来自 DSH 的字符串（会话标题、工具名、提问文字）都会把 Markdown 元字符换成同形字符，不会被渲染成链接、@ 提及或标签。
+
+发送 `/help` 即可在企业微信里看到全部命令。
+
 ## JSONL 对话日志
 
 位置：`<DSH home>/wecom-bot/logs/YYYY-MM-DD.jsonl`（DSH home 为 `$DSH_HOME`，默认 `~/.dsh`），目录权限 `0700`、文件 `0600`，按保留天数（默认 14 天）自动清理。每行一个 JSON 对象，公共字段 `ts`、`seq`、`level`、`event`。
@@ -102,7 +123,7 @@ DSH 加载 `dist/` 中的构建产物：Host 入口 `dist/host/index.js`，浏�
  "chatId":"zhangsan","userId":"zhangsan","chatType":"single","msgId":"…",
  "sessionId":"…","sessionTitle":"修复登录 Bug","workspace":"企业微信","requestId":"…",
  "request":{"msgtype":"text","text":"帮我修复登录"},
- "response":{"replies":["已提交到《修复登录 Bug》…"],"reason":"completed","assistant":"已修复……","notifiedChats":["zhangsan"]},
+ "response":{"replies":["**🚀 已提交给 DSH** · 《修复登录 Bug》…"],"reason":"completed","assistant":"已修复……","notifiedChats":["zhangsan"]},
  "metadata":{"turn":3,"model":{"provider":"…","model":"…"},"steps":4,"toolCalls":{"bash":2},"turnDurationMs":51234},
  "timing":{"receivedAt":"…","submittedAt":"…","completedAt":"…","totalMs":53012}}
 ```
