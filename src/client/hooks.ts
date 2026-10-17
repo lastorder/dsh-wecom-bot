@@ -1,7 +1,7 @@
 /** React hooks binding the page to DSH Config forms, credentials and the state route. */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
-import type { BridgeStateView } from '../shared/protocol.ts';
-import { describeCredential, fetchState } from './api.ts';
+import type { BridgeStateView, RoutingOp } from '../shared/protocol.ts';
+import { describeCredential, fetchState, postRouting } from './api.ts';
 import type { ClientRemote, ConfigFormScope, FormSnapshot } from './types.ts';
 
 export function useFormSnapshot(scope: ConfigFormScope): FormSnapshot {
@@ -85,4 +85,45 @@ export function useSecretStatus(remote: ClientRemote | undefined, ref: string): 
   }), [remote, ref, refresh]);
 
   return { configured, known, refresh };
+}
+
+export interface RoutingApply {
+  /** Key of the edit in flight; empty when idle. */
+  readonly busy: string;
+  readonly feedback?: { readonly tone: 'ok' | 'error'; readonly text: string };
+  /** Apply immediate group/member edits; resolves false (and shows why) on failure. */
+  apply(key: string, ops: readonly RoutingOp[], label: string): Promise<boolean>;
+  dismiss(): void;
+}
+
+/**
+ * Apply one immediate edit and report the outcome.
+ *
+ * The groups, the rejected senders and the administrator notes all edit Host
+ * state rather than the Config form, so they share the same "it is already
+ * applied" feedback — and the same rule that a failed edit is shown in place
+ * instead of silently snapping back.
+ */
+export function useRoutingApply(onChanged: () => void): RoutingApply {
+  const [busy, setBusy] = useState('');
+  const [feedback, setFeedback] = useState<RoutingApply['feedback']>();
+
+  const apply = useCallback(async (key: string, ops: readonly RoutingOp[], label: string): Promise<boolean> => {
+    setBusy(key);
+    setFeedback(undefined);
+    try {
+      await postRouting(ops);
+      setFeedback({ tone: 'ok', text: `${label}已生效。` });
+      onChanged();
+      return true;
+    } catch (cause) {
+      setFeedback({ tone: 'error', text: cause instanceof Error ? cause.message : String(cause) });
+      return false;
+    } finally {
+      setBusy('');
+    }
+  }, [onChanged]);
+
+  const dismiss = useCallback(() => setFeedback(undefined), []);
+  return { busy, feedback, apply, dismiss };
 }

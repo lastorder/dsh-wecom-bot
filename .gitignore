@@ -4,5 +4,7 @@ node_modules/
 .env.*
 *.log
 .DS_Store
-preview/
+# `pnpm run preview` writes here; the screenshots are committed because the
+# README links them, the generated HTML is not.
+preview/index.html
 dist/

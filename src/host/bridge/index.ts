@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { WSClient, WsFrame } from '@wecom/aibot-node-sdk';
+import { DEFAULT_GROUP_ID } from '../../shared/protocol.js';
 import { createCatalogService, type CatalogService } from '../catalog.js';
 import type { BridgeSettings } from '../config.js';
-import { bindingKey, bindingKeyFor } from '../bindings.js';
+import { bindingKey, bindingKeyFor } from '../routing-store.js';
 import type {
   ApprovalOutcome, ApprovalRequest, HostContext, Logger, QuestionAnswer, QuestionRequest,
   SessionEvent, SessionHandle,
@@ -59,6 +60,8 @@ export interface BridgeDeps {
 export interface Bridge {
   start(): () => void;
   handleFrame(frame: WsFrame): Promise<void>;
+  /** Resolves once every queued message has been handled (see `serialize`). */
+  whenIdle(): Promise<void>;
   /** Notify WeCom about a finished turn; resolves to the notified conversations. */
   onTurnEnd(session: SessionHandle, end: SessionEvent, summary: () => TurnSummary): Promise<readonly string[]>;
   onQuestion(request: QuestionRequest, next: () => Promise<QuestionAnswer>): Promise<QuestionAnswer>;
@@ -81,7 +84,9 @@ export function createBridge(deps: BridgeDeps): Bridge {
     registry: () => undefined,
   });
 
-  const policy = createAccessPolicy(settings);
+  const policy = createAccessPolicy(settings, {
+    memberOf: message => router.store.get(bindingKeyFor(message))?.groupId,
+  });
   const directory = createSessionDirectory(catalogs, {
     allow: entry => policy.adminWorkspaceAllowed(entry.group.path),
   });
@@ -107,10 +112,14 @@ export function createBridge(deps: BridgeDeps): Bridge {
         selection.clear(message.chat, message.user);
       }
     }
-    const binding = router.store.get(bindingKeyFor(parts(message)));
+    const key = bindingKeyFor(parts(message));
+    const binding = router.store.get(key);
+    const note = router.store.label(key);
     return {
       ...(binding?.sessionId ? { sessionId: binding.sessionId } : {}),
       ...(binding ? { binding } : {}),
+      ...(binding ? { group: router.store.group(binding.groupId) } : {}),
+      ...(note ? { note } : {}),
       switched: false,
     };
   }
@@ -121,7 +130,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
   > {
     const switched = await currentTarget(message);
     if (switched.switched && switched.sessionId) return { ok: true, sessionId: switched.sessionId };
-    const routed = await router.route(parts(message));
+    const routed = await router.route(parts(message), switched.binding?.groupId ?? DEFAULT_GROUP_ID);
     if (!routed.ok || !routed.sessionId) {
       return { ok: false, message: routed.message ?? '无法为你创建专属会话，请稍后重试。' };
     }
@@ -136,9 +145,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
 
   /** Single chats are the only place a tool call may be authorized. */
   function isPrivateChat(chat: string): boolean {
-    const binding = router.store.get(bindingKey('user', chat));
-    if (binding) return true;
-    return observations.snapshot().chats.some(entry => entry.id === chat && entry.chatType === 'single');
+    return Boolean(router.store.get(bindingKey('user', chat))) || observations.isPrivateChat(chat);
   }
 
   /**
@@ -195,7 +202,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       selection.clear(message.chat, message.user);
       const binding = router.store.get(bindingKeyFor(parts(message)));
       if (!binding) {
-        await router.ensure(parts(message));
+        await router.ensure(parts(message), DEFAULT_GROUP_ID);
         return;
       }
       if (binding.sessionId) await router.store.update(bindingKey(binding.kind, binding.id), { sessionId: '' });
@@ -233,7 +240,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       `${title('🚀', '已提交给 DSH')} · ${sessionLabel(info.title)}`,
       '> 本轮完成后我会在这里通知你；发送 /cancel 可以停止本轮。',
     ].join('\n'));
-    if (stale(ticket) || lifetime.signal.aborted || !policy.evaluate(message.chat, message.user).accepted) {
+    if (stale(ticket) || lifetime.signal.aborted || !policy.evaluate(parts(message)).accepted) {
       rounds.complete(round, 'interrupted');
       return;
     }
@@ -292,6 +299,41 @@ export function createBridge(deps: BridgeDeps): Bridge {
     });
   }
 
+  /**
+   * One in-flight message per conversation, in arrival order.
+   *
+   * `handleFrame` awaits real work (routing store writes, Session creation,
+   * the prompt) while the socket hands frames over as fast as WeCom sends
+   * them. Two messages typed in a row therefore used to overlap: both saw a
+   * member with no Session yet, both created one, and the second message was
+   * submitted to a Session nobody was bound to — the person's two messages
+   * ended up in two conversations in the sidebar. Serializing per chat keeps
+   * the order someone typed in, without making one conversation wait behind
+   * another's Session creation.
+   */
+  const chains = new Map<string, Promise<void>>();
+
+  function serialize(chat: string, task: () => Promise<void>): Promise<void> {
+    const previous = chains.get(chat) ?? Promise.resolve();
+    // `then(task, task)`: a failed message must not stall the conversation.
+    const run = previous.then(task, task);
+    // The chain tail never rejects, so one bad frame cannot poison the queue;
+    // the caller still sees the rejection.
+    const tail = run.catch(() => {});
+    chains.set(chat, tail);
+    void tail.then(() => { if (chains.get(chat) === tail) chains.delete(chat); });
+    return run;
+  }
+
+  /** Resolves once every queued message has been handled. */
+  async function whenIdle(): Promise<void> {
+    for (;;) {
+      const pending = [...chains.values()];
+      if (!pending.length) return;
+      await Promise.all(pending);
+    }
+  }
+
   async function handleFrame(frame: WsFrame): Promise<void> {
     if (closed) return;
     const message = parseInbound(frame, settings.botId);
@@ -303,11 +345,20 @@ export function createBridge(deps: BridgeDeps): Bridge {
       journal.write({ event: 'wecom.message.duplicate', level: 'debug', msgId: message.msgId, chatId: message.chat, userId: message.user });
       return;
     }
-    const decision = policy.evaluate(message.chat, message.user);
+    return await serialize(message.chat, () => handleMessage(message));
+  }
+
+  async function handleMessage(message: InboundMessage): Promise<void> {
+    // A queued message may wait out a bridge rebuild; drop it instead of
+    // spending a round on a conversation that no longer has a live socket.
+    if (closed) return;
+    const decision = policy.evaluate(parts(message));
     observations.record({
       chat: message.chat, user: message.user, chatType: message.chatType,
-      decision: decision.accepted ? 'accepted' : 'rejected',
-      ...(decision.accepted ? {} : { reason: decision.reason }),
+      accepted: decision.accepted,
+      // Only a refused message keeps its text, so the page can show the
+      // operator what an unknown sender actually wrote.
+      ...(message.text ? { text: message.text } : {}),
     });
     status.count('received');
     const round = rounds.begin({
@@ -322,18 +373,20 @@ export function createBridge(deps: BridgeDeps): Bridge {
     });
     if (!decision.accepted) {
       // Never answer a rejected sender: silence does not confirm the Bot's reach.
+      // The settings page lists it under 「未授权用户」, where assigning it to a
+      // group is what authorizes it.
       status.count('rejected');
       rounds.complete(round, 'rejected', { response: { reason: decision.reason } });
       return;
     }
-    observations.markEligible(message.chat, message.user);
     const ticket = generation;
     try {
-      // First contact creates the conversation's binding; it decides routing later.
-      await router.ensure(parts(message));
+      // Members were created by the page (or implicitly for an administrator);
+      // this only records the implicit ones before routing.
+      await router.ensure(parts(message), decision.groupId);
     } catch (error) {
       journal.write({ event: 'binding.error', level: 'warn', chatId: message.chat, userId: message.user, error });
-      await reply(message, round, `${title('⚠️', '会话绑定数量已达上限')}\n\n请在 DSH 插件的配置页清理绑定后再试。`);
+      await reply(message, round, `${title('⚠️', '成员数量已达上限')}\n\n请在 DSH 插件的配置页清理后再试。`);
       rounds.complete(round, 'blocked', { response: { reason: 'binding-limit' } });
       return;
     }
@@ -409,7 +462,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
     const info = await directory.describe(sessionId);
     // Only a single chat with an allowlisted person may authorize a tool call;
     // group members never can.
-    const privateChats = chats.filter(chat => policy.userAllowed(chat) && isPrivateChat(chat));
+    const privateChats = chats.filter(chat => isPrivateChat(chat));
     const meta = { sessionId, toolName: request.toolName, ...(request.callId ? { callId: request.callId } : {}) };
     if (!settings.remoteApprovals || !privateChats.length) {
       journal.write({ event: 'dsh.approval', ...meta, remote: false, chats });
@@ -490,5 +543,5 @@ export function createBridge(deps: BridgeDeps): Bridge {
     return stop;
   }
 
-  return { start, handleFrame, onTurnEnd, onQuestion, onApproval, directory, observations, rounds };
+  return { start, handleFrame, whenIdle, onTurnEnd, onQuestion, onApproval, directory, observations, rounds };
 }

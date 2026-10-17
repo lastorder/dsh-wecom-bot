@@ -4,12 +4,6 @@
 export interface StoredConfig {
   readonly botId: string;
   readonly secretEnv: string;
-  readonly chatIds: readonly string[];
-  readonly allowedUserIds: readonly string[];
-  readonly defaultWorkspace: string;
-  readonly defaultProvider: string;
-  readonly defaultModel: string;
-  readonly defaultReasoningEffort: string;
   readonly adminUserIds: readonly string[];
   readonly adminWorkspaces: readonly string[];
   readonly wsUrl: string;

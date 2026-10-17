@@ -7,8 +7,35 @@ import { sanitize } from '../dist/host/journal.js';
 
 export const tick = () => new Promise(resolve => setImmediate(resolve));
 
+/**
+ * Let pending async work land (the outbox's drain, a journal flush).
+ *
+ * Every round is a real event-loop turn plus one timer turn: `setImmediate`
+ * alone keeps the loop turning without giving timers a chance, and work that is
+ * queued behind them then never shows up in the assertions.
+ */
 export async function settle(rounds = 12) {
   for (let i = 0; i < rounds; i++) await tick();
+  await new Promise(resolve => setTimeout(resolve, 0));
+}
+
+/**
+ * Wait for a condition that depends on real async work (a file read, a queue
+ * drain).
+ *
+ * The budget is wall-clock, not a tick count: the same chain needs far more
+ * turns on a loaded machine or a slower filesystem, and a tick-counted budget
+ * spins through its whole allowance in a couple of milliseconds without ever
+ * waiting for the work it is watching. `node --test` runs test files in
+ * parallel, which is exactly that loaded machine.
+ */
+export async function until(predicate, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (predicate()) return true;
+    if (Date.now() >= deadline) return Boolean(predicate());
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
 }
 
 /** Journal that keeps sanitized records in memory, exactly as they would be written. */
@@ -38,7 +65,7 @@ export function fakeClient() {
   return client;
 }
 
-/** One workspace directory per test run; the binding store writes a real file. */
+/** One workspace directory per test run; the routing store writes a real file. */
 export const scratchRoot = realpathSync(mkdtempSync(join(tmpdir(), 'wecom-bot-test-')));
 let scratchCounter = 0;
 export function scratchDirectory() {
@@ -63,7 +90,7 @@ export const fakeModelCatalog = {
   failures: [],
 };
 
-export function fakeWorkspaceRegistry(workspaces = []) {
+export function fakeWorkspaceRegistry(workspaces = [], archived = [], pinned = []) {
   const rows = workspaces.map(workspace => ({ sessionIds: [], ...workspace }));
   return {
     rows,
@@ -77,8 +104,8 @@ export function fakeWorkspaceRegistry(workspaces = []) {
       return created;
     },
     async resolveByPath(path) { return rows.find(row => row.path === path); },
-    archivedSessionIds: [],
-    pinnedSessionIds: [],
+    archivedSessionIds: archived,
+    pinnedSessionIds: pinned,
   };
 }
 
@@ -101,7 +128,7 @@ export function fakeHost({ sessions, workspaces, archived = [], pinned = [], def
     { sessionId: 's1', updatedAt: 200, running: false, blank: false, cwd: '/w/alpha', projections: { values: { title: 'Alpha 任务' } } },
     { sessionId: 's2', updatedAt: 100, running: true, blank: false, cwd: '/w/beta', projections: { values: { title: 'Beta 任务' } } },
   ];
-  const registry = workspaces === undefined ? undefined : fakeWorkspaceRegistry(workspaces);
+  const registry = workspaces === undefined ? undefined : fakeWorkspaceRegistry(workspaces, archived, pinned);
   const defaultModelService = {
     currentSelection: () => ({ ...currentDefault }),
     async saveSelection(next) { defaultSaves.push({ ...next }); currentDefault = { ...next }; },
@@ -188,8 +215,12 @@ export function finishedSession(id, { turn = 1, text = '完成', reason = 'compl
 
 export const baseSettings = {
   botId: 'bot', secretRef: 'WECOM_BOT_SECRET', wsUrl: '',
-  chatIds: [], allowedUserIds: [],
-  defaultWorkspace: '', defaultProvider: '', defaultModel: '', defaultReasoningEffort: '',
   adminUserIds: [], adminWorkspaces: [],
   questionTimeoutMs: 1000, remoteApprovals: false,
 };
+
+/** A routing store plus the standard services every Host test needs. */
+export async function fakeRoutingStore(extra = {}) {
+  const { createRoutingStore } = await import('../dist/host/routing-store.js');
+  return createRoutingStore({ directory: extra.directory ?? scratchDirectory(), onError: () => {}, ...extra });
+}

@@ -176,13 +176,20 @@ export function createWorkspaceService(options: WorkspaceServiceOptions): Worksp
     list() {
       const found = registry();
       if (!found) return [];
-      return found.list().map(workspace => ({
-        id: String(workspace.id),
-        path: workspace.path,
-        title: workspace.title,
-        pluginOwned: owned(workspace.path),
-        sessionCount: workspace.sessionIds.length,
-      }));
+      // Archived Sessions keep their Workspace assignment but can never
+      // notify anybody, so the page counts and shows only live ones.
+      const archived = new Set(found.archivedSessionIds ?? []);
+      return found.list().map(workspace => {
+        const active = workspace.sessionIds.filter(id => !archived.has(id));
+        return {
+          id: String(workspace.id),
+          path: workspace.path,
+          title: workspace.title,
+          pluginOwned: owned(workspace.path),
+          sessionCount: active.length,
+          archivedSessionCount: workspace.sessionIds.length - active.length,
+        };
+      });
     },
     invalidate() { cache.clear(); },
   };

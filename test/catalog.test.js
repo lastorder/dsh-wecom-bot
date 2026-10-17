@@ -67,19 +67,43 @@ test('catalog service caches for its TTL, shares in-flight reads and supports fo
   assert.equal(calls, 4);
 });
 
-test('observations are bounded, expire, keep decisions, and track eligible sources separately', () => {
+test('observations are bounded, expire, and keep only refused text', () => {
   let clock = 1000;
-  const store = createObservationStore({ maxEntries: 3, ttlMs: 100, now: () => clock });
-  for (let i = 0; i < 5; i++) store.record({ chat: `room-${i}`, user: `user-${i}`, chatType: 'group', decision: i % 2 ? 'rejected' : 'accepted', ...(i % 2 ? { reason: 'user' } : {}) });
-  let snapshot = store.snapshot();
-  assert.deepEqual(snapshot.users.map(u => u.id), ['user-4', 'user-3', 'user-2']);
-  assert.deepEqual(snapshot.chats[1], { id: 'room-3', firstSeenAt: 1000, lastSeenAt: 1000, messages: 1, decision: 'rejected', reason: 'user', chatType: 'group', via: 'user-3' });
-  store.record({ chat: 'user-4', user: 'user-4', chatType: 'single', decision: 'accepted' });
-  assert.equal(store.snapshot().users[0].messages, 2);
-  store.markEligible('user-4', 'user-4');
-  assert.deepEqual(store.eligibleSources(), [{ chat: 'user-4', user: 'user-4' }]);
+  const store = createObservationStore({ ttlMs: 100, maxTextChars: 8, now: () => clock });
+  const long = '消息 3 的内容很长很长';
+  for (let i = 0; i < 4; i++) {
+    store.record({ chat: `room-${i}`, user: `user-${i}`, chatType: 'group', accepted: i % 2 === 0, text: `消息 ${i} 的内容很长很长` });
+  }
+  // A group message is remembered as its conversation; only refusals are
+  // listed, newest first, each with a bounded single-line excerpt.
+  assert.deepEqual(store.rejected(() => false).map(row => row.id), ['room-3', 'room-1']);
+  assert.equal(store.rejected(() => false)[0].text, `${long.slice(0, 8)}…`);
+  assert.equal(store.rejected(() => false)[0].chatType, 'group');
+  assert.deepEqual(store.stats('group', 'room-2'), { messages: 1, lastSeenAt: 1000 }, 'accepted traffic is counted');
+
+  // An accepted sender's text is dropped but its counters survive.
+  store.record({ chat: 'room-3', user: 'user-3', chatType: 'group', accepted: true, text: '这次通过了' });
+  assert.deepEqual(store.stats('group', 'room-3'), { messages: 2, lastSeenAt: 1000 });
+  assert.deepEqual(store.rejected(() => false).map(row => row.id), ['room-1']);
+
+  // A private chat is remembered by its sender.
+  assert.equal(store.isPrivateChat('user-9'), false);
+  store.record({ chat: 'user-9', user: 'user-9', chatType: 'single', accepted: false, text: '你好' });
+  assert.equal(store.isPrivateChat('user-9'), true);
+  assert.deepEqual(store.stats('user', 'user-9'), { messages: 1, lastSeenAt: 1000 });
+  assert.deepEqual(store.rejected(() => false).map(row => row.key), ['user:user-9', 'group:room-1']);
+
+  // An authorized sender disappears from the refusal list without being forgotten.
+  assert.deepEqual(store.rejected(key => key === 'user:user-9').map(row => row.key), ['group:room-1']);
+
+  // Nothing survives its TTL.
   clock += 101;
-  snapshot = store.snapshot();
-  assert.deepEqual(snapshot, { users: [], chats: [] });
-  assert.deepEqual(store.eligibleSources(), []);
+  assert.deepEqual(store.rejected(() => false), []);
+  assert.deepEqual(store.stats('group', 'room-3'), { messages: 0 });
+  assert.equal(store.isPrivateChat('user-9'), false);
+
+  // The oldest principals are evicted once the cap is reached.
+  const small = createObservationStore({ maxEntries: 2, now: () => clock });
+  for (let i = 0; i < 3; i++) small.record({ chat: `r${i}`, user: `u${i}`, chatType: 'group', accepted: false });
+  assert.deepEqual(small.rejected(() => false).map(row => row.id), ['r2', 'r1']);
 });

@@ -4,7 +4,7 @@ import type { JournalInfo } from '../../shared/protocol.ts';
 import type { Draft, FieldErrors } from '../model.ts';
 import { CardHead, Field } from './ui.tsx';
 
-/** Step 4 (collapsed): approvals, timeouts, custom endpoint and the JSONL journal. */
+/** Step 5 (collapsed): approvals, timeouts, custom endpoint and the JSONL journal. */
 export function AdvancedCard({ draft, errors, journal, disabled, onChange }: {
   draft: Draft;
   errors: FieldErrors;
@@ -22,7 +22,7 @@ export function AdvancedCard({ draft, errors, journal, disabled, onChange }: {
     <details className="wcb-card wcb-details">
       <summary>
         <CardHead
-          step={6}
+          step={5}
           title={<>高级设置 {draft.remoteApprovals && <Tag tone="warning">远程审批已开启</Tag>}</>}
           description="远程审批、等待时间、自定义连接地址与对话日志。均可保持默认。"
           aside={<span className="wcb-chevron"><IconChevronRightOutlineRegular size={16} /></span>}

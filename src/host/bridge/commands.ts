@@ -1,4 +1,4 @@
-import type { BindingRecord } from '../../shared/protocol.js';
+import type { BindingRecord, GroupRecord } from '../../shared/protocol.js';
 import type { SessionController } from '../dsh.js';
 import type { Journal } from '../journal.js';
 import type { Round } from '../rounds.js';
@@ -41,6 +41,10 @@ export interface TargetInfo {
   /** Empty when the sender has no Session yet. */
   readonly sessionId?: string;
   readonly binding?: BindingRecord;
+  /** Operator note for this sender, whether or not they are a member. */
+  readonly note?: string;
+  /** The user group this sender belongs to, when they are a member. */
+  readonly group?: GroupRecord;
   /** True when an administrator switch is in effect instead of the binding. */
   readonly switched: boolean;
 }
@@ -108,6 +112,7 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
           : bullet('当前会话', '单聊（chatid 即你的 userid）'),
         bullet('管理员', isAdmin ? '是' : '否'),
       ];
+      if (target.group) lines.push(bullet('分组', inline(target.group.name, 60)));
       if (target.binding) {
         lines.push(bullet('绑定', `${BINDING_LABEL[target.binding.kind]} ${code(inline(target.binding.id, 120))}`));
       }
@@ -117,7 +122,7 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
           ? '你是本插件的管理员：可以切换会话，并按 Workspace 接收通知。'
           : `你不是本插件的管理员：消息只会进入你自己的专属会话，如需新的会话请发送 ${code('/new')}。`,
         '',
-        '绑定、Workspace 与模型都可以在 DSH 的插件主页里查看和调整。',
+        '分组、Workspace 与模型都可以在 DSH 的插件主页里查看和调整。',
       );
       await reply(lines.join('\n'));
       return;
@@ -138,11 +143,10 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
         ...(info?.workspace ? [bullet('Workspace', inline(info.workspace, 120))] : []),
         ...(info?.model ? [bullet('模型', code(`${info.model.provider}/${info.model.model}`))] : []),
       ];
+      if (target.group) lines.push(bullet('分组', inline(target.group.name, 60)));
       if (target.binding) {
-        const scope = target.binding.workspace
-          ? `Workspace ${inline(target.binding.workspace, 120)}`
-          : '插件默认 Workspace';
-        lines.push(bullet('绑定', `${BINDING_LABEL[target.binding.kind]} ${code(inline(target.binding.id, 120))} · ${scope}`));
+        const note = target.note ? `（${inline(target.note, 40)}）` : '';
+        lines.push(bullet('绑定', `${BINDING_LABEL[target.binding.kind]} ${code(inline(target.binding.id, 120))}${note}`));
       }
       lines.push(bullet('待处理', `${questions} 个提问 · ${approvals} 个审批`));
       if (target.switched) {

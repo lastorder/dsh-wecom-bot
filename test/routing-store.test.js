@@ -1,0 +1,291 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  bindingKey, bindingKeyFor, createRoutingStore, normalizeLabel, parseBindingKey, validBindingId,
+} from '../dist/host/routing-store.js';
+
+const directory = async () => await mkdtemp(join(tmpdir(), 'wecom-routing-'));
+const fail = () => assert.fail('no error expected');
+
+test('keys are namespaced by kind, and only valid WeCom ids are accepted', () => {
+  assert.equal(bindingKey('user', 'alice'), 'user:alice');
+  assert.equal(bindingKey('group', 'chat-1'), 'group:chat-1');
+  assert.equal(bindingKeyFor({ chat: 'alice', user: 'alice', chatType: 'single' }), 'user:alice');
+  assert.equal(bindingKeyFor({ chat: 'chat-1', user: 'alice', chatType: 'group' }), 'group:chat-1');
+  assert.deepEqual(parseBindingKey('group:chat-1'), { kind: 'group', id: 'chat-1' });
+  assert.deepEqual(parseBindingKey('user:a:b'), { kind: 'user', id: 'a:b' });
+  assert.equal(parseBindingKey('nope:1'), undefined);
+  assert.equal(parseBindingKey(''), undefined);
+  assert.equal(validBindingId('alice'), true);
+  assert.equal(validBindingId('  '), false);
+  assert.equal(validBindingId('bad\nid'), false);
+  assert.equal(validBindingId('x'.repeat(513)), false);
+  assert.equal(validBindingId(42), false);
+});
+
+test('a note is one bounded line, or nothing at all', () => {
+  assert.equal(normalizeLabel('  张三  '), '张三');
+  assert.equal(normalizeLabel('张\n三'), '张 三');
+  assert.equal(normalizeLabel('a'.repeat(200)).length, 60);
+  assert.equal(normalizeLabel('bad\u0000note'), '');
+  assert.equal(normalizeLabel(42), '');
+  assert.equal(normalizeLabel(null), '');
+});
+
+test('the default group always exists and cannot be removed', async () => {
+  const dir = await directory();
+  const store = createRoutingStore({ directory: dir, onError: fail });
+  await store.load();
+  assert.deepEqual(store.groups().map(group => group.id), ['default']);
+  assert.equal(store.group('default').name, '默认分组');
+  assert.deepEqual(await store.removeGroup('default'), { ok: false, removed: 0 });
+  assert.equal(store.group('default').id, 'default');
+  // It is created in memory, so a file only appears once something is written.
+  assert.equal(await store.updateGroup('default', { workspace: '/srv/app' }) !== undefined, true);
+  await store.flush();
+  const parsed = JSON.parse(await readFile(store.file, 'utf8'));
+  assert.equal(parsed.version, 3);
+  assert.deepEqual(parsed.groups.map(group => group.id), ['default']);
+});
+
+test('groups are created, renamed and described', async () => {
+  const dir = await directory();
+  const store = createRoutingStore({ directory: dir, now: () => 1000, onError: fail });
+  await store.load();
+  const created = await store.createGroup('  朋友  ');
+  assert.equal(created.name, '朋友');
+  assert.equal(created.workspace, '');
+  assert.notEqual(created.id, 'default');
+  assert.equal(store.groups().length, 2);
+  assert.equal(await store.updateGroup('default', { name: '  默认  ' }).then(group => group.name), '默认');
+  assert.equal(await store.updateGroup('default', { name: '   ' }).then(group => group.name), '默认', 'a blank rename keeps the old name');
+  assert.equal(await store.updateGroup('nope', { name: 'x' }), undefined);
+  assert.deepEqual(store.groups().map(group => group.name).sort(), ['朋友', '默认'].sort());
+});
+
+test('a member is created once per principal and survives a reload', async () => {
+  const dir = await directory();
+  const store = createRoutingStore({ directory: dir, onError: fail });
+  await store.load();
+  const group = await store.createGroup('客人');
+  const first = await store.create('user', 'alice', { groupId: group.id, label: '爱丽丝' });
+  assert.equal(first.kind, 'user');
+  assert.equal(first.id, 'alice');
+  assert.equal(first.groupId, group.id);
+  assert.equal(first.sessionId, '');
+  assert.equal(store.label('user:alice'), '爱丽丝', 'a note typed while authorizing belongs to the person');
+  const again = await store.create('user', 'alice', { groupId: 'default', label: '爱丽丝' });
+  assert.equal(again.sessionId, '', 'the same row, moved rather than duplicated');
+  assert.equal(again.groupId, 'default');
+  await store.create('group', 'chat-1', { groupId: 'default' });
+  await store.update('user:alice', { sessionId: 'session-1' });
+  await store.setLabel('user:alice', ' 新备注 ');
+  await store.flush();
+  assert.deepEqual(store.bindings().map(record => `${record.kind}:${record.id}`), ['user:alice', 'group:chat-1']);
+  assert.equal(store.label('user:alice'), '新备注');
+  assert.deepEqual(store.inGroup('default').map(record => record.id), ['alice', 'chat-1']);
+  const raw = await readFile(store.file, 'utf8');
+  assert.match(raw, /\n$/, 'the file ends with a newline');
+  assert.equal((await stat(store.file)).mode & 0o777, 0o600, 'the file is private to the user');
+
+  const reloaded = createRoutingStore({ directory: dir, onError: fail });
+  await reloaded.load();
+  assert.deepEqual(reloaded.bindings().map(record => record.sessionId), ['session-1', '']);
+  assert.equal(reloaded.label('user:alice'), '新备注', 'notes are durable');
+  assert.deepEqual(reloaded.forSession('session-1').map(record => record.id), ['alice']);
+  assert.deepEqual(reloaded.groups().map(group => group.name).sort(), ['客人', '默认分组'].sort());
+  assert.equal(reloaded.full(), false);
+});
+
+test('deleting a group de-authorizes its members and keeps the others', async () => {
+  const dir = await directory();
+  const store = createRoutingStore({ directory: dir, onError: fail });
+  await store.load();
+  const guests = await store.createGroup('客人');
+  await store.create('user', 'alice', { groupId: 'default' });
+  await store.create('user', 'bob', { groupId: guests.id });
+  await store.create('group', 'chat-1', { groupId: guests.id });
+  assert.deepEqual(await store.removeGroup(guests.id), { ok: true, removed: 2 });
+  assert.deepEqual(store.bindings().map(record => record.id), ['alice']);
+  assert.deepEqual(store.groups().map(group => group.id), ['default']);
+});
+
+test('the store refuses to grow past its cap instead of dropping the oldest silently', async () => {
+  const dir = await directory();
+  const errors = [];
+  const store = createRoutingStore({ directory: dir, maxEntries: 2, onError: (error, stage) => errors.push(stage) });
+  await store.load();
+  await store.create('user', 'a', { groupId: 'default' });
+  await store.create('user', 'b', { groupId: 'default' });
+  assert.equal(store.full(), true);
+  await assert.rejects(store.create('user', 'c', { groupId: 'default' }), /limit/);
+  assert.deepEqual(store.bindings().map(record => record.id), ['a', 'b']);
+  assert.deepEqual(errors, ['limit']);
+  assert.equal(store.get('user:c'), undefined);
+});
+
+test('group creation is capped too', async () => {
+  const dir = await directory();
+  const store = createRoutingStore({ directory: dir, maxGroups: 2, onError: fail });
+  await store.load();
+  await store.createGroup('a');
+  await assert.rejects(store.createGroup('b'), /group limit/);
+  assert.equal(store.groups().length, 2);
+});
+
+test('an unreadable file is quarantined instead of being overwritten', async () => {
+  const dir = await directory();
+  await writeFile(join(dir, 'bindings.json'), '{ not json', { mode: 0o600 });
+  const stages = [];
+  const store = createRoutingStore({ directory: dir, onError: (error, stage) => stages.push(stage) });
+  await store.load();
+  assert.deepEqual(store.bindings(), []);
+  assert.deepEqual(stages, ['parse']);
+  await stat(join(dir, 'bindings.json.corrupt'));
+  await store.create('user', 'alice', { groupId: 'default' });
+  assert.equal(store.bindings().length, 1);
+  assert.equal(store.group('default').id, 'default');
+});
+
+test('a file from a future version is ignored rather than half-read', async () => {
+  const dir = await directory();
+  await writeFile(join(dir, 'bindings.json'), JSON.stringify({ version: 99, bindings: [{ kind: 'user', id: 'alice' }] }));
+  const stages = [];
+  const store = createRoutingStore({ directory: dir, onError: (error, stage) => stages.push(stage) });
+  await store.load();
+  assert.deepEqual(store.bindings(), []);
+  assert.deepEqual(stages, ['version']);
+});
+
+test('a v1 bindings file is migrated into the default group', async () => {
+  const dir = await directory();
+  await writeFile(join(dir, 'bindings.json'), JSON.stringify({
+    version: 1,
+    bindings: [
+      { kind: 'user', id: 'alice', sessionId: 'session-1', workspace: '/srv/app', provider: 'p', model: 'm', reasoningEffort: 'low', note: '爱丽丝' },
+      { kind: 'group', id: 'chat-1', workspace: '/srv/other' },
+    ],
+  }));
+  const stages = [];
+  const store = createRoutingStore({ directory: dir, onError: (error, stage) => stages.push(stage) });
+  await store.load();
+  assert.deepEqual(stages, ['migrate']);
+  assert.equal(store.group('default').workspace, '/srv/app', 'the first configured Workspace wins');
+  assert.equal(store.group('default').model, 'm');
+  assert.equal(store.group('default').reasoningEffort, 'low');
+  assert.deepEqual(store.bindings().map(record => record.groupId), ['default', 'default']);
+  assert.equal(store.label('user:alice'), '爱丽丝', 'the old note becomes the label');
+  assert.equal(store.get('user:alice').sessionId, 'session-1');
+  // The migrated shape is written back, so the next start reads version 3.
+  await store.flush();
+  const rewritten = JSON.parse(await readFile(store.file, 'utf8'));
+  assert.equal(rewritten.version, 3);
+  assert.equal(rewritten.labels['user:alice'], '爱丽丝', 'the note moved onto the person');
+  assert.deepEqual(rewritten.groups.map(group => group.id), ['default']);
+});
+
+test('corrupt entries and duplicates are dropped while loading', async () => {
+  const dir = await directory();
+  await writeFile(join(dir, 'bindings.json'), JSON.stringify({
+    version: 2,
+    groups: [{ id: 'g1', name: ' 朋友 ' }, { id: 'g1', name: '重复' }, null, { id: 'x'.repeat(80) }, { name: '没有 id' }],
+    bindings: [
+      { kind: 'user', id: 'alice', groupId: 'missing', sessionId: 'session-1', createdAt: 1, updatedAt: 2 },
+      { kind: 'user', id: 'alice', groupId: 'g1', sessionId: 'session-2', createdAt: 3, updatedAt: 4 },
+      { kind: 'nonsense', id: 'x', createdAt: 1, updatedAt: 2 },
+      { kind: 'group', id: 'bad\nid', createdAt: 1, updatedAt: 2 },
+      null,
+      { kind: 'group', id: ' chat-1 ', groupId: 'g1', label: ' 群 ', createdAt: 'x', updatedAt: 2 },
+    ],
+  }));
+  const store = createRoutingStore({ directory: dir, onError: fail });
+  await store.load();
+  assert.deepEqual(store.bindings().map(record => `${record.kind}:${record.id}`), ['user:alice', 'group:chat-1']);
+  assert.equal(store.get('user:alice').sessionId, 'session-1', 'the first record wins');
+  assert.equal(store.get('user:alice').groupId, 'default', 'a member never points at a missing group');
+  assert.equal(store.label('group:chat-1'), '群', 'a v2 note on the binding is lifted, trimmed');
+  assert.equal(store.get('group:chat-1').createdAt, 0, 'an unusable timestamp becomes 0');
+  assert.deepEqual(store.groups().map(group => group.name).sort(), ['朋友', '默认分组'].sort(), 'a duplicate group id is ignored');
+  assert.equal(await store.remove('user:alice'), true);
+  assert.equal(await store.remove('user:alice'), false);
+  assert.equal(await store.update('user:nobody', { sessionId: 'x' }), undefined);
+  assert.deepEqual(store.bindings().map(record => record.id), ['chat-1']);
+});
+
+test('a note belongs to the person: it survives removal, deletion and having no group', async () => {
+  const dir = await directory();
+  const store = createRoutingStore({ directory: dir, onError: fail });
+  await store.load();
+  const guests = await store.createGroup('客人');
+  await store.create('user', 'alice', { groupId: guests.id, label: '爱丽丝' });
+  assert.equal(await store.setLabel('user:alice', '  爱丽丝  '), '爱丽丝');
+
+  // Removing the membership (or deleting the whole group) must not forget who
+  // Alice is: the settings page still shows her under her note.
+  assert.equal(await store.remove('user:alice'), true);
+  assert.equal(store.label('user:alice'), '爱丽丝');
+  await store.create('user', 'bob', { groupId: guests.id, label: '鲍勃' });
+  await store.removeGroup(guests.id);
+  assert.equal(store.label('user:bob'), '鲍勃');
+
+  // An administrator who belongs to no group has a note too.
+  await store.setLabel('user:root', '运维');
+  await store.setLabel('user:root', '   ');
+  assert.equal(store.label('user:root'), '', 'a blank note clears it');
+  assert.equal(store.label('user:nobody'), '');
+
+  await store.setLabel('user:root', '运维');
+  const reloaded = createRoutingStore({ directory: dir, onError: fail });
+  await reloaded.load();
+  assert.equal(reloaded.label('user:alice'), '爱丽丝');
+  assert.equal(reloaded.label('user:bob'), '鲍勃');
+  assert.equal(reloaded.label('user:root'), '运维');
+  assert.deepEqual(reloaded.bindings(), [], 'notes outlive every membership');
+});
+
+test('a v2 file is lifted to v3 with its notes moved onto the people', async () => {
+  const dir = await directory();
+  await writeFile(join(dir, 'bindings.json'), JSON.stringify({
+    version: 2,
+    groups: [{ id: 'default', name: '默认分组', workspace: '', provider: '', model: '' }],
+    bindings: [
+      { kind: 'user', id: 'alice', groupId: 'default', label: '爱丽丝', sessionId: 's1' },
+      { kind: 'group', id: 'chat-1', groupId: 'default', label: '', sessionId: '' },
+    ],
+  }));
+  const stages = [];
+  const store = createRoutingStore({ directory: dir, onError: (error, stage) => stages.push(stage) });
+  await store.load();
+  assert.deepEqual(stages, ['migrate']);
+  assert.equal(store.label('user:alice'), '爱丽丝');
+  assert.equal(store.label('group:chat-1'), '');
+  await store.flush();
+  const rewritten = JSON.parse(await readFile(store.file, 'utf8'));
+  assert.equal(rewritten.version, 3);
+  assert.equal(rewritten.bindings.every(record => !('label' in record)), true, 'the note is no longer on the membership');
+});
+
+test('a move to an unknown group keeps the current membership', async () => {
+  const dir = await directory();
+  const store = createRoutingStore({ directory: dir, onError: fail });
+  await store.load();
+  const guests = await store.createGroup('客人');
+  await store.create('user', 'alice', { groupId: guests.id });
+  assert.equal((await store.update('user:alice', { groupId: 'nope' })).groupId, guests.id);
+  assert.equal((await store.create('user', 'bob', { groupId: 'nope' })).groupId, 'default');
+});
+
+test('a fresh store tolerates a missing directory and creates it privately', async () => {
+  const dir = await directory();
+  await chmod(dir, 0o700);
+  const store = createRoutingStore({ directory: join(dir, 'nested', 'here'), onError: fail });
+  await store.load();
+  await store.create('user', 'alice', { groupId: 'default' });
+  await store.flush();
+  const parsed = JSON.parse(await readFile(store.file, 'utf8'));
+  assert.equal(parsed.bindings.length, 1);
+  assert.equal(parsed.groups.length, 1);
+});

@@ -2,32 +2,22 @@ import z from '@deepseek-ai/schemastery';
 import { DEFAULT_SECRET_REF } from '../shared/protocol.js';
 
 /**
- * Plugin Config. Only Bot ID and the Secret are required to connect.
+ * Plugin Config: the connection, the administrators and the advanced knobs.
  *
- * This is *policy*: who may talk to the Bot, which Workspace and model new
- * Sessions use, and who the administrators are. Per-conversation routing
- * (which Session a chat owns) is runtime state and lives in the binding
- * store, not here — see `bindings.ts`.
+ * This is deliberately *not* the place for who may talk to the Bot, nor for
+ * which Workspace/model a Session uses: authorization is group membership and
+ * groups are edited live on the settings page, so they live in the routing
+ * store (`routing-store.ts`) — see the convention in AGENTS.md. A Config write
+ * rebuilds the bridge and reconnects the socket, which must not happen because
+ * somebody was added to a group.
  */
 export const Config = z.object({
   botId: z.string().default('').volatile()
     .description('企业微信智能机器人的 Bot ID（必填）。'),
   secretEnv: z.string().role('credential-ref').default(DEFAULT_SECRET_REF).volatile()
     .description('Bot Secret 在 DSH 凭据库中的引用名；Secret 本身不写入配置。'),
-  chatIds: z.array(z.string()).default([]).volatile()
-    .description('允许的企微会话（单聊为 userid，群聊为 chatid）。留空 = 全部允许。'),
-  allowedUserIds: z.array(z.string()).default([]).volatile()
-    .description('允许操作的企微 userid。留空 = 任何人。'),
-  defaultWorkspace: z.string().default('').volatile()
-    .description('新会话使用的 Workspace 绝对路径；留空 = 在 DSH home 的 wecom-bot/workspace 自动创建。'),
-  defaultProvider: z.string().default('').volatile()
-    .description('新会话默认模型的服务商 id；留空 = 使用 DSH 当前默认模型。'),
-  defaultModel: z.string().default('').volatile()
-    .description('新会话默认模型的 id；留空 = 使用 DSH 当前默认模型。'),
-  defaultReasoningEffort: z.string().default('').volatile()
-    .description('新会话默认模型的思考强度；留空 = 使用模型默认值。'),
   adminUserIds: z.array(z.string()).default([]).volatile()
-    .description('管理员 userid：可切换会话，并按 Workspace 接收通知。'),
+    .description('管理员 userid：可切换会话，并按 Workspace 接收通知；同时始终有权给机器人发消息。'),
   adminWorkspaces: z.array(z.string()).default([]).volatile()
     .description('管理员可操作/接收通知的 Workspace 路径。留空 = 全部 Workspace。'),
   wsUrl: z.string().default('').volatile()
@@ -47,12 +37,6 @@ interface Volatile<T> { get(): T }
 export interface PluginConfig {
   readonly botId: Volatile<string>;
   readonly secretEnv: Volatile<string>;
-  readonly chatIds: Volatile<string[]>;
-  readonly allowedUserIds: Volatile<string[]>;
-  readonly defaultWorkspace: Volatile<string>;
-  readonly defaultProvider: Volatile<string>;
-  readonly defaultModel: Volatile<string>;
-  readonly defaultReasoningEffort: Volatile<string>;
   readonly adminUserIds: Volatile<string[]>;
   readonly adminWorkspaces: Volatile<string[]>;
   readonly wsUrl: Volatile<string>;
@@ -68,14 +52,6 @@ export interface BridgeSettings {
   readonly secretRef: string;
   /** Empty for the SDK default endpoint. */
   readonly wsUrl: string;
-  readonly chatIds: readonly string[];
-  readonly allowedUserIds: readonly string[];
-  /** Empty means the plugin's own Workspace under the DSH home. */
-  readonly defaultWorkspace: string;
-  /** Empty provider/model mean "use the DSH default model". */
-  readonly defaultProvider: string;
-  readonly defaultModel: string;
-  readonly defaultReasoningEffort: string;
   readonly adminUserIds: readonly string[];
   /** Empty means every Workspace. */
   readonly adminWorkspaces: readonly string[];
@@ -117,12 +93,6 @@ export function readBridgeSettings(config: PluginConfig): BridgeSettings {
     botId: config.botId.get().trim(),
     secretRef: config.secretEnv.get().trim(),
     wsUrl: config.wsUrl.get().trim(),
-    chatIds: uniqueIds(config.chatIds.get()),
-    allowedUserIds: uniqueIds(config.allowedUserIds.get()),
-    defaultWorkspace: config.defaultWorkspace.get().trim(),
-    defaultProvider: config.defaultProvider.get().trim(),
-    defaultModel: config.defaultModel.get().trim(),
-    defaultReasoningEffort: config.defaultReasoningEffort.get().trim(),
     adminUserIds: uniqueIds(config.adminUserIds.get()),
     adminWorkspaces: uniqueIds(config.adminWorkspaces.get()),
     questionTimeoutMs: clamp(config.questionTimeoutMs.get(), 1000, 300000, 60000),

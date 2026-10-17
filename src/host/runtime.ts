@@ -1,8 +1,8 @@
 import { WSClient } from '@wecom/aibot-node-sdk';
 import { createBridge, type Bridge, type BridgeClient } from './bridge/index.js';
 import { createAccessPolicy } from './bridge/policy.js';
-import { createBindingStore, type BindingStore } from './bindings.js';
-import { applyBindingOps, buildBindingsView, type BindingOpResult } from './bindings-view.js';
+import { applyRoutingOps, buildRoutingView, type RoutingOpResult } from './groups-view.js';
+import { createRoutingStore, type RoutingStore } from './routing-store.js';
 import { catalogView, createCatalogService, type CatalogService } from './catalog.js';
 import {
   isTrustedWsUrl, readBridgeSettings, type BridgeSettings, type PluginConfig,
@@ -13,23 +13,23 @@ import { createModelService, type ModelService } from './models.js';
 import { createObservationStore, type ObservationStore } from './observation.js';
 import { createRoundTracker, type RoundTracker } from './rounds.js';
 import { createRouter, type Router } from './routing.js';
-import { createSessionProvisioner, type ModelDefaults, type SessionProvisioner } from './sessions.js';
+import { createSessionProvisioner, type SessionProvisioner } from './sessions.js';
 import { createStatusTracker, type StatusTracker } from './status.js';
 import { summarizeTurn, type TurnSummary } from './turns.js';
 import { createWorkspaceService, pluginWorkspacePath, type WorkspaceService } from './workspaces.js';
 import { join } from 'node:path';
 import type {
-  BindingOp, BindingsView, BridgeStateView, ModelCatalogView, PluginDefaultsView,
+  BridgeStateView, ModelCatalogView, RoutingOp, RoutingView,
 } from '../shared/protocol.js';
 
 /**
  * Host-lifetime orchestration.
  *
- * Owns everything that must survive a reconnect — observed IDs, rounds, the
- * Session catalog, routing bindings, status counters — and rebuilds the WeCom
- * bridge whenever the Config changes. It also owns the single `session/event`
- * listener, so turns that end while the bridge is being replaced still
- * complete their rounds.
+ * Owns everything that must survive a reconnect — rejected senders, rounds,
+ * the Session catalog, groups and memberships, status counters — and rebuilds
+ * the WeCom bridge whenever the Config changes. It also owns the single
+ * `session/event` listener, so turns that end while the bridge is being
+ * replaced still complete their rounds.
  */
 
 export interface ClientOptions {
@@ -51,17 +51,17 @@ export interface Runtime {
   start(): Promise<void>;
   stop(): Promise<void>;
   state(options?: { readonly refresh?: boolean }): Promise<BridgeStateView>;
-  /** The bindings table for the settings page. */
-  bindingsView(options?: { readonly refresh?: boolean }): Promise<BindingsView>;
-  /** Apply settings-page binding edits. */
-  applyBindings(ops: readonly BindingOp[]): Promise<BindingOpResult>;
+  /** The groups/members table for the settings page. */
+  routingView(options?: { readonly refresh?: boolean }): Promise<RoutingView>;
+  /** Apply settings-page group and member edits. */
+  applyRouting(ops: readonly RoutingOp[]): Promise<RoutingOpResult>;
   /** Values the journal must scrub (the resolved Bot Secret). */
   secrets(): readonly string[];
   readonly observations: ObservationStore;
   readonly rounds: RoundTracker;
   readonly status: StatusTracker;
   readonly catalogs: CatalogService;
-  readonly bindings: BindingStore;
+  readonly store: RoutingStore;
   current(): Bridge | undefined;
 }
 
@@ -84,10 +84,10 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       return registry && typeof registry.list === 'function' ? registry : undefined;
     },
   });
-  const bindings = createBindingStore({
+  const store = createRoutingStore({
     directory: pluginHome(),
     onError: (error, stage) => {
-      log.warn(`WeCom binding store ${stage} failed`);
+      log.warn(`WeCom routing store ${stage} failed`);
       journal.write({ event: 'binding.store.error', level: 'warn', stage, error });
     },
   });
@@ -109,22 +109,13 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     models,
     workspaces,
     catalogs,
-    bindings,
+    bindings: store,
     bindingKey: binding => `${binding.kind}:${binding.id}`,
     journal,
     log,
   });
 
-  function modelDefaults(): ModelDefaults {
-    const settings = readBridgeSettings(config);
-    return {
-      provider: settings.defaultProvider,
-      model: settings.defaultModel,
-      reasoningEffort: settings.defaultReasoningEffort,
-    };
-  }
-
-  const router: Router = createRouter({ store: bindings, provisioner, defaults: modelDefaults, log });
+  const router: Router = createRouter({ store, provisioner, log });
 
   let bridge: Bridge | undefined;
   let stopBridge: (() => void) | undefined;
@@ -192,10 +183,6 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       event: 'config.applied',
       botId: settings.botId, secretRef: settings.secretRef, secretConfigured: Boolean(resolved),
       wsUrl: settings.wsUrl || 'sdk-default',
-      chatIds: settings.chatIds, allowedUserIds: settings.allowedUserIds,
-      defaultWorkspace: settings.defaultWorkspace || pluginWorkspacePath(pluginHome()),
-      defaultProvider: settings.defaultProvider, defaultModel: settings.defaultModel,
-      defaultReasoningEffort: settings.defaultReasoningEffort,
       adminUserIds: settings.adminUserIds, adminWorkspaces: settings.adminWorkspaces,
       questionTimeoutMs: settings.questionTimeoutMs, remoteApprovals: settings.remoteApprovals,
     });
@@ -248,26 +235,6 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     if (event.type === 'turn/end') void onTurnEnd(session, event);
   }
 
-  async function defaultsView(): Promise<PluginDefaultsView> {
-    const settings = readBridgeSettings(config);
-    const base = {
-      workspace: settings.defaultWorkspace,
-      provider: settings.defaultProvider,
-      model: settings.defaultModel,
-      ...(settings.defaultReasoningEffort ? { reasoningEffort: settings.defaultReasoningEffort } : {}),
-    };
-    try {
-      const resolved = await workspaces.describe(settings.defaultWorkspace);
-      return { ...base, workspacePath: resolved.path, workspaceTitle: resolved.title };
-    } catch (error) {
-      return {
-        ...base, workspacePath: '',
-        workspaceTitle: settings.defaultWorkspace || '插件默认 Workspace',
-        workspaceError: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-
   /** Never let a slow model catalog hold up the settings page. */
   async function modelsView(refresh: boolean): Promise<{ view: ModelCatalogView | null; error?: string }> {
     const cached = models.snapshot();
@@ -285,19 +252,18 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     }
   }
 
-  async function bindingsView(options: { readonly refresh?: boolean } = {}): Promise<BindingsView> {
-    await bindings.load();
+  async function routingView(options: { readonly refresh?: boolean } = {}): Promise<RoutingView> {
+    await store.load();
     if (options.refresh) catalogs.invalidate();
-    const policy = createAccessPolicy(readBridgeSettings(config));
-    return await buildBindingsView({
-      bindings, provisioner, workspaces, models, catalogs, observations,
-      defaults: modelDefaults,
+    const policy = createAccessPolicy(readBridgeSettings(config), { memberOf: () => undefined });
+    return await buildRoutingView({
+      store, provisioner, workspaces, models, catalogs, observations, router,
       isAdmin: user => policy.isAdmin(user),
     });
   }
 
   return {
-    observations, rounds, status, catalogs, bindings,
+    observations, rounds, status, catalogs, store,
     current: () => bridge,
     secrets: () => (secret ? [secret] : []),
     async start() {
@@ -307,7 +273,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
         ctx.on('session/event', onSessionEvent),
       ];
       for (const dispose of off) if (typeof dispose === 'function') disposers.push(dispose);
-      await bindings.load();
+      await store.load();
       schedule();
       await queue;
     },
@@ -317,11 +283,15 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       await queue;
       teardown();
       rounds.closeAll('interrupted');
-      await bindings.flush();
+      await store.flush();
     },
-    bindingsView,
-    async applyBindings(ops) {
-      const result = await applyBindingOps({ bindings, workspaces, models, router, log }, ops);
+    routingView,
+    async applyRouting(ops) {
+      const policy = createAccessPolicy(readBridgeSettings(config), { memberOf: () => undefined });
+      const result = await applyRoutingOps({
+        store, provisioner, workspaces, models, router, catalogs, observations, log,
+        isAdmin: user => policy.isAdmin(user),
+      }, ops);
       if (result.ok) catalogs.invalidate();
       return result;
     },
@@ -332,7 +302,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       if (refresh) catalogs.invalidate();
       try {
         const catalog = await catalogs.load({ force: refresh });
-        sessions = catalogView(catalog, bindings.list().map(record => record.sessionId).filter(Boolean));
+        sessions = catalogView(catalog, store.bindings().map(record => record.sessionId).filter(Boolean));
         lastCatalogError = '';
       } catch (error) {
         sessionsError = '暂时无法读取 DSH Session 列表';
@@ -341,36 +311,52 @@ export function createRuntime(options: RuntimeOptions): Runtime {
         lastCatalogError = message;
       }
       const settings = readBridgeSettings(config);
-      const defaults = await defaultsView();
-      let bindingsState: BindingsView | null = null;
-      let bindingsError: string | undefined;
+      let routing: RoutingView | null = null;
+      let routingError: string | undefined;
       try {
-        bindingsState = await bindingsView({ refresh });
+        routing = await routingView({ refresh });
       } catch (error) {
-        bindingsError = '暂时无法读取绑定信息';
+        routingError = '暂时无法读取分组信息';
         journal.write({ event: 'binding.view.error', level: 'warn', error });
       }
       const { view: modelView, error: modelsError } = await modelsView(refresh);
       const notices: string[] = [];
-      if (defaults.workspaceError) notices.push(`默认 Workspace 不可用：${defaults.workspaceError}`);
+      const defaultGroup = routing?.groups.find(group => group.isDefault);
+      if (defaultGroup?.workspaceError) notices.push(`默认分组的 Workspace 不可用：${defaultGroup.workspaceError}`);
       if (settings.adminUserIds.length && !settings.adminWorkspaces.length) {
         notices.push('已配置管理员但未限定 Workspace：管理员会收到所有 Workspace 的会话通知。');
       }
-      if (bindingsState?.full) notices.push('会话绑定数量已达上限，新会话不会被记录；请在下方清理。');
+      if (routing && !routing.total) {
+        notices.push('还没有任何成员：给机器人发消息的人会出现在「未授权用户」里，把它加入分组即可授权。');
+      }
+      if (routing?.full) notices.push('成员数量已达上限，新成员不会被记录；请在下方清理。');
       return {
-        version: 2,
+        version: 3,
         connection: status.connection(),
         traffic: status.traffic(),
-        observed: observations.snapshot(),
+        rejected: observations.rejected(key => Boolean(store.get(key))).map(row => {
+          const note = store.label(row.key);
+          return Object.freeze({ ...row, label: note, displayName: note || row.id });
+        }),
         sessions,
         ...(sessionsError ? { sessionsError } : {}),
-        bindings: bindingsState,
-        ...(bindingsError ? { bindingsError } : {}),
+        routing,
+        ...(routingError ? { routingError } : {}),
         models: modelView,
         ...(modelsError ? { modelsError } : {}),
         workspaces: workspaces.list(),
-        defaults,
-        admins: settings.adminUserIds,
+        admins: settings.adminUserIds.map(id => {
+          const key = `user:${id}`;
+          const note = store.label(key);
+          const binding = store.get(key);
+          const group = binding ? store.group(binding.groupId) : undefined;
+          return Object.freeze({
+            id,
+            label: note,
+            displayName: note || id,
+            ...(group ? { groupName: group.name } : {}),
+          });
+        }),
         adminWorkspaces: settings.adminWorkspaces,
         notices,
         journal: journal.info(),

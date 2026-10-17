@@ -12,18 +12,25 @@ export const CONFIG_NAMESPACE = 'wecom-bot';
 export const DEFAULT_SECRET_REF = 'WECOM_BOT_SECRET';
 /** Authenticated Connection Fetch route; the browser reads it document-relative. */
 export const STATE_ROUTE = '/api/wecom-bot/state';
-/** Authenticated Connection Fetch route that applies binding edits. */
-export const BINDINGS_ROUTE = '/api/wecom-bot/bindings';
+/** Authenticated Connection Fetch route that applies group/member edits. */
+export const ROUTING_ROUTE = '/api/wecom-bot/routing';
 /** Directory below the DSH home that holds this plugin's own data. */
 export const PLUGIN_HOME_DIRECTORY = 'wecom-bot';
 /** The plugin's own Workspace directory, below {@link PLUGIN_HOME_DIRECTORY}. */
 export const PLUGIN_WORKSPACE_DIRECTORY = 'workspace';
 /** Sidebar title of the plugin's own Workspace. */
 export const PLUGIN_WORKSPACE_TITLE = '企业微信';
-/** Persisted binding-file version. */
-export const BINDINGS_VERSION = 1;
-/** Upper bound on persisted chat bindings. */
+/** Persisted groups+bindings file version (v1 = bindings only, v2 = groups). */
+export const ROUTING_VERSION = 3;
+/** Upper bound on persisted members across all groups. */
 export const MAX_BINDINGS = 500;
+/** Upper bound on user groups. */
+export const MAX_GROUPS = 20;
+/** The built-in group that owns the plugin's default Workspace and model. */
+export const DEFAULT_GROUP_ID = 'default';
+export const DEFAULT_GROUP_NAME = '默认分组';
+/** Longest accepted 备注 / group name, in characters. */
+export const MAX_LABEL_CHARS = 60;
 
 export type ConnectionPhase =
   | 'unconfigured' // Bot ID or Secret missing
@@ -54,30 +61,8 @@ export interface TrafficStats {
   readonly lastMessageAt?: number;
 }
 
-export type AccessDecision = 'accepted' | 'rejected';
-export type RejectionReason = 'user' | 'chat' | 'user+chat';
-
-/** One WeCom user or conversation that actually sent the Bot a message. */
-export interface ObservedIdentity {
-  readonly id: string;
-  readonly firstSeenAt: number;
-  readonly lastSeenAt: number;
-  readonly messages: number;
-  /** Access decision of the latest message, under the configuration of that moment. */
-  readonly decision: AccessDecision;
-  readonly reason?: RejectionReason;
-  /** Conversations only: single chats use the sender's userid as their ID. */
-  readonly chatType?: 'single' | 'group';
-  /** Users: the latest conversation; group conversations: the latest sender. */
-  readonly via?: string;
-}
-
-export interface ObservedIdentities {
-  /** Newest first. */
-  readonly users: readonly ObservedIdentity[];
-  /** Newest first. */
-  readonly chats: readonly ObservedIdentity[];
-}
+/** Why the Bot did not answer a sender. Authorization is group membership. */
+export type RejectionReason = 'unauthorized';
 
 export interface ModelSelection {
   readonly provider: string;
@@ -132,26 +117,38 @@ export interface JournalInfo {
 }
 
 /* ------------------------------------------------------------------ *
- * Routing: one binding per WeCom private chat (its sender) or group   *
+ * Groups and members: one group owns Workspace+model, members route   *
  * ------------------------------------------------------------------ */
 
 export type BindingKind = 'user' | 'group';
 
-/** A routing binding: one WeCom conversation → one Workspace/Session/model. */
+/**
+ * A user group: the unit that owns a Workspace and a model. The built-in
+ * {@link DEFAULT_GROUP_ID} group cannot be deleted and owns the plugin's own
+ * Workspace unless it is pointed elsewhere.
+ */
+export interface GroupRecord {
+  readonly id: string;
+  readonly name: string;
+  /** Workspace path; empty means the plugin's own Workspace. */
+  readonly workspace: string;
+  /** Model for every Session in this group; empty means the DSH default. */
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort: string;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+/** One authorized WeCom principal: its group membership and its Session. */
 export interface BindingRecord {
   readonly kind: BindingKind;
   /** userid for a private chat, chatid for a group. */
   readonly id: string;
-  /** Workspace path; empty means the plugin's default Workspace. */
-  readonly workspace: string;
+  /** Membership: the group that decides Workspace and model. */
+  readonly groupId: string;
   /** Bound Session id; empty means "create one on the next message". */
   readonly sessionId: string;
-  /** Model override; empty means the plugin default, then the DSH default. */
-  readonly provider: string;
-  readonly model: string;
-  readonly reasoningEffort: string;
-  /** Free-form operator note. */
-  readonly note?: string;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -159,46 +156,86 @@ export interface BindingRecord {
 /** Why a bound Session cannot be used as-is. */
 export type BindingSessionState = 'bound' | 'auto' | 'blank' | 'missing' | 'archived' | 'unusable';
 
-/** One binding as shown on the settings page. */
-export interface BindingView {
+/** One member row inside a group card. */
+export interface GroupMemberView {
   /** `user:<userid>` or `group:<chatid>`. */
   readonly key: string;
   readonly kind: BindingKind;
   readonly id: string;
-  readonly note?: string;
+  /** Operator note for this person; empty when unnamed. */
+  readonly label: string;
+  /** What the page shows: the note when set, the WeCom id otherwise. */
+  readonly displayName: string;
   /** The sender is in the plugin's administrator list. */
   readonly admin: boolean;
-  /** Configured Workspace path; empty means the plugin default. */
-  readonly workspace: string;
-  readonly workspaceTitle: string;
-  /** Effective absolute Workspace path; empty when unresolved. */
-  readonly workspacePath: string;
-  readonly workspaceError?: string;
   /** Configured Session id; empty means "create on the next message". */
   readonly sessionId: string;
   readonly sessionTitle: string | null;
   readonly sessionState: BindingSessionState;
   readonly sessionRunning: boolean;
-  /** Configured model override; empty means the plugin default. */
-  readonly provider: string;
-  readonly model: string;
-  readonly reasoningEffort?: string;
-  /** Model a prompt would use after the next message is routed here. */
-  readonly effectiveProvider: string;
-  readonly effectiveModel: string;
-  readonly effectiveReasoningEffort?: string;
   /** Model of the Session's latest request, when DSH reports one. */
   readonly sessionModel?: ModelSelection;
   readonly messages: number;
   readonly lastSeenAt?: number;
   readonly createdAt: number;
-  readonly updatedAt: number;
 }
 
-export interface BindingsView {
-  readonly items: readonly BindingView[];
+/** One group card: its Workspace/model plus its members. */
+export interface GroupView {
+  readonly id: string;
+  readonly name: string;
+  /** The built-in group: always present, never deletable. */
+  readonly isDefault: boolean;
+  /** Configured Workspace path; empty means the plugin's own Workspace. */
+  readonly workspace: string;
+  readonly workspaceTitle: string;
+  /** Effective absolute path; empty when unresolved. */
+  readonly workspacePath: string;
+  readonly workspaceError?: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly reasoningEffort?: string;
+  /** Model a new Session in this group would use. */
+  readonly effectiveProvider: string;
+  readonly effectiveModel: string;
+  readonly effectiveReasoningEffort?: string;
+  readonly members: readonly GroupMemberView[];
+  readonly memberCount: number;
+  readonly messages: number;
+  readonly lastSeenAt?: number;
+}
+
+/** One refused sender as the memory-only observation log knows it. */
+export interface RejectedObservation {
+  /** `user:<userid>` or `group:<chatid>`. */
+  readonly key: string;
+  readonly kind: BindingKind;
+  readonly id: string;
+  readonly chatType: 'single' | 'group';
+  /** Latest rejected message, one line and length-bounded. */
+  readonly text?: string;
+  readonly messages: number;
+  readonly firstSeenAt: number;
+  readonly lastSeenAt: number;
+}
+
+/**
+ * A sender the Bot refused: it belongs to no group, so it was never answered.
+ * Kept in memory only — the operator turns one into a member by assigning it
+ * to a group, which is what authorizes it.
+ */
+export interface RejectedSenderView extends RejectedObservation {
+  /** Operator note, when this person was known before being refused. */
+  readonly label: string;
+  /** The note when set, the WeCom id otherwise. */
+  readonly displayName: string;
+}
+
+export interface RoutingView {
+  readonly groups: readonly GroupView[];
+  /** Total members across all groups. */
   readonly total: number;
-  /** True when the store is at {@link MAX_BINDINGS} and refused new bindings. */
+  /** True when the store is at {@link MAX_BINDINGS} and refused new members. */
   readonly full: boolean;
 }
 
@@ -215,7 +252,7 @@ export interface ModelChoice {
 
 export interface ModelCatalogView {
   readonly choices: readonly ModelChoice[];
-  /** Model a Session uses when neither the binding nor the plugin picks one. */
+  /** Model a Session uses when its group picks none. */
   readonly dshDefault: ModelSelection | null;
   readonly failures: readonly { readonly id: string; readonly name: string; readonly message: string }[];
   readonly fetchedAt: number;
@@ -227,62 +264,85 @@ export interface WorkspaceOption {
   readonly title: string;
   /** The plugin's own Workspace under the DSH home. */
   readonly pluginOwned: boolean;
+  /** Sessions that are not archived — the only ones that can notify anyone. */
   readonly sessionCount: number;
+  /** Sessions the operator archived; hidden from the settings page. */
+  readonly archivedSessionCount: number;
 }
 
-/** Defaults the plugin applies to bindings that configure nothing. */
-export interface PluginDefaultsView {
-  /** Configured Workspace path; empty means the plugin's own Workspace. */
-  readonly workspace: string;
-  readonly workspacePath: string;
-  readonly workspaceTitle: string;
-  readonly workspaceError?: string;
-  readonly provider: string;
-  readonly model: string;
-  readonly reasoningEffort?: string;
+/** One administrator row: the Config grants the power, the store keeps the note. */
+export interface AdminView {
+  readonly id: string;
+  /** Operator note; empty when unnamed. */
+  readonly label: string;
+  /** The note when set, the WeCom id otherwise. */
+  readonly displayName: string;
+  /** The group this administrator is also a member of, when they are one. */
+  readonly groupName?: string;
 }
 
-/** Edits the settings page applies to one binding. */
-export type BindingOp =
+/** Edits the settings page applies to groups and members. */
+export type RoutingOp =
+  | { readonly op: 'group.add'; readonly name?: string }
   | {
-    readonly op: 'set';
-    readonly key: string;
+    readonly op: 'group.update';
+    readonly id: string;
     readonly patch: {
+      readonly name?: string;
       readonly workspace?: string;
-      readonly sessionId?: string;
       readonly provider?: string;
       readonly model?: string;
       readonly reasoningEffort?: string;
-      readonly note?: string;
     };
   }
-  | { readonly op: 'create'; readonly kind: BindingKind; readonly id: string }
-  | { readonly op: 'delete'; readonly key: string };
+  | { readonly op: 'group.delete'; readonly id: string }
+  | {
+    readonly op: 'member.add';
+    readonly groupId: string;
+    readonly kind: BindingKind;
+    readonly id: string;
+    readonly label?: string;
+  }
+  | {
+    readonly op: 'member.update';
+    readonly key: string;
+    readonly patch: {
+      readonly groupId?: string;
+      readonly sessionId?: string;
+    };
+  }
+  | { readonly op: 'member.remove'; readonly key: string }
+  /**
+   * Set (or clear) a person's 备注. Independent of membership: an
+   * administrator who is in no group still has a name, and the note survives
+   * being removed from a group.
+   */
+  | { readonly op: 'label.set'; readonly key: string; readonly label: string };
 
-export interface BindingsRequest {
-  readonly ops: readonly BindingOp[];
+export interface RoutingRequest {
+  readonly ops: readonly RoutingOp[];
 }
 
-export interface BindingsResponse {
+export interface RoutingResponse {
   readonly ok: boolean;
   readonly error?: string;
-  readonly bindings?: BindingsView;
+  readonly routing?: RoutingView;
 }
 
 export interface BridgeStateView {
-  readonly version: 2;
+  readonly version: 3;
   readonly connection: ConnectionStatus;
   readonly traffic: TrafficStats;
-  readonly observed: ObservedIdentities;
+  /** Senders refused since Host start, newest first. */
+  readonly rejected: readonly RejectedSenderView[];
   readonly sessions: SessionCatalogView | null;
   readonly sessionsError?: string;
-  readonly bindings: BindingsView | null;
-  readonly bindingsError?: string;
+  readonly routing: RoutingView | null;
+  readonly routingError?: string;
   readonly models: ModelCatalogView | null;
   readonly modelsError?: string;
   readonly workspaces: readonly WorkspaceOption[];
-  readonly defaults: PluginDefaultsView;
-  readonly admins: readonly string[];
+  readonly admins: readonly AdminView[];
   readonly adminWorkspaces: readonly string[];
   /** Non-fatal setup problems worth showing on the page. */
   readonly notices: readonly string[];

@@ -1,0 +1,150 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { applyRoutingOps, buildRoutingView } from '../dist/host/groups-view.js';
+import { createRoutingStore } from '../dist/host/routing-store.js';
+import { createObservationStore } from '../dist/host/observation.js';
+import { createWorkspaceService } from '../dist/host/workspaces.js';
+import { fakeHost, scratchDirectory, TEST_WORKSPACE_PATH } from './helpers.js';
+
+const silent = { warn() {} };
+
+/** A view context with a real store, the fake Workspace registry and a catalog-free provisioner. */
+async function context(extra = {}) {
+  const ctx = fakeHost({ workspaces: [] });
+  const store = createRoutingStore({ directory: scratchDirectory(), onError: () => {} });
+  await store.load();
+  const workspaces = createWorkspaceService({
+    registry: () => ctx.registry,
+    defaultPath: TEST_WORKSPACE_PATH,
+    log: silent,
+  });
+  const provisioner = {
+    desired: group => (group.provider && group.model
+      ? { provider: group.provider, model: group.model, ...(group.reasoningEffort ? { reasoningEffort: group.reasoningEffort } : {}) }
+      : undefined),
+    async describe(sessionId) {
+      return { title: `标题 ${sessionId}`, state: 'bound', workspace: '企业微信', workspacePath: TEST_WORKSPACE_PATH, running: false };
+    },
+  };
+  const observations = extra.observations ?? createObservationStore();
+  const deps = {
+    store, provisioner, workspaces, observations,
+    models: { snapshot: () => undefined }, catalogs: { async load() { throw new Error('unused'); } },
+    isAdmin: user => user === 'root',
+  };
+  return {
+    ctx, store, observations, workspaces,
+    view: () => buildRoutingView(deps),
+    apply: ops => applyRoutingOps(deps, ops),
+  };
+}
+
+test('the default group comes first, then the others oldest first, and members sort by activity', async () => {
+  const { store, view } = await context();
+  await store.createGroup('先建');
+  const later = await store.createGroup('后来');
+  await store.updateGroup(later.id, { workspace: TEST_WORKSPACE_PATH });
+  await store.create('user', 'quiet', { groupId: 'default', label: '安静' });
+  await store.create('user', 'active', { groupId: 'default', label: '活跃' });
+  await store.create('group', 'chat-1', { groupId: 'default' });
+  await store.load();
+
+  const routing = await view();
+  assert.deepEqual(routing.groups.map(group => group.name), ['默认分组', '先建', '后来']);
+  assert.equal(routing.total, 3);
+  assert.equal(routing.full, false);
+  const [first] = routing.groups;
+  assert.equal(first.isDefault, true);
+  assert.equal(first.memberCount, 3);
+  assert.equal(first.workspacePath, TEST_WORKSPACE_PATH, 'the plugin Workspace is resolved for a group that configures none');
+  assert.equal(first.workspaceTitle, '企业微信');
+  assert.deepEqual(first.members.map(member => member.displayName), ['chat-1', '安静', '活跃'],
+    'a note replaces the id, and members fall back to name order without activity');
+});
+
+test('a group reports the model its members will use, and the DSH default when it picks none', async () => {
+  const { store, view } = await context();
+  const guests = await store.createGroup('客人');
+  await store.updateGroup(guests.id, { provider: 'p', model: 'm', reasoningEffort: 'low' });
+  await store.load();
+  const routing = await view();
+  const picked = routing.groups.find(group => group.id === guests.id);
+  assert.equal(picked.effectiveProvider, 'p');
+  assert.equal(picked.effectiveModel, 'm');
+  assert.equal(picked.effectiveReasoningEffort, 'low');
+  const fallback = routing.groups.find(group => group.isDefault);
+  assert.deepEqual([fallback.effectiveProvider, fallback.effectiveModel], ['', ''],
+    'no model means the page shows 「跟随 DSH 默认模型」');
+});
+
+test('member rows carry the activity the observation store saw, and an unresolvable Workspace is reported', async () => {
+  let clock = 1000;
+  const observations = createObservationStore({ now: () => clock });
+  const { store, view } = await context({ observations });
+  await store.create('user', 'alice', { groupId: 'default' });
+  await store.create('user', 'bob', { groupId: 'default' });
+  await store.updateGroup('default', { workspace: '/definitely/not/here' });
+  await store.load();
+  observations.record({ chat: 'alice', user: 'alice', chatType: 'single', accepted: true, text: 'hi' });
+  clock = 2000;
+  observations.record({ chat: 'alice', user: 'alice', chatType: 'single', accepted: true, text: 'again' });
+  observations.record({ chat: 'bob', user: 'bob', chatType: 'single', accepted: true });
+
+  const routing = await view();
+  const [group] = routing.groups;
+  assert.match(group.workspaceError, /Workspace 目录不存在或不是目录/);
+  assert.equal(group.workspaceTitle, '企业微信', 'the plugin Workspace stands in while the configured one is broken');
+  assert.equal(group.memberCount, 2);
+  assert.equal(group.messages, 3);
+  assert.equal(group.lastSeenAt, 2000);
+  assert.deepEqual(group.members.map(member => [member.displayName, member.messages, member.lastSeenAt]),
+    [['alice', 2, 2000], ['bob', 1, 2000]]);
+  assert.equal(group.members[0].sessionState, 'auto');
+});
+
+test('a member of another group is not listed, and an administrator flag follows the user id', async () => {
+  const { store, view } = await context();
+  const guests = await store.createGroup('客人');
+  await store.create('user', 'root', { groupId: guests.id });
+  await store.load();
+  const routing = await view();
+  assert.deepEqual(routing.groups.find(group => group.isDefault).members, [],
+    'a member of another group is not listed here');
+  const [member] = routing.groups.find(group => group.id === guests.id).members;
+  assert.equal(member.admin, true, 'the administrator flag is a property of the person');
+});
+
+test('a note is a property of the person, not of the membership', async () => {
+  const { store, view, apply } = await context();
+  await store.create('user', 'alice', { groupId: 'default' });
+
+  // An administrator who is in no group still has a name the page can show.
+  assert.deepEqual(await apply([{ op: 'label.set', key: 'user:root', label: ' 运维 ' }]).then(result => result.ok), true);
+  assert.equal(store.label('user:root'), '运维');
+
+  // The member's note is edited the same way, and it outlives the membership.
+  await apply([{ op: 'label.set', key: 'user:alice', label: '爱丽丝' }]);
+  assert.equal((await view()).groups[0].members[0].displayName, '爱丽丝');
+  await apply([{ op: 'member.remove', key: 'user:alice' }]);
+  assert.equal(store.label('user:alice'), '爱丽丝');
+  await store.create('user', 'alice', { groupId: 'default' });
+  assert.equal((await view()).groups[0].members[0].label, '爱丽丝', 're-authorizing keeps the note');
+
+  // Clearing it, and refusing what a note cannot be.
+  assert.deepEqual((await apply([{ op: 'label.set', key: 'user:root', label: '' }])).ok, true);
+  assert.equal(store.label('user:root'), '');
+  const bad = await apply([{ op: 'label.set', key: 'nope', label: 'x' }]);
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /无法识别的人员 id/);
+  const multiline = await apply([{ op: 'label.set', key: 'user:root', label: '两\u0000行' }]);
+  assert.equal(multiline.ok, false);
+  assert.match(multiline.error, /单行/);
+});
+
+test('the Workspace list counts live Sessions only', async () => {
+  const { ctx, workspaces } = await context();
+  ctx.registry.rows.push({ id: 'w9', path: '/w/live', title: 'Live', sessionIds: ['s1', 's2', 's3'] });
+  ctx.registry.archivedSessionIds.push('s2', 's3');
+  const listed = workspaces.list().find(workspace => workspace.title === 'Live');
+  assert.deepEqual([listed.sessionCount, listed.archivedSessionCount], [1, 2]);
+});

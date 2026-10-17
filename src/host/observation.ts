@@ -1,122 +1,134 @@
-import type {
-  AccessDecision, ObservedIdentities, ObservedIdentity, RejectionReason,
-} from '../shared/protocol.js';
+import type { BindingKind, RejectedObservation } from '../shared/protocol.js';
+import { bindingKey } from './routing-store.js';
 
 /**
- * Host-lifetime, bounded memory of WeCom identities that messaged the Bot.
+ * Host-lifetime, bounded memory of the WeCom senders that messaged the Bot.
  *
- * It stores identifiers, counters and the latest access decision only —
- * never message content. Rejected senders are kept on purpose, so the
- * operator can see who tried and decide whether to allow them. Entries
- * expire after `ttlMs` and the oldest are evicted beyond `maxEntries`.
+ * Two things are read back from here: the member rows' activity counters, and
+ * the 「未授权用户」 card, which lists every *refused* sender together with the
+ * latest message so the operator can recognize who is knocking. Message text is
+ * kept for refused senders only — an accepted message is never stored, and
+ * nothing here is persisted. A Host restart empties the refusals, which is
+ * harmless because authorizing a sender writes a durable membership instead.
  */
 
-export interface IdentitySighting {
+export interface MessageSighting {
   readonly chat: string;
   readonly user: string;
   readonly chatType: 'single' | 'group';
-  readonly decision: AccessDecision;
-  readonly reason?: RejectionReason;
+  readonly accepted: boolean;
+  /** Latest message text; only kept while the sender is refused. */
+  readonly text?: string;
 }
 
-export interface EligibleSource { readonly chat: string; readonly user: string }
+export interface SenderStats {
+  readonly messages: number;
+  readonly lastSeenAt?: number;
+}
 
 export interface ObservationStore {
-  /** Record one message from a valid Bot callback, accepted or rejected. */
-  record(sighting: IdentitySighting): void;
-  /** An accepted source may receive automatic notifications when no chat list is configured. */
-  markEligible(chat: string, user: string): void;
-  eligibleSources(): readonly EligibleSource[];
-  snapshot(): ObservedIdentities;
+  /** Record one message from a valid Bot callback, accepted or refused. */
+  record(sighting: MessageSighting): void;
+  /** True when this chat is known to be a private (single) chat. */
+  isPrivateChat(chat: string): boolean;
+  /** Activity of one member row. */
+  stats(kind: BindingKind, id: string): SenderStats;
+  /**
+   * Refused senders, newest first. `authorized` filters out senders that have
+   * since been put into a group.
+   */
+  rejected(authorized: (key: string) => boolean): readonly RejectedObservation[];
 }
 
 export interface ObservationOptions {
   readonly ttlMs?: number;
   readonly maxEntries?: number;
+  /** Longest kept message excerpt, in characters. */
+  readonly maxTextChars?: number;
   now?(): number;
 }
 
 interface Entry {
   id: string;
+  kind: BindingKind;
+  chatType: 'single' | 'group';
   firstSeenAt: number;
   lastSeenAt: number;
   messages: number;
-  decision: AccessDecision;
-  reason?: RejectionReason;
-  chatType?: 'single' | 'group';
-  via?: string;
+  /** True while the latest decision for this sender was a refusal. */
+  refused: boolean;
+  text?: string;
 }
 
 export const OBSERVATION_TTL_MS = 24 * 60 * 60 * 1000;
 export const MAX_OBSERVED = 200;
+export const MAX_TEXT_CHARS = 120;
+
+/** One line, no control characters, bounded — safe to render as plain text. */
+function excerpt(value: string, maxChars: number): string {
+  const squashed = value.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  if (!squashed) return '';
+  return squashed.length > maxChars ? `${squashed.slice(0, maxChars)}…` : squashed;
+}
 
 export function createObservationStore(options: ObservationOptions = {}): ObservationStore {
   const ttl = options.ttlMs ?? OBSERVATION_TTL_MS;
   const max = options.maxEntries ?? MAX_OBSERVED;
+  const maxText = options.maxTextChars ?? MAX_TEXT_CHARS;
   const now = options.now ?? Date.now;
-  const users = new Map<string, Entry>();
-  const chats = new Map<string, Entry>();
-  const eligible = new Map<string, EligibleSource & { time: number }>();
+  const entries = new Map<string, Entry>();
 
   function prune(at: number): void {
-    for (const map of [users, chats]) {
-      for (const [id, entry] of map) if (entry.lastSeenAt <= at - ttl) map.delete(id);
-    }
-    for (const [key, source] of eligible) if (source.time <= at - ttl) eligible.delete(key);
-  }
-
-  function touch(map: Map<string, Entry>, id: string, at: number, update: (entry: Entry) => void): void {
-    const existing = map.get(id);
-    const entry: Entry = existing ?? { id, firstSeenAt: at, lastSeenAt: at, messages: 0, decision: 'accepted' };
-    map.delete(id); // re-insert to keep Map order = recency
-    entry.lastSeenAt = at;
-    entry.messages++;
-    update(entry);
-    map.set(id, entry);
-    if (map.size > max) map.delete(map.keys().next().value!);
-  }
-
-  function freeze(entry: Entry): ObservedIdentity {
-    return Object.freeze({
-      id: entry.id, firstSeenAt: entry.firstSeenAt, lastSeenAt: entry.lastSeenAt,
-      messages: entry.messages, decision: entry.decision,
-      ...(entry.reason ? { reason: entry.reason } : {}),
-      ...(entry.chatType ? { chatType: entry.chatType } : {}),
-      ...(entry.via ? { via: entry.via } : {}),
-    });
+    for (const [key, entry] of entries) if (entry.lastSeenAt <= at - ttl) entries.delete(key);
   }
 
   return {
     record(sighting) {
       const at = now();
       prune(at);
-      const apply = (entry: Entry) => {
-        entry.decision = sighting.decision;
-        if (sighting.reason) entry.reason = sighting.reason; else delete entry.reason;
+      const kind: BindingKind = sighting.chatType === 'group' ? 'group' : 'user';
+      const id = kind === 'group' ? sighting.chat : sighting.user;
+      const key = bindingKey(kind, id);
+      const existing = entries.get(key);
+      const entry: Entry = existing ?? {
+        id, kind, chatType: sighting.chatType, firstSeenAt: at, lastSeenAt: at, messages: 0, refused: false,
       };
-      touch(users, sighting.user, at, entry => { apply(entry); entry.via = sighting.chat; });
-      touch(chats, sighting.chat, at, entry => {
-        apply(entry);
-        entry.chatType = sighting.chatType;
-        if (sighting.chatType === 'group') entry.via = sighting.user; else delete entry.via;
-      });
+      entries.delete(key); // re-insert to keep Map order = recency
+      entry.lastSeenAt = at;
+      entry.messages++;
+      entry.chatType = sighting.chatType;
+      entry.refused = !sighting.accepted;
+      const text = !sighting.accepted && sighting.text ? excerpt(sighting.text, maxText) : '';
+      if (text) entry.text = text; else delete entry.text;
+      entries.set(key, entry);
+      if (entries.size > max) entries.delete(entries.keys().next().value!);
     },
-    markEligible(chat, user) {
-      const key = `${chat}\0${user}`;
-      eligible.delete(key);
-      eligible.set(key, { chat, user, time: now() });
-      if (eligible.size > max) eligible.delete(eligible.keys().next().value!);
-    },
-    eligibleSources() {
+    isPrivateChat(chat) {
       prune(now());
-      return [...eligible.values()].map(({ chat, user }) => ({ chat, user }));
+      return entries.get(bindingKey('user', chat))?.chatType === 'single';
     },
-    snapshot() {
+    stats(kind, id) {
       prune(now());
-      return Object.freeze({
-        users: Object.freeze([...users.values()].reverse().map(freeze)),
-        chats: Object.freeze([...chats.values()].reverse().map(freeze)),
-      });
+      const entry = entries.get(bindingKey(kind, id));
+      return entry ? { messages: entry.messages, lastSeenAt: entry.lastSeenAt } : { messages: 0 };
+    },
+    rejected(authorized) {
+      prune(now());
+      const rows: RejectedObservation[] = [];
+      for (const [key, entry] of [...entries].reverse()) {
+        if (!entry.refused || authorized(key)) continue;
+        rows.push(Object.freeze({
+          key,
+          kind: entry.kind,
+          id: entry.id,
+          chatType: entry.chatType,
+          ...(entry.text ? { text: entry.text } : {}),
+          messages: entry.messages,
+          firstSeenAt: entry.firstSeenAt,
+          lastSeenAt: entry.lastSeenAt,
+        }));
+      }
+      return rows;
     },
   };
 }

@@ -2,51 +2,40 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  accessSummary, bindingGroups, changedOperations, choiceLabel, displayPath, draftFrom,
-  dshDefaultLabel, effortsFor, identityRows, isDirty, modelKey, modelLabel, parseModelKey,
-  relativeTime, sessionOptions, setAll, storedFrom, toggle, validate,
+  changedOperations, choiceLabel, displayPath, draftFrom, dshDefaultLabel, effortsFor,
+  groupModelLabel, isDirty, modelKey, modelLabel, parseModelKey, personKey, personTitle, relativeTime,
+  setLabel, updateMember,
+  sessionOptions, setAll, storedFrom, toggle, validate,
 } from '../src/client/model.ts';
 
 test('drafts diff into minimal Config operations and never include the Secret', () => {
-  const base = storedFrom({ botId: 'bot', allowedUserIds: ['a'], adminUserIds: ['root'] });
+  const base = storedFrom({ botId: 'bot', adminUserIds: ['root'] });
   const draft = {
     ...draftFrom(base),
     botId: ' bot-2 ',
-    allowedUserIds: ['a', 'b', 'b', ' '],
-    defaultWorkspace: ' /srv/ws ',
+    adminUserIds: ['root', 'second', 'second', ' '],
     secret: 'new-secret',
   };
   assert.deepEqual(changedOperations(draft, base), [
     { op: 'set', path: ['botId'], value: 'bot-2' },
-    { op: 'set', path: ['defaultWorkspace'], value: '/srv/ws' },
-    { op: 'set', path: ['allowedUserIds'], value: ['a', 'b'] },
+    { op: 'set', path: ['adminUserIds'], value: ['root', 'second'] },
   ]);
   assert.equal(isDirty(draft, base), true);
   assert.equal(isDirty(draftFrom(base), base), false);
-  assert.equal(isDirty({ ...draftFrom(base), allowedUserIds: ['a', ' a '] }, base), false, 'normalization is not a change');
+  assert.equal(isDirty({ ...draftFrom(base), adminUserIds: ['root', ' root '] }, base), false, 'normalization is not a change');
   assert.equal(isDirty({ ...draftFrom(base), secret: 'x' }, base), true, 'a new Secret alone is a change');
   assert.equal(isDirty({ ...draftFrom(base), adminWorkspaces: ['/w'] }, base), true, 'admin scope is Config too');
 });
 
-test('validation covers the credential, the connection URL, the Workspace and the model pair', () => {
+test('validation covers the credential, the connection URL and the advanced numbers', () => {
   const empty = draftFrom(storedFrom({}));
   assert.deepEqual(Object.keys(validate(empty, false)).sort(), ['botId', 'secret']);
   assert.deepEqual(validate({ ...empty, botId: 'bot' }, true), {});
   assert.deepEqual(Object.keys(validate({ ...empty, botId: 'bot', wsUrl: 'ws://x' }, true)), ['wsUrl']);
   assert.deepEqual(Object.keys(validate({ ...empty, botId: 'bot', wsUrl: 'wss://u:p@x' }, true)), ['wsUrl']);
-  assert.deepEqual(Object.keys(validate({ ...empty, botId: 'bot', questionTimeoutMs: 0, logRetentionDays: 0.5 }, true)).sort(), ['logRetentionDays', 'questionTimeoutMs']);
-  assert.deepEqual(Object.keys(validate({ ...empty, botId: 'bot', defaultWorkspace: 'relative/dir' }, true)), ['defaultWorkspace']);
-  assert.deepEqual(validate({ ...empty, botId: 'bot', defaultWorkspace: '/srv/ws' }, true), {});
-  assert.deepEqual(validate({ ...empty, botId: 'bot', defaultWorkspace: 'C:\\ws' }, true), {});
-  assert.deepEqual(Object.keys(validate({ ...empty, botId: 'bot', defaultProvider: 'p' }, true)), ['defaultModel'],
-    'half a model selection is refused');
-  assert.deepEqual(validate({ ...empty, botId: 'bot', defaultProvider: 'p', defaultModel: 'm' }, true), {});
-});
-
-test('access summary reports which allowlists are open', () => {
-  assert.deepEqual(accessSummary({ chatIds: [], allowedUserIds: [] }), { level: 'open', unrestricted: ['chats', 'users'] });
-  assert.deepEqual(accessSummary({ chatIds: ['c'], allowedUserIds: [] }), { level: 'partial', unrestricted: ['users'] });
-  assert.equal(accessSummary({ chatIds: ['c'], allowedUserIds: ['u'] }).level, 'restricted');
+  assert.deepEqual(validate({ ...empty, botId: 'bot', wsUrl: 'wss://openws.example' }, true), {});
+  assert.deepEqual(Object.keys(validate({ ...empty, botId: 'bot', questionTimeoutMs: 0, logRetentionDays: 0.5 }, true)).sort(),
+    ['logRetentionDays', 'questionTimeoutMs']);
 });
 
 const CATALOG = {
@@ -73,47 +62,30 @@ test('model helpers round-trip the provider/model key and label the default', ()
   assert.deepEqual(effortsFor(CATALOG, 'p', 'm'), []);
 });
 
-const BINDINGS = {
-  total: 3,
-  full: false,
-  items: [
-    {
-      key: 'user:alice', kind: 'user', id: 'alice', admin: false,
-      workspace: '', workspaceTitle: '企业微信', workspacePath: '/home/.dsh/wecom-bot/workspace',
-      sessionId: 'session-1', sessionTitle: '修复登录', sessionState: 'bound', sessionRunning: false,
-      provider: '', model: '', effectiveProvider: 'p', effectiveModel: 'm',
-      messages: 2, lastSeenAt: 5, createdAt: 1, updatedAt: 2,
-    },
-    {
-      key: 'user:bob', kind: 'user', id: 'bob', admin: true,
-      workspace: '', workspaceTitle: '企业微信', workspacePath: '/home/.dsh/wecom-bot/workspace',
-      sessionId: '', sessionTitle: null, sessionState: 'auto', sessionRunning: false,
-      provider: 'p', model: 'r', effectiveProvider: 'p', effectiveModel: 'r',
-      messages: 0, createdAt: 1, updatedAt: 2,
-    },
-    {
-      key: 'group:chat-1', kind: 'group', id: 'chat-1', admin: false,
-      workspace: '/repo/app', workspaceTitle: 'App', workspacePath: '/repo/app',
-      sessionId: '', sessionTitle: null, sessionState: 'auto', sessionRunning: false,
-      provider: '', model: '', effectiveProvider: 'p', effectiveModel: 'm',
-      messages: 0, createdAt: 1, updatedAt: 2,
-    },
-  ],
+const GROUP = {
+  id: 'g1', name: '朋友', isDefault: false, workspace: '', workspaceTitle: '企业微信',
+  workspacePath: '/home/.dsh/wecom-bot/workspace', provider: 'p', model: 'r',
+  effectiveProvider: 'p', effectiveModel: 'r', members: [], memberCount: 0, messages: 0,
+};
+const MEMBER = {
+  key: 'user:alice', kind: 'user', id: 'alice', label: '', displayName: 'alice', admin: false,
+  sessionId: 'session-1', sessionTitle: '修复登录', sessionState: 'bound', sessionRunning: false,
+  messages: 2, lastSeenAt: 5, createdAt: 1,
 };
 
-test('bindings group by their effective Workspace and can be searched', () => {
-  const groups = bindingGroups(BINDINGS, '');
-  assert.deepEqual(groups.map(group => [group.title, group.rows.map(row => row.id)]),
-    [['App', ['chat-1']], ['企业微信', ['alice', 'bob']]]);
-  assert.deepEqual(bindingGroups(BINDINGS, 'bob').map(group => group.rows.map(row => row.id)), [['bob']]);
-  assert.deepEqual(bindingGroups(BINDINGS, '修复登录').map(group => group.rows.map(row => row.id)), [['alice']]);
-  assert.deepEqual(bindingGroups(BINDINGS, '/repo/app').map(group => group.rows.map(row => row.id)), [['chat-1']]);
-  assert.deepEqual(bindingGroups(BINDINGS, 'p/r').map(group => group.rows.map(row => row.id)), [['bob']],
-    'the model override is searchable');
-  assert.deepEqual(bindingGroups(null, ''), []);
+test('a group label falls back to the DSH default, and a member to its WeCom id', () => {
+  assert.equal(groupModelLabel(CATALOG, GROUP), 'Reasoner（r）');
+  assert.equal(groupModelLabel(CATALOG, { ...GROUP, effectiveProvider: '', effectiveModel: '' }), '跟随 DSH 默认模型（Model（m））');
+  assert.equal(personTitle({ label: '爱丽丝', id: 'alice' }), '爱丽丝');
+  assert.equal(personTitle({ label: '', id: 'alice' }), 'alice');
+  assert.equal(personKey('user', 'alice'), 'user:alice');
+  assert.deepEqual(setLabel('user:alice', '爱丽丝'), { op: 'label.set', key: 'user:alice', label: '爱丽丝' });
+  assert.deepEqual(updateMember('user:alice', { sessionId: 's1' }), {
+    op: 'member.update', key: 'user:alice', patch: { sessionId: 's1' },
+  });
 });
 
-test('session options list the binding Workspace Sessions and keep an unlisted bound one', () => {
+test('session options list the group Workspace Sessions and keep an unlisted bound one', () => {
   const groups = [
     { key: 'w1', kind: 'workspace', title: '企业微信', path: '/home/.dsh/wecom-bot/workspace', sessions: [
       { sessionId: 'session-1', title: '修复登录', running: false, pinned: false, updatedAt: 1 },
@@ -123,20 +95,22 @@ test('session options list the binding Workspace Sessions and keep an unlisted b
       { sessionId: 'other', title: '别的', running: false, pinned: false, updatedAt: 3 },
     ] },
   ];
-  assert.deepEqual(sessionOptions(BINDINGS.items[0], groups).map(option => option.sessionId), ['session-1', 'session-2']);
-  assert.deepEqual(sessionOptions(BINDINGS.items[1], groups).map(option => option.sessionId), ['session-1', 'session-2']);
-  assert.deepEqual(sessionOptions({ ...BINDINGS.items[0], sessionId: 'gone', sessionTitle: '归档的' }, groups)
+  assert.deepEqual(sessionOptions(MEMBER, GROUP, groups).map(option => option.sessionId), ['session-1', 'session-2']);
+  assert.deepEqual(sessionOptions({ ...MEMBER, sessionId: '', sessionTitle: null }, GROUP, groups).map(option => option.sessionId),
+    ['session-1', 'session-2']);
+  assert.deepEqual(sessionOptions({ ...MEMBER, sessionId: 'gone', sessionTitle: '归档的' }, GROUP, groups)
     .map(option => [option.sessionId, option.stale ?? false]),
   [['gone', true], ['session-1', false], ['session-2', false]]);
-  assert.deepEqual(sessionOptions(BINDINGS.items[0], undefined).map(option => option.sessionId), ['session-1']);
+  assert.deepEqual(sessionOptions(MEMBER, GROUP, undefined).map(option => option.sessionId), ['session-1']);
+  assert.deepEqual(sessionOptions(MEMBER, { ...GROUP, workspacePath: '/repo/app' }, groups).map(option => option.sessionId),
+    ['session-1', 'other'], 'a member Session outside its group Workspace is offered first');
 });
 
-test('list helpers toggle, select all and merge configured IDs with observed ones', () => {
+test('list helpers toggle, select all and shorten paths and times', () => {
   assert.deepEqual(toggle(['a'], 'b'), ['a', 'b']);
   assert.deepEqual(toggle(['a', 'b'], 'a', false), ['b']);
   assert.deepEqual(setAll(['a'], ['a', 'b', 'c'], true), ['a', 'b', 'c']);
   assert.deepEqual(setAll(['a', 'b', 'x'], ['a', 'b'], false), ['x']);
-  assert.deepEqual(identityRows([{ id: 'seen' }], ['seen', 'manual']).map(row => [row.id, Boolean(row.observed)]), [['seen', true], ['manual', false]]);
   assert.equal(displayPath('/Users/me/work/app'), '~/work/app');
   assert.equal(displayPath('/srv/app'), '/srv/app');
   assert.equal(relativeTime(Date.now() - 10), '刚刚');

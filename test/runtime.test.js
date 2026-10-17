@@ -6,12 +6,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply, Config, inject } from '../dist/host/index.js';
 import { createRuntime } from '../dist/host/runtime.js';
-import { fakeClient, fakeHost, finishedSession, frame, memoryJournal, settle } from './helpers.js';
+import { fakeClient, fakeHost, finishedSession, frame, memoryJournal, settle, until } from './helpers.js';
 
-// Every runtime in this file must own a throwaway DSH home: the binding store
+// Every runtime in this file must own a throwaway DSH home: the routing store
 // writes <DSH home>/wecom-bot/bindings.json next to the real plugin's data.
+// Tests that persist groups or members get one of their own, so they never see
+// each other's file.
 const HOME = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-home-')));
 process.env.DSH_HOME = HOME;
+
+/** Run one test against a private DSH home. */
+async function withHome(run) {
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-home-')));
+  const previous = process.env.DSH_HOME;
+  process.env.DSH_HOME = home;
+  try {
+    return await run(home);
+  } finally {
+    if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous;
+  }
+}
 
 function hostWithServices(overrides = {}) {
   const ctx = fakeHost({
@@ -33,26 +47,22 @@ function hostWithServices(overrides = {}) {
 }
 
 const silent = { info() {}, warn() {}, error() {} };
-const post = (ops) => new Request('http://localhost/api/wecom-bot/bindings', {
+const post = (ops) => new Request('http://localhost/api/wecom-bot/routing', {
   method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ops }),
 });
 
-test('Config carries policy only: connection, Workspace/model defaults and administrators', () => {
+test('Config carries policy only: connection, administrators and advanced knobs', () => {
   const config = Config({});
   assert.equal(config.botId.get(), '');
   assert.equal(config.secretEnv.get(), 'WECOM_BOT_SECRET');
-  for (const key of ['chatIds', 'allowedUserIds', 'adminUserIds', 'adminWorkspaces']) {
-    assert.deepEqual(config[key].get(), [], key);
-  }
-  assert.equal(config.defaultWorkspace.get(), '');
-  assert.equal(config.defaultProvider.get(), '');
-  assert.equal(config.defaultModel.get(), '');
-  assert.equal(config.defaultReasoningEffort.get(), '');
+  for (const key of ['adminUserIds', 'adminWorkspaces']) assert.deepEqual(config[key].get(), [], key);
   assert.equal(config.remoteApprovals.get(), false);
   assert.equal(config.logEnabled.get(), true);
   assert.equal(config.logRetentionDays.get(), 14);
   assert.equal('secret' in config, false);
-  assert.equal('sessionIds' in config, false, 'the Session allowlist was replaced by bindings');
+  for (const gone of ['chatIds', 'allowedUserIds', 'defaultWorkspace', 'defaultProvider', 'defaultModel', 'defaultReasoningEffort']) {
+    assert.equal(gone in config, false, `${gone} moved to the routing store`);
+  }
   assert.deepEqual(inject, ['credentials', 'sessionController', 'connection']);
 });
 
@@ -70,17 +80,20 @@ test('a plaintext or credentialed WebSocket URL is refused before the Secret is 
   await runtime.stop();
 });
 
-test('runtime connects with the resolved Secret, never logs it, and serves the full state', async () => {
+test('runtime connects with the resolved Secret, never logs it, and serves the full state', () => withHome(async home => {
   const { ctx } = hostWithServices();
   const client = fakeClient();
   let options;
   const journal = memoryJournal(['TOP-SECRET-VALUE']);
   const runtime = createRuntime({
     ctx, journal, log: silent,
-    config: Config({ botId: 'bot', adminUserIds: ['root'], defaultModel: 'deepseek-reasoner', defaultProvider: 'deepseek-account' }),
+    config: Config({ botId: 'bot', adminUserIds: ['root'] }),
     createClient: value => { options = value; return client; },
   });
   await runtime.start();
+  await runtime.store.load();
+  await runtime.store.updateGroup('default', { provider: 'deepseek-account', model: 'deepseek-reasoner' });
+  await runtime.store.create('user', 'alice', { groupId: 'default' });
   assert.equal(options.secret, 'TOP-SECRET-VALUE');
   assert.equal(runtime.status.connection().phase, 'connecting');
   client.emit('authenticated');
@@ -91,96 +104,133 @@ test('runtime connects with the resolved Secret, never logs it, and serves the f
   const applied = journal.find('config.applied')[0];
   assert.equal(applied.secretConfigured, true);
   assert.deepEqual(applied.adminUserIds, ['root']);
-  assert.equal(applied.defaultWorkspace, join(HOME, 'wecom-bot', 'workspace'));
   assert.equal(JSON.stringify(journal.records).includes('TOP-SECRET-VALUE'), false);
 
   client.emit('message', frame('hi', { chat: 'alice', user: 'alice' }));
-  await settle();
+  await until(() => ctx.prompts.length > 0);
   // A Session is "blank" until its first turn starts, so DSH hides it from the
   // catalog; the page's first read (and its refresh button) force the rebuild.
   const cached = await runtime.state();
   assert.deepEqual(cached.sessions.groups.map(group => group.title), ['Alpha', '未分组'],
     'the blank Session is hidden until the turn starts');
   const state = await runtime.state({ refresh: true });
-  assert.equal(state.version, 2);
-  assert.equal(state.observed.users[0].id, 'alice');
+  assert.equal(state.version, 3);
   assert.deepEqual(state.sessions.groups.map(group => group.title).sort(), ['Alpha', '未分组', '企业微信'].sort());
-  assert.deepEqual(state.observed.users.map(user => user.id), ['alice']);
+  assert.deepEqual(state.rejected, []);
   assert.equal(state.traffic.prompts, 1, 'the first message created a Session and prompted it');
-  assert.deepEqual(state.bindings.items.map(binding => binding.key), ['user:alice']);
-  const binding = state.bindings.items[0];
-  assert.equal(binding.sessionState, 'bound');
-  assert.equal(binding.sessionId, ctx.prompts[0].sessionId);
-  assert.equal(binding.effectiveModel, 'deepseek-reasoner', 'the plugin default is what the binding uses');
-  assert.equal(binding.sessionModel.provider, 'deepseek-account');
+  const [group] = state.routing.groups;
+  assert.equal(group.id, 'default');
+  assert.equal(group.isDefault, true);
+  assert.equal(group.name, '默认分组');
+  assert.equal(group.memberCount, 1);
+  assert.equal(group.workspacePath, join(home, 'wecom-bot', 'workspace'));
+  assert.equal(group.effectiveModel, 'deepseek-reasoner');
+  const [member] = group.members;
+  assert.equal(member.key, 'user:alice');
+  assert.equal(member.sessionState, 'bound');
+  assert.equal(member.sessionId, ctx.prompts[0].sessionId);
+  assert.equal(member.sessionModel.provider, 'deepseek-account');
   assert.deepEqual(state.models.choices.map(choice => choice.model), ['deepseek-chat', 'deepseek-reasoner']);
-  assert.deepEqual(state.defaults, {
-    workspace: '', workspacePath: join(HOME, 'wecom-bot', 'workspace'), workspaceTitle: '企业微信',
-    provider: 'deepseek-account', model: 'deepseek-reasoner',
-  });
-  assert.deepEqual(state.admins, ['root']);
+  assert.deepEqual(state.admins, [{ id: 'root', label: '', displayName: 'root' }]);
   assert.deepEqual(state.workspaces.map(workspace => workspace.title).sort(), ['Alpha', '企业微信'].sort());
   assert.deepEqual(state.notices, ['已配置管理员但未限定 Workspace：管理员会收到所有 Workspace 的会话通知。']);
   await runtime.stop();
-});
+}));
 
-test('the bindings route creates, edits and validates bindings for the settings page', async () => {
-  const home = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-home-bind-')));
-  const previous = process.env.DSH_HOME;
-  process.env.DSH_HOME = home;
-  try {
+test('the routing route creates groups, authorizes senders and validates every edit', () => withHome(async home => {
+  {
     const { ctx, routes } = hostWithServices();
     ctx.effect = fn => { void fn(); };
-    apply(ctx, Config({ botId: 'bot' }));
+    // No Bot ID: this test exercises the routes, and an unconfigured plugin
+    // never builds a client (a real one would dial the WeCom endpoint).
+    apply(ctx, Config({}));
     await settle();
-    const route = routes.get('/api/wecom-bot/bindings');
-    assert.ok(route, 'the bindings route is registered');
+    const route = routes.get('/api/wecom-bot/routing');
+    assert.ok(route, 'the routing route is registered');
     assert.deepEqual(route.methods, ['POST']);
 
-    const created = await route.fetch(post([{ op: 'create', kind: 'user', id: 'ZhangSan' }]));
+    const created = await route.fetch(post([{ op: 'member.add', groupId: 'default', kind: 'user', id: 'ZhangSan', label: ' 张三 ' }]));
     assert.equal(created.status, 200);
     const body = await created.json();
     assert.equal(body.ok, true);
-    assert.deepEqual(body.bindings.items.map(binding => binding.key), ['user:ZhangSan']);
-    assert.equal(body.bindings.items[0].sessionState, 'auto');
-    assert.equal(body.bindings.items[0].workspaceTitle, '企业微信');
-    assert.equal(body.bindings.items[0].workspacePath, join(home, 'wecom-bot', 'workspace'));
+    assert.equal(body.routing.total, 1);
+    const [member] = body.routing.groups[0].members;
+    assert.equal(member.key, 'user:ZhangSan');
+    assert.equal(member.displayName, '张三');
+    assert.equal(member.sessionState, 'auto');
+    assert.equal(body.routing.groups[0].workspaceTitle, '企业微信');
+    assert.equal(body.routing.groups[0].workspacePath, join(home, 'wecom-bot', 'workspace'));
 
-    // A registered Workspace can be chosen and is registered on demand.
-    const moved = await route.fetch(post([{ op: 'set', key: 'user:ZhangSan', patch: { workspace: home } }]));
+    // The default group's Workspace can be pointed at an existing directory.
+    const moved = await route.fetch(post([{ op: 'group.update', id: 'default', patch: { workspace: home } }]));
     assert.equal(moved.status, 200);
-    assert.equal((await moved.json()).bindings.items[0].workspacePath, home);
+    assert.equal((await moved.json()).routing.groups[0].workspacePath, home);
     assert.equal(ctx.registry.rows.at(-1).path, home, 'the Workspace was registered on demand');
 
-    // Unknown Workspaces and unknown bindings are refused with an explanation.
-    const badWorkspace = await route.fetch(post([{ op: 'set', key: 'user:ZhangSan', patch: { workspace: '/does/not/exist' } }]));
+    // A second group, and a member moved into it.
+    const grouped = await route.fetch(post([{ op: 'group.add', name: '朋友' }]));
+    const added = await grouped.json();
+    const guests = added.routing.groups.find(item => item.name === '朋友');
+    assert.ok(guests, 'the new group is in the response');
+    const movedMember = await route.fetch(post([{ op: 'member.update', key: 'user:ZhangSan', patch: { groupId: guests.id } }]));
+    assert.equal(movedMember.status, 200);
+    const routing = (await movedMember.json()).routing;
+    assert.deepEqual(routing.groups.map(item => [item.name, item.memberCount]), [['默认分组', 0], ['朋友', 1]]);
+
+    // Unknown Workspaces, groups, members and models are refused with an explanation.
+    const badWorkspace = await route.fetch(post([{ op: 'group.update', id: 'default', patch: { workspace: '/does/not/exist' } }]));
     assert.equal(badWorkspace.status, 422);
     assert.match((await badWorkspace.json()).error, /Workspace 目录不存在/);
-    const unknown = await route.fetch(post([{ op: 'set', key: 'user:nobody', patch: { model: 'x' } }]));
-    assert.equal(unknown.status, 422);
-    assert.match((await unknown.json()).error, /绑定不存在/);
-    const unknownModel = await route.fetch(post([{ op: 'set', key: 'user:ZhangSan', patch: { provider: 'nope', model: 'nope' } }]));
+    const unknownGroup = await route.fetch(post([{ op: 'member.update', key: 'user:ZhangSan', patch: { groupId: 'nope' } }]));
+    assert.equal(unknownGroup.status, 422);
+    assert.match((await unknownGroup.json()).error, /分组不存在/);
+    const unknownMember = await route.fetch(post([{ op: 'member.update', key: 'user:nobody', patch: { sessionId: 'x' } }]));
+    assert.equal(unknownMember.status, 422);
+    assert.match((await unknownMember.json()).error, /成员不存在/);
+    const unknownModel = await route.fetch(post([{ op: 'group.update', id: 'default', patch: { provider: 'nope', model: 'nope' } }]));
     assert.equal(unknownModel.status, 422);
     assert.match((await unknownModel.json()).error, /DSH 当前没有模型/);
+    const halfModel = await route.fetch(post([{ op: 'group.update', id: 'default', patch: { provider: 'deepseek-account' } }]));
+    assert.equal(halfModel.status, 422);
+    assert.match((await halfModel.json()).error, /请同时选择服务商与模型/);
+    const defaultDelete = await route.fetch(post([{ op: 'group.delete', id: 'default' }]));
+    assert.equal(defaultDelete.status, 422);
+    assert.match((await defaultDelete.json()).error, /默认分组不能删除/);
 
     // Malformed bodies never reach the store.
-    assert.equal((await route.fetch(new Request('http://localhost/api/wecom-bot/bindings', { method: 'POST', body: 'nope' }))).status, 400);
+    assert.equal((await route.fetch(new Request('http://localhost/api/wecom-bot/routing', { method: 'POST', body: 'nope' }))).status, 400);
     assert.equal((await route.fetch(post([]))).status, 400);
     assert.equal((await route.fetch(post([{ op: 'explode' }]))).status, 400);
 
-    const removed = await route.fetch(post([{ op: 'delete', key: 'user:ZhangSan' }]));
+    const removed = await route.fetch(post([{ op: 'member.remove', key: 'user:ZhangSan' }]));
     assert.equal(removed.status, 200);
-    assert.deepEqual((await removed.json()).bindings.items, []);
+    assert.equal((await removed.json()).routing.total, 0);
 
     // Whatever the page did, it is durable.
     const stored = JSON.parse(await readFile(join(home, 'wecom-bot', 'bindings.json'), 'utf8'));
-    assert.equal(stored.version, 1);
-  } finally {
-    if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous;
+    assert.equal(stored.version, 3);
+    assert.deepEqual(stored.groups.map(item => item.name), ['默认分组', '朋友']);
+    assert.deepEqual(stored.bindings, []);
   }
-});
+}));
 
-test('the Host-level session listener completes rounds even across a bridge rebuild', async () => {
+test('changing a group Workspace drops the Sessions it used to own', () => withHome(async home => {
+  {
+    const { ctx, routes } = hostWithServices();
+    ctx.effect = fn => { void fn(); };
+    apply(ctx, Config({}));
+    await settle();
+    const route = routes.get('/api/wecom-bot/routing');
+    await route.fetch(post([
+      { op: 'member.add', groupId: 'default', kind: 'user', id: 'alice' },
+      { op: 'member.update', key: 'user:alice', patch: { sessionId: 'session-1' } },
+    ]));
+    const moved = await route.fetch(post([{ op: 'group.update', id: 'default', patch: { workspace: home } }]));
+    assert.equal((await moved.json()).routing.groups[0].members[0].sessionId, '');
+  }
+}));
+
+test('the Host-level session listener completes rounds even across a bridge rebuild', () => withHome(async () => {
   const { ctx } = hostWithServices();
   const clients = [];
   const journal = memoryJournal();
@@ -192,8 +242,10 @@ test('the Host-level session listener completes rounds even across a bridge rebu
     createClient: () => { const client = fakeClient(); clients.push(client); return client; },
   });
   await runtime.start();
+  await runtime.store.load();
+  await runtime.store.create('user', 'alice', { groupId: 'default' });
   clients[0].emit('message', frame('build it', { chat: 'alice', user: 'alice' }));
-  await settle();
+  await until(() => ctx.prompts.length > 0);
   const requestId = ctx.prompts[0].requestId;
   const sessionId = ctx.prompts[0].sessionId;
   botId = 'bot-2';
@@ -202,40 +254,58 @@ test('the Host-level session listener completes rounds even across a bridge rebu
   assert.equal(clients.length, 2, 'the bridge was rebuilt');
   const { session, end } = finishedSession(sessionId, { promptIds: [requestId], text: 'built' });
   ctx.handlers.get('session/event')(session, end);
-  await settle();
+  await until(() => journal.find('round.complete').some(record => record.requestId === requestId));
   const round = journal.find('round.complete').find(record => record.requestId === requestId);
   assert.equal(round.outcome, 'turn-ended', 'the round survived the rebuild');
   assert.equal(round.response.assistant, 'built');
-  await runtime.stop();
-});
+  await runtime.stop();}));
 
-test('a finished turn reaches the conversation bound to the Session and lands in the journal', async () => {
+test('a finished turn reaches the conversation bound to the Session and lands in the journal', () => withHome(async () => {
   const { ctx } = hostWithServices();
   const client = fakeClient();
   const journal = memoryJournal();
   const runtime = createRuntime({ ctx, journal, log: silent, config: Config({ botId: 'bot' }), createClient: () => client });
   await runtime.start();
+  await runtime.store.load();
+  await runtime.store.create('user', 'alice', { groupId: 'default' });
   client.emit('authenticated');
   client.emit('message', frame('build it', { chat: 'alice', user: 'alice' }));
-  await settle();
+  await until(() => ctx.prompts.length > 0);
   const requestId = ctx.prompts[0].requestId;
   const sessionId = ctx.prompts[0].sessionId;
   const { session, end } = finishedSession(sessionId, { promptIds: [requestId], text: 'built' });
   ctx.handlers.get('session/event')(session, end);
-  await settle();
+  await until(() => client.sends.length > 0);
+  await until(() => journal.find('round.complete').some(record => record.requestId === requestId));
   const round = journal.find('round.complete').find(record => record.requestId === requestId);
   assert.equal(round.outcome, 'turn-ended');
   assert.equal(round.response.assistant, 'built');
   assert.deepEqual(round.response.notifiedChats, ['alice']);
   assert.deepEqual(client.sends.map(send => send.chat), ['alice']);
-  await runtime.stop();
-});
+  await runtime.stop();}));
 
-test('apply registers the authenticated routes and writes the journal under DSH_HOME', async () => {
-  const home = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-home-apply-')));
-  const previous = process.env.DSH_HOME;
-  process.env.DSH_HOME = home;
-  try {
+test('a refused sender shows up in the state view until the page authorizes it', () => withHome(async () => {
+  const { ctx } = hostWithServices();
+  const client = fakeClient();
+  const runtime = createRuntime({ ctx, journal: memoryJournal(), log: silent, config: Config({ botId: 'bot' }), createClient: () => client });
+  await runtime.start();
+  client.emit('authenticated');
+  client.emit('message', frame('我是新来的', { chat: 'mallory', user: 'mallory' }));
+  await until(() => runtime.observations.rejected(() => false).length > 0);
+  const before = await runtime.state();
+  assert.deepEqual(before.rejected.map(row => [row.key, row.text]), [['user:mallory', '我是新来的']]);
+  assert.deepEqual(before.routing.groups[0].members, []);
+  assert.deepEqual(before.notices, ['还没有任何成员：给机器人发消息的人会出现在「未授权用户」里，把它加入分组即可授权。']);
+
+  await runtime.applyRouting([{ op: 'member.add', groupId: 'default', kind: 'user', id: 'mallory', label: '市场部小李' }]);
+  const after = await runtime.state();
+  assert.deepEqual(after.rejected, [], 'the row disappears once the sender is a member');
+  assert.deepEqual(after.routing.groups[0].members.map(member => member.displayName), ['市场部小李']);
+  assert.deepEqual(after.notices, []);
+  await runtime.stop();}));
+
+test('apply registers the authenticated routes and writes the journal under DSH_HOME', () => withHome(async home => {
+  {
     const { ctx, routes } = hostWithServices();
     let setup;
     ctx.effect = fn => { setup = fn(); };
@@ -244,20 +314,21 @@ test('apply registers the authenticated routes and writes the journal under DSH_
     const state = routes.get('/api/wecom-bot/state');
     assert.equal(state.path, '/api/wecom-bot/state');
     assert.deepEqual(state.methods, ['GET']);
-    assert.ok(routes.get('/api/wecom-bot/bindings'), 'both routes are registered');
+    assert.ok(routes.get('/api/wecom-bot/routing'), 'both routes are registered');
     const response = await state.fetch(new Request('http://localhost/api/wecom-bot/state?refresh=1'));
     assert.equal(response.headers.get('cache-control'), 'no-store');
     const body = await response.json();
     assert.equal(body.connection.phase, 'unconfigured');
     assert.equal(body.connection.detail, '缺少 Bot ID');
     assert.equal(body.journal.directory, join(home, 'wecom-bot', 'logs'));
-    assert.deepEqual(body.bindings.items, []);
-    assert.equal(body.defaults.workspacePath, join(home, 'wecom-bot', 'workspace'));
+    assert.equal(body.routing.total, 0);
+    assert.deepEqual(body.routing.groups.map(group => group.name), ['默认分组']);
+    assert.equal(body.routing.groups[0].workspacePath, join(home, 'wecom-bot', 'workspace'));
+    assert.deepEqual(body.rejected, []);
     await dispose();
     assert.equal(routes.get('/api/wecom-bot/state'), undefined);
+    assert.equal(routes.get('/api/wecom-bot/routing'), undefined);
     const lines = (await readFile(body.journal.file, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
     assert.deepEqual(lines.map(line => line.event).filter(event => event.startsWith('plugin.')), ['plugin.start', 'plugin.stop']);
-  } finally {
-    if (previous === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = previous;
   }
-});
+}));

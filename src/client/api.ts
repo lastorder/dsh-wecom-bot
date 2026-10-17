@@ -1,12 +1,12 @@
 /** Network helpers: the plugin's state route and DSH credential Remotes. */
 import {
-  BINDINGS_ROUTE, STATE_ROUTE, type BindingOp, type BindingsResponse, type BridgeStateView,
+  ROUTING_ROUTE, STATE_ROUTE, type BridgeStateView, type RoutingOp, type RoutingResponse,
 } from '../shared/protocol.ts';
 import type { CredentialInfo, CredentialsRemote, RemoteEnvelope } from './types.ts';
 
 /** Document-relative, so it follows whatever base path serves the DSH GUI. */
 export const STATE_URL = STATE_ROUTE.replace(/^\//, '');
-export const BINDINGS_URL = BINDINGS_ROUTE.replace(/^\//, '');
+export const ROUTING_URL = ROUTING_ROUTE.replace(/^\//, '');
 
 export async function fetchState(refresh: boolean, signal?: AbortSignal): Promise<BridgeStateView> {
   const response = await fetch(`${STATE_URL}${refresh ? '?refresh=1' : ''}`, {
@@ -18,11 +18,11 @@ export async function fetchState(refresh: boolean, signal?: AbortSignal): Promis
   return await response.json() as BridgeStateView;
 }
 
-/** Apply binding edits immediately; the Host answers with the fresh table. */
-export async function postBindings(ops: readonly BindingOp[]): Promise<BindingsResponse> {
+/** Apply group/member edits immediately; the Host answers with the fresh table. */
+export async function postRouting(ops: readonly RoutingOp[]): Promise<RoutingResponse> {
   let response: Response;
   try {
-    response = await fetch(BINDINGS_URL, {
+    response = await fetch(ROUTING_URL, {
       method: 'POST',
       credentials: 'same-origin',
       cache: 'no-store',
@@ -34,13 +34,13 @@ export async function postBindings(ops: readonly BindingOp[]): Promise<BindingsR
   }
   if (response.status === 401 || response.status === 403) throw new Error('DSH 登录已失效，请刷新页面。');
   if (response.status === 404) throw new Error('插件后台尚未加载新版本，请重启 DSH 后再试。');
-  let body: BindingsResponse | undefined;
+  let body: RoutingResponse | undefined;
   try {
-    body = await response.json() as BindingsResponse;
+    body = await response.json() as RoutingResponse;
   } catch {
-    throw new Error(`绑定修改失败（HTTP ${response.status}）。`);
+    throw new Error(`修改失败（HTTP ${response.status}）。`);
   }
-  if (!body.ok) throw new Error(body.error ?? `绑定修改失败（HTTP ${response.status}）。`);
+  if (!body.ok) throw new Error(body.error ?? `修改失败（HTTP ${response.status}）。`);
   return body;
 }
 

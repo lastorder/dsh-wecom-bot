@@ -1,10 +1,11 @@
 /**
- * Pure state helpers for the settings page: drafts, diffs, validation and
- * list filtering. No React and no DOM, so they are unit-tested directly.
+ * Pure state helpers for the settings page: drafts, diffs, validation, group
+ * edits and display labels. No React and no DOM, so they are unit-tested
+ * directly.
  */
 import type {
-  BindingOp, BindingView, BindingsView, CatalogGroup, CatalogSession, ModelCatalogView,
-  ModelChoice, ModelSelection, ObservedIdentity,
+  BindingKind, CatalogGroup, CatalogSession, GroupMemberView, GroupView, ModelCatalogView,
+  ModelChoice, ModelSelection, RoutingOp,
 } from '../shared/protocol.ts';
 import { DEFAULT_SECRET_REF } from '../shared/protocol.ts';
 import type { FormOperation, StoredConfig } from './types.ts';
@@ -12,12 +13,6 @@ import type { FormOperation, StoredConfig } from './types.ts';
 export const DEFAULTS: StoredConfig = {
   botId: '',
   secretEnv: DEFAULT_SECRET_REF,
-  chatIds: [],
-  allowedUserIds: [],
-  defaultWorkspace: '',
-  defaultProvider: '',
-  defaultModel: '',
-  defaultReasoningEffort: '',
   adminUserIds: [],
   adminWorkspaces: [],
   wsUrl: '',
@@ -33,10 +28,9 @@ export interface Draft extends StoredConfig {
   readonly secret: string;
 }
 
-const LIST_KEYS = ['chatIds', 'allowedUserIds', 'adminUserIds', 'adminWorkspaces'] as const;
+const LIST_KEYS = ['adminUserIds', 'adminWorkspaces'] as const;
 const SCALAR_KEYS = [
   'botId', 'wsUrl', 'questionTimeoutMs', 'remoteApprovals', 'logEnabled', 'logRetentionDays',
-  'defaultWorkspace', 'defaultProvider', 'defaultModel', 'defaultReasoningEffort',
 ] as const;
 
 function list(value: unknown): string[] {
@@ -52,12 +46,6 @@ export function storedFrom(value: Partial<StoredConfig> | undefined): StoredConf
   return {
     botId: text(v.botId),
     secretEnv: text(v.secretEnv).trim() || DEFAULTS.secretEnv,
-    chatIds: list(v.chatIds),
-    allowedUserIds: list(v.allowedUserIds),
-    defaultWorkspace: text(v.defaultWorkspace),
-    defaultProvider: text(v.defaultProvider),
-    defaultModel: text(v.defaultModel),
-    defaultReasoningEffort: text(v.defaultReasoningEffort),
     adminUserIds: list(v.adminUserIds),
     adminWorkspaces: list(v.adminWorkspaces),
     wsUrl: text(v.wsUrl),
@@ -71,8 +59,6 @@ export function storedFrom(value: Partial<StoredConfig> | undefined): StoredConf
 export function draftFrom(stored: StoredConfig): Draft {
   return {
     ...stored,
-    chatIds: [...stored.chatIds],
-    allowedUserIds: [...stored.allowedUserIds],
     adminUserIds: [...stored.adminUserIds],
     adminWorkspaces: [...stored.adminWorkspaces],
     secret: '',
@@ -112,14 +98,9 @@ export function isDirty(draft: Draft, base: StoredConfig): boolean {
 }
 
 export type FieldErrors = Partial<Record<
-  'botId' | 'secret' | 'wsUrl' | 'questionTimeoutMs' | 'logRetentionDays' | 'defaultWorkspace' | 'defaultModel',
+  'botId' | 'secret' | 'wsUrl' | 'questionTimeoutMs' | 'logRetentionDays',
   string
 >>;
-
-/** Absolute path in either POSIX or Windows spelling. */
-export function isAbsolutePath(value: string): boolean {
-  return value.startsWith('/') || /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\');
-}
 
 export function validate(draft: Draft, secretConfigured: boolean): FieldErrors {
   const errors: FieldErrors = {};
@@ -140,27 +121,7 @@ export function validate(draft: Draft, secretConfigured: boolean): FieldErrors {
   if (!Number.isInteger(draft.logRetentionDays) || draft.logRetentionDays < 1 || draft.logRetentionDays > 365) {
     errors.logRetentionDays = '请输入 1–365 的整数天数。';
   }
-  const workspace = draft.defaultWorkspace.trim();
-  if (workspace && !isAbsolutePath(workspace)) errors.defaultWorkspace = '请填写绝对路径（留空 = 使用插件目录下的 workspace）。';
-  const provider = draft.defaultProvider.trim();
-  const model = draft.defaultModel.trim();
-  if (Boolean(provider) !== Boolean(model)) errors.defaultModel = '请同时选择服务商与模型，或都留空以跟随 DSH 默认模型。';
   return errors;
-}
-
-export type AccessDimension = 'chats' | 'users';
-
-export interface AccessSummary {
-  /** `open`: nothing restricted; `partial`: one list empty; `restricted`: both set. */
-  readonly level: 'open' | 'partial' | 'restricted';
-  readonly unrestricted: readonly AccessDimension[];
-}
-
-export function accessSummary(draft: Pick<StoredConfig, 'chatIds' | 'allowedUserIds'>): AccessSummary {
-  const unrestricted: AccessDimension[] = [];
-  if (!normalizedList(draft.chatIds).length) unrestricted.push('chats');
-  if (!normalizedList(draft.allowedUserIds).length) unrestricted.push('users');
-  return { level: unrestricted.length === 2 ? 'open' : unrestricted.length ? 'partial' : 'restricted', unrestricted };
 }
 
 export function toggle(values: readonly string[], id: string, on?: boolean): string[] {
@@ -174,14 +135,6 @@ export function setAll(values: readonly string[], ids: readonly string[], on: bo
   if (on) return [...new Set([...values, ...ids])];
   const remove = new Set(ids);
   return values.filter(value => !remove.has(value));
-}
-
-/** Observed identities plus configured IDs that were not observed recently. */
-export function identityRows(observed: readonly ObservedIdentity[], configured: readonly string[]): { id: string; observed?: ObservedIdentity }[] {
-  const rows: { id: string; observed?: ObservedIdentity }[] = observed.map(entry => ({ id: entry.id, observed: entry }));
-  const known = new Set(observed.map(entry => entry.id));
-  for (const id of configured) if (!known.has(id)) rows.push({ id });
-  return rows;
 }
 
 /* ------------------------------- models ------------------------------- */
@@ -220,11 +173,11 @@ export function dshDefaultLabel(catalog: ModelCatalogView | null | undefined): s
   return `跟随 DSH 默认模型（${modelLabel(catalog, value)}）`;
 }
 
-/* ------------------------------ bindings ------------------------------ */
+/* ------------------------- groups and members ------------------------- */
 
-export const BINDING_KIND_LABEL = { user: '个人', group: '群聊' } as const;
+export const BINDING_KIND_LABEL: Record<BindingKind, string> = { user: '个人', group: '群聊' };
 
-export const SESSION_STATE_LABEL: Record<BindingView['sessionState'], string> = {
+export const SESSION_STATE_LABEL: Record<GroupMemberView['sessionState'], string> = {
   bound: '已绑定',
   auto: '待创建',
   blank: '待使用',
@@ -233,33 +186,20 @@ export const SESSION_STATE_LABEL: Record<BindingView['sessionState'], string> = 
   unusable: '会话不可用',
 };
 
-export interface BindingGroup {
-  readonly key: string;
-  readonly title: string;
-  readonly path: string;
-  readonly rows: readonly BindingView[];
+/** What any person row shows first: the operator note, else the WeCom id. */
+export function personTitle(person: { readonly label: string; readonly id: string }): string {
+  return person.label || person.id;
 }
 
-/** Bindings grouped by their effective Workspace, filtered by one search string. */
-export function bindingGroups(view: BindingsView | null | undefined, query: string): BindingGroup[] {
-  const needle = query.trim().toLowerCase();
-  const groups = new Map<string, { title: string; path: string; rows: BindingView[] }>();
-  for (const binding of view?.items ?? []) {
-    const haystack = [
-      binding.id, binding.note ?? '', binding.sessionTitle ?? '', binding.sessionId,
-      binding.workspaceTitle, binding.workspacePath,
-      binding.provider && binding.model ? `${binding.provider}/${binding.model}` : '',
-      binding.sessionModel ? `${binding.sessionModel.provider}/${binding.sessionModel.model}` : '',
-    ].join(' ').toLowerCase();
-    if (needle && !haystack.includes(needle)) continue;
-    const key = binding.workspacePath || binding.workspaceTitle;
-    const group = groups.get(key) ?? { title: binding.workspaceTitle, path: binding.workspacePath, rows: [] };
-    group.rows.push(binding);
-    groups.set(key, group);
-  }
-  return [...groups.entries()]
-    .map(([key, group]) => ({ key, title: group.title, path: group.path, rows: group.rows }))
-    .sort((left, right) => left.title.localeCompare(right.title));
+/** `user:<userid>` / `group:<chatid>`: the key a note is stored under. */
+export function personKey(kind: BindingKind, id: string): string {
+  return `${kind}:${id}`;
+}
+
+/** One group's model label, or the DSH default when the group follows it. */
+export function groupModelLabel(catalog: ModelCatalogView | null | undefined, group: GroupView): string {
+  if (!group.effectiveProvider || !group.effectiveModel) return dshDefaultLabel(catalog);
+  return modelLabel(catalog, { provider: group.effectiveProvider, model: group.effectiveModel });
 }
 
 export interface SessionOption {
@@ -269,13 +209,17 @@ export interface SessionOption {
   readonly stale?: boolean;
 }
 
-/** Sessions the page may offer for one binding: its Workspace's, plus its own. */
-export function sessionOptions(binding: BindingView, groups: readonly CatalogGroup[] | undefined): SessionOption[] {
-  const found = (groups ?? []).find(group => (group.path ?? '') === binding.workspacePath);
+/** Sessions the page may offer for one member: its group's, plus its own. */
+export function sessionOptions(
+  member: Pick<GroupMemberView, 'sessionId' | 'sessionTitle'>,
+  group: Pick<GroupView, 'workspacePath'>,
+  catalogGroups: readonly CatalogGroup[] | undefined,
+): SessionOption[] {
+  const found = (catalogGroups ?? []).find(catalog => (catalog.path ?? '') === group.workspacePath);
   const options: SessionOption[] = (found?.sessions ?? [])
     .map((session: CatalogSession) => ({ sessionId: session.sessionId, title: session.title }));
-  if (binding.sessionId && !options.some(option => option.sessionId === binding.sessionId)) {
-    options.unshift({ sessionId: binding.sessionId, title: binding.sessionTitle, stale: true });
+  if (member.sessionId && !options.some(option => option.sessionId === member.sessionId)) {
+    options.unshift({ sessionId: member.sessionId, title: member.sessionTitle, stale: true });
   }
   return options;
 }
@@ -297,16 +241,39 @@ export function relativeTime(at: number | undefined, now = Date.now()): string {
   return new Date(at).toLocaleDateString();
 }
 
-/* --------------------------- binding operations ------------------------ */
+/* --------------------------- routing operations ------------------------ */
 
-export function setBindingWorkspace(key: string, workspace: string): BindingOp {
-  return { op: 'set', key, patch: { workspace } };
+export function addGroup(name?: string): RoutingOp {
+  return { op: 'group.add', ...(name ? { name } : {}) };
 }
 
-export function setBindingSession(key: string, sessionId: string): BindingOp {
-  return { op: 'set', key, patch: { sessionId } };
+export function updateGroup(id: string, patch: {
+  name?: string;
+  workspace?: string;
+  provider?: string;
+  model?: string;
+  reasoningEffort?: string;
+}): RoutingOp {
+  return { op: 'group.update', id, patch };
 }
 
-export function setBindingModel(key: string, provider: string, model: string, reasoningEffort: string): BindingOp {
-  return { op: 'set', key, patch: { provider, model, reasoningEffort } };
+export function deleteGroup(id: string): RoutingOp {
+  return { op: 'group.delete', id };
+}
+
+export function addMember(groupId: string, kind: BindingKind, id: string, label?: string): RoutingOp {
+  return { op: 'member.add', groupId, kind, id, ...(label ? { label } : {}) };
+}
+
+export function updateMember(key: string, patch: { groupId?: string; sessionId?: string }): RoutingOp {
+  return { op: 'member.update', key, patch };
+}
+
+/** Set (or clear) a person's 备注; works for members and administrators alike. */
+export function setLabel(key: string, label: string): RoutingOp {
+  return { op: 'label.set', key, label };
+}
+
+export function removeMember(key: string): RoutingOp {
+  return { op: 'member.remove', key };
 }

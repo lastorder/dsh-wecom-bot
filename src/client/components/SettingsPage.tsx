@@ -2,18 +2,14 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Button } from '@deepseek-ai/dsh-client-ui-primitives';
 import { storeCredential } from '../api.ts';
 import { useBridgeState, useFormSnapshot, useSecretStatus } from '../hooks.ts';
-import {
-  accessSummary, changedOperations, draftFrom, isDirty, storedFrom, validate, type Draft,
-} from '../model.ts';
+import { changedOperations, draftFrom, isDirty, storedFrom, validate, type Draft } from '../model.ts';
 import type { ClientRemote, ConfigFormScope, FormSnapshot } from '../types.ts';
-import { AccessBanner } from './AccessBanner.tsx';
 import { AdminCard } from './AdminCard.tsx';
 import { AdvancedCard } from './AdvancedCard.tsx';
-import { BindingsCard } from './BindingsCard.tsx';
 import { CredentialsCard } from './CredentialsCard.tsx';
-import { IdentityPicker } from './IdentityPicker.tsx';
+import { GroupsCard } from './GroupsCard.tsx';
+import { RejectedCard } from './RejectedCard.tsx';
 import { StatusHeader } from './StatusHeader.tsx';
-import { WorkspaceCard } from './WorkspaceCard.tsx';
 
 /** Plugin homepage (`plugins.bundle.config`, view `page`). */
 export function SettingsPage({ scope, remote }: { scope: ConfigFormScope; remote?: ClientRemote }) {
@@ -58,7 +54,6 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
   const errors = validate(draft, secret.configured);
   const invalid = Object.keys(errors).length > 0;
   const dirty = isDirty(draft, base);
-  const summary = accessSummary(draft);
   const update = (patch: Partial<Draft>) => {
     setDraft(current => ({ ...current, ...patch }));
     if (save.phase !== 'saving') setSave({ phase: 'idle' });
@@ -95,7 +90,8 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
       }
       setShowErrors(false);
       setSave({ phase: 'saved' });
-      setTimeout(() => bridge.refresh(true), 800);    } catch (error) {
+      setTimeout(() => bridge.refresh(true), 800);
+    } catch (error) {
       setSave({ phase: 'error', message: error instanceof Error ? error.message : String(error) });
     }
   }
@@ -105,7 +101,7 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
     : save.phase === 'error' ? { tone: 'error', text: save.message }
     : showErrors && invalid ? { tone: 'error', text: '请先修正标红的字段。' }
     : busy ? { tone: '', text: '正在保存…' }
-    : dirty ? { tone: 'dirty', text: '有未保存的更改（会话绑定除外，它即时生效）' }
+    : dirty ? { tone: 'dirty', text: '有未保存的更改（用户分组与未授权用户即时生效，不需要保存）' }
     : save.phase === 'saved' ? { tone: 'success', text: '已保存，机器人会按新配置重新连接。' }
     : { tone: '', text: '所有更改均已保存。' };
 
@@ -117,12 +113,6 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
           <div><div className="wcb-banner-body">{notice}</div></div>
         </div>
       ))}
-      <AccessBanner
-        summary={summary}
-        admins={state?.admins ?? draft.adminUserIds}
-        adminWorkspaces={state?.adminWorkspaces ?? draft.adminWorkspaces}
-        workspace={state?.defaults.workspacePath || (draft.defaultWorkspace || undefined)}
-      />
       <CredentialsCard
         draft={draft}
         errors={visibleErrors}
@@ -130,14 +120,7 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
         disabled={!writable || busy}
         onChange={update}
       />
-      <WorkspaceCard
-        draft={draft}
-        errors={visibleErrors}
-        state={state}
-        disabled={!writable || busy}
-        onChange={update}
-      />
-      <BindingsCard
+      <GroupsCard
         state={state}
         error={bridge.error}
         disabled={!writable}
@@ -145,20 +128,14 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
         onRefresh={() => bridge.refresh(true)}
         onChanged={() => bridge.refresh(true)}
       />
-      <IdentityPicker
-        observed={state?.observed}
-        chatIds={draft.chatIds}
-        userIds={draft.allowedUserIds}
-        disabled={!writable || busy}
-        connected={state?.connection.phase === 'online'}
-        onChange={patch => update(patch)}
-      />
+      <RejectedCard state={state} disabled={!writable} onChanged={() => bridge.refresh(true)} />
       <AdminCard
         draft={draft}
-        observed={state?.observed}
+        admins={state?.admins ?? []}
         workspaces={state?.workspaces ?? []}
         disabled={!writable || busy}
         onChange={patch => update(patch)}
+        onChanged={() => bridge.refresh(true)}
       />
       <AdvancedCard
         draft={draft}

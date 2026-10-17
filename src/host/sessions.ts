@@ -1,25 +1,19 @@
-import type { BindingSessionState, BindingRecord, ModelSelection } from '../shared/protocol.js';
+import type { BindingSessionState, BindingRecord, GroupRecord, ModelSelection } from '../shared/protocol.js';
 import type { CatalogService, SessionCatalog } from './catalog.js';
 import type { SessionController } from './dsh.js';
 import type { ModelService } from './models.js';
 import type { WorkspaceService } from './workspaces.js';
 
 /**
- * Session provisioning: turn a binding into a real DSH Session.
+ * Session provisioning: turn a membership into a real DSH Session.
  *
- * A binding without a Session id gets one the first time a message is routed
- * to it — created in the bound Workspace and, when a model is configured,
- * with that model installed as the Session-local selection. Later messages
- * reuse the bound Session; only a Session that DSH reports as archived,
- * subagent-owned or gone is replaced, and the replacement is persisted
- * before the prompt is submitted.
+ * A member without a Session id gets one the first time a message is routed
+ * to it — created in its group's Workspace and, when the group configures a
+ * model, with that model installed as the Session-local selection. Later
+ * messages reuse the bound Session; only a Session that DSH reports as
+ * archived, subagent-owned or gone is replaced, and the replacement is
+ * persisted before the prompt is submitted.
  */
-
-export interface ModelDefaults {
-  readonly provider: string;
-  readonly model: string;
-  readonly reasoningEffort: string;
-}
 
 export interface SessionDescription {
   readonly title: string | null;
@@ -40,13 +34,13 @@ export interface Provisioned {
 }
 
 export interface SessionProvisioner {
-  /** The Session a binding must use; creates and persists one when needed. */
-  ensure(binding: BindingRecord, defaults: ModelDefaults): Promise<Provisioned>;
-  /** Install a Session-local model now (settings-page edits, model changes). */
+  /** The Session a member must use; creates and persists one when needed. */
+  ensure(binding: BindingRecord, group: GroupRecord): Promise<Provisioned>;
+  /** Install a Session-local model now (group model edits, session switches). */
   applyModel(sessionId: string, selection: ModelSelection): Promise<ModelSelection>;
   describe(sessionId: string): Promise<SessionDescription>;
-  /** The model a binding would use, or undefined for "leave it to DSH". */
-  desired(binding: BindingRecord, defaults: ModelDefaults): ModelSelection | undefined;
+  /** The model a group configures, or undefined for "leave it to DSH". */
+  desired(group: GroupRecord): ModelSelection | undefined;
 }
 
 export interface SessionProvisionerOptions {
@@ -63,13 +57,12 @@ export interface SessionProvisionerOptions {
   readonly log?: { warn(message: string): void };
 }
 
-/** Configured model of one binding: its own override, else the plugin default. */
-export function desiredSelection(binding: BindingRecord, defaults: ModelDefaults): ModelSelection | undefined {
-  const overridden = Boolean(binding.provider && binding.model);
-  const provider = overridden ? binding.provider : defaults.provider;
-  const model = overridden ? binding.model : defaults.model;
+/** The model configured on one group, or undefined when it follows DSH. */
+export function desiredSelection(group: GroupRecord): ModelSelection | undefined {
+  const provider = group.provider.trim();
+  const model = group.model.trim();
   if (!provider || !model) return undefined;
-  const reasoningEffort = overridden ? binding.reasoningEffort : (binding.reasoningEffort || defaults.reasoningEffort);
+  const reasoningEffort = group.reasoningEffort.trim();
   return { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) };
 }
 
@@ -126,8 +119,8 @@ export function createSessionProvisioner(options: SessionProvisionerOptions): Se
 
   return {
     desired: desiredSelection,
-    async ensure(binding, defaults) {
-      const selection = desiredSelection(binding, defaults);
+    async ensure(binding, group) {
+      const selection = desiredSelection(group);
       if (binding.sessionId) {
         const state = await classify(binding.sessionId);
         if (state === 'bound' || state === 'blank') {
@@ -143,7 +136,7 @@ export function createSessionProvisioner(options: SessionProvisionerOptions): Se
           binding: options.bindingKey(binding), sessionId: binding.sessionId, state,
         });
       }
-      const workspace = await options.workspaces.resolve(binding.workspace);
+      const workspace = await options.workspaces.resolve(group.workspace);
       const created = await options.sessionController.create(
         workspace.id ? { workspaceId: workspace.id } : { cwd: workspace.path },
       );
@@ -151,7 +144,7 @@ export function createSessionProvisioner(options: SessionProvisionerOptions): Se
       journal.write({
         event: 'binding.session.created', binding: options.bindingKey(binding),
         sessionId: created.sessionId, workspace: workspace.path, workspaceId: workspace.id,
-        model: selection ?? null,
+        group: group.id, model: selection ?? null,
       });
       let model: ModelSelection | undefined;
       if (selection) {
