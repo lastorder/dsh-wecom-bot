@@ -68,9 +68,11 @@ DSH 里的会话跑完一轮、需要你回答、或者需要审批工具调用�
 
 ### 1. 安装插件
 
-已发布到 npm：[`dsh-wecom-bot`](https://www.npmjs.com/package/dsh-wecom-bot)。在 DSH 的「插件」里安装这个包名；本地开发时改成**这个仓库的绝对路径**（bundle 的 patch 会往 profile 里插入一条 `wecom-bot` 条目）。
+已发布到 npm：[`dsh-wecom-bot`](https://www.npmjs.com/package/dsh-wecom-bot)。在 DSH 的「插件」里安装时**写上版本号**，例如 `dsh-wecom-bot@0.5.0`；本地开发时改成**这个仓库的绝对路径**（bundle 的 patch 会往 profile 里插入一条 `wecom-bot` 条目）。
 
-安装完即时生效，不需要重启（bundle 会被直接应用到当前 profile）。但**改完插件代码重新构建之后必须重启 DSH**：桌面版 profile 未开启 Host 源码热重载，禁用/启用插件不会替换已缓存的 Host 模块。
+> **只写包名会装成旧版本。** pnpm 11 起默认 `minimumReleaseAge: 1440`，只解析**发布满 24 小时**的版本（[缓解供应链攻击](https://pnpm.io/zh/supply-chain-security)）；`pnpm add dsh-wecom-bot` 和 `dsh-wecom-bot@latest` 因此会静默选中「一天以前的最新版本」，而不是刚发布的那个。0.5.0 刚发布时这样装会得到 0.2.1 —— 一个根本不读 `settings.json` 的旧版本，装完机器人等于没有任何管理员和分组。写精确版本（`@0.5.0`）就能正常装：pnpm 会把这一条记进 profile 的 `pnpm-workspace.yaml`（`minimumReleaseAgeExclude`），这是官方允许的唯一放行方式。
+
+安装完即时生效，不需要重启（bundle 会被直接应用到当前 profile）。但**改完插件代码重新构建之后必须重启 DSH**：桌面版 profile 未开启 Host 源码热重载，禁用/启用插件不会替换已缓存的 Host 模块。从本地路径安装换成 npm 包安装（或反过来）也属于同一种「模块换位置」，同样要重启一次。
 
 ### 2. 连接机器人
 
@@ -273,6 +275,10 @@ pnpm run preview      # 可选：重新生成 README 里的设置页截图（需
 ```
 
 DSH 加载 `dist/` 中的构建产物：Host 入口 `dist/host/index.js`，浏览器入口 `dist/client.js`。本地开发时在 DSH「插件」中以本目录绝对路径安装 bundle；改完代码重新构建后**重启 DSH**（Host 模块不热重载；只改客户端页面时，插件客户端热重载可用）。接口已在 DSH `0.2.0-rc.2` 与 `0.2.1-rc.2` 上核对。
+
+把某个 profile 从「本地路径安装」换成「npm 包安装」（或反过来）时，插件的**解析路径变了**，而 DSH 的模块缓存仍指向旧路径：装好后条目会以 `failed to import: Cannot find package '@wecom/aibot-node-sdk' imported from …/learn/dsh-wecom-bot/dist/host/runtime.js` 这种形式失败，指向的其实是你本地仓库那个旧路径（它此时可能连 `node_modules` 都没有了）。在仓库里跑一次 `pnpm install` 修好本地依赖，然后**重启 DSH** 让条目从 profile 重新解析；同一路径上的普通版本变化（npm 0.4.2 → npm 0.5.0）不需要重启。
+
+验证一个刚发布的版本时也请用精确版本号安装——裸包名会被 pnpm 的 24 小时窗口回落到旧版本（见「[安装插件](#1-安装插件)」）。
 
 升级到新版本时没有手工迁移步骤：装上新的包，插件继续读同一个 `settings.json`（版本线没变就照原样用）；唯一需要动手的情况是文件版本换到了新的次版本线，那时旧文件会被改名放到旁边（见「[内存里保留了什么](#内存里保留了什么)」），照里面的 userid/chatid 在页面上重新加一次即可。
 
