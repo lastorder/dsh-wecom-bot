@@ -7,19 +7,21 @@ import { catalogView, createCatalogService, type CatalogService } from './catalo
 import {
   isTrustedWsUrl, readBridgeSettings, type BridgeSettings, type PluginConfig,
 } from './config.js';
-import type { AgentDefaultModel, HostContext, Logger, SessionEvent, SessionHandle, WorkspaceRegistry } from './dsh.js';
+import type {
+  AgentDefaultModel, AgentPresetRegistry, HostContext, Logger, SessionEvent, SessionHandle, WorkspaceRegistry,
+} from './dsh.js';
 import { pluginHome, type Journal } from './journal.js';
 import { createModelService, type ModelService } from './models.js';
 import { createObservationStore, type ObservationStore } from './observation.js';
+import { createPresetService, type PresetService } from './presets.js';
 import { createRoundTracker, type RoundTracker } from './rounds.js';
 import { createRouter, type Router } from './routing.js';
 import { createSessionProvisioner, type SessionProvisioner } from './sessions.js';
 import { createStatusTracker, type StatusTracker } from './status.js';
 import { summarizeTurn, type TurnSummary } from './turns.js';
-import { createWorkspaceService, pluginWorkspacePath, type WorkspaceService } from './workspaces.js';
-import { join } from 'node:path';
+import { createWorkspaceService, pluginWorkspacePath } from './workspaces.js';
 import type {
-  BridgeStateView, ModelCatalogView, RoutingOp, RoutingView,
+  BridgeStateView, ModelCatalogView, PresetCatalogView, RoutingOp, RoutingView,
 } from '../shared/protocol.js';
 
 /**
@@ -103,6 +105,9 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     sessionController: ctx.sessionController,
     defaults: () => ctx.get?.('agentDefaultModel') as AgentDefaultModel | undefined,
     log,
+  });
+  const presets: PresetService = createPresetService({
+    registry: () => ctx.get?.('agentPresets') as AgentPresetRegistry | undefined,
   });
   const provisioner: SessionProvisioner = createSessionProvisioner({
     sessionController: ctx.sessionController,
@@ -252,12 +257,24 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     }
   }
 
+  /** Presets are a local read; a failure only costs the group form its choices. */
+  async function presetsView(refresh: boolean): Promise<{ view: PresetCatalogView | null; error?: string }> {
+    const cached = presets.snapshot();
+    if (cached && !refresh) return { view: cached };
+    try {
+      return { view: await presets.load({ refresh }) };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { view: cached ?? null, error: `读取 DSH preset 列表失败：${message}` };
+    }
+  }
+
   async function routingView(options: { readonly refresh?: boolean } = {}): Promise<RoutingView> {
     await store.load();
     if (options.refresh) catalogs.invalidate();
     const policy = createAccessPolicy(readBridgeSettings(config), { memberOf: () => undefined });
     return await buildRoutingView({
-      store, provisioner, workspaces, models, catalogs, observations, router,
+      store, provisioner, workspaces, models, presets, catalogs, observations, router,
       isAdmin: user => policy.isAdmin(user),
     });
   }
@@ -289,7 +306,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     async applyRouting(ops) {
       const policy = createAccessPolicy(readBridgeSettings(config), { memberOf: () => undefined });
       const result = await applyRoutingOps({
-        store, provisioner, workspaces, models, router, catalogs, observations, log,
+        store, provisioner, workspaces, models, presets, router, catalogs, observations, log,
         isAdmin: user => policy.isAdmin(user),
       }, ops);
       if (result.ok) catalogs.invalidate();
@@ -320,6 +337,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
         journal.write({ event: 'binding.view.error', level: 'warn', error });
       }
       const { view: modelView, error: modelsError } = await modelsView(refresh);
+      const { view: presetView, error: presetsError } = await presetsView(refresh);
       const notices: string[] = [];
       const defaultGroup = routing?.groups.find(group => group.isDefault);
       if (defaultGroup?.workspaceError) notices.push(`默认分组的 Workspace 不可用：${defaultGroup.workspaceError}`);
@@ -331,7 +349,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       }
       if (routing?.full) notices.push('成员数量已达上限，新成员不会被记录；请在下方清理。');
       return {
-        version: 3,
+        version: 4,
         connection: status.connection(),
         traffic: status.traffic(),
         rejected: observations.rejected(key => Boolean(store.get(key))).map(row => {
@@ -344,6 +362,8 @@ export function createRuntime(options: RuntimeOptions): Runtime {
         ...(routingError ? { routingError } : {}),
         models: modelView,
         ...(modelsError ? { modelsError } : {}),
+        presets: presetView,
+        ...(presetsError ? { presetsError } : {}),
         workspaces: workspaces.list(),
         admins: settings.adminUserIds.map(id => {
           const key = `user:${id}`;

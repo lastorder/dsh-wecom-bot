@@ -4,7 +4,9 @@
  * Every class is prefixed `wcb-` to stay out of the host's namespace.
  */
 export const STYLES = /* css */ `
-.wcb-page {
+/* The person dialog is portalled to document.body, outside .wcb-page, so the
+   token set is declared once for both roots. */
+.wcb-page, .wcb-modal {
   /* DSH is monochrome; the business blue is its accent for focus and info. */
   --wcb-brand: var(--dsw-alias-state-business-primary, #4176e6);
   --wcb-text: var(--dsw-alias-label-primary, #0f1115);
@@ -30,7 +32,8 @@ export const STYLES = /* css */ `
   font-size: 14px;
   line-height: 1.5;
 }
-.wcb-page *, .wcb-page *::before, .wcb-page *::after { box-sizing: border-box; }
+.wcb-page *, .wcb-page *::before, .wcb-page *::after,
+.wcb-modal *, .wcb-modal *::before, .wcb-modal *::after { box-sizing: border-box; }
 
 /* Hero */
 .wcb-hero {
@@ -231,42 +234,85 @@ export const STYLES = /* css */ `
 .wcb-row-meta-inner { display: inline-flex; align-items: center; gap: 6px; }
 
 /* Groups and members */
-.wcb-binding-icon { color: var(--wcb-text-2); display: inline-flex; }
-.wcb-binding-controls { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.2fr); gap: 8px; }
-.wcb-binding-controls:has(.wcb-binding-field-narrow) { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1.2fr) minmax(0, .7fr); }
-@media (max-width: 820px) { .wcb-binding-controls, .wcb-binding-controls:has(.wcb-binding-field-narrow) { grid-template-columns: 1fr; } }
+/* Name, Workspace, model, effort, preset: the model needs the most room. */
+.wcb-binding-controls {
+  display: grid; gap: 8px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr) minmax(0, 1.6fr) minmax(0, .8fr) minmax(0, 1.25fr);
+}
+@media (max-width: 900px) {
+  .wcb-binding-controls { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+}
 .wcb-binding-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .wcb-binding-label { color: var(--wcb-text-3); font-size: 11.5px; }
-.wcb-members { display: flex; flex-direction: column; border: .5px solid var(--wcb-line); border-radius: 10px; overflow: hidden; }
-.wcb-member { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-top: .5px solid var(--wcb-line); }
-/* A person row (member, administrator, …): header line, details on click */
-.wcb-person { display: flex; flex-direction: column; border-top: .5px solid var(--wcb-line); }
-.wcb-person:first-child { border-top: none; }
-.wcb-person-head { display: flex; align-items: center; gap: 4px; padding-right: 8px; }
-.wcb-person-toggle {
-  flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px;
-  padding: 7px 10px; background: none; border: none; border-radius: 8px;
-  color: inherit; font: inherit; text-align: left; cursor: pointer;
-}
-.wcb-person-toggle:hover { box-shadow: inset 0 0 0 999px var(--wcb-hover); }
-.wcb-person-meta { flex: none; display: flex; align-items: center; gap: 6px; color: var(--wcb-text-3); font-size: 12px; }
-.wcb-person-actions { flex: none; display: flex; gap: 6px; align-items: center; }
-.wcb-person-body { display: flex; flex-direction: column; gap: 8px; padding: 2px 10px 12px 22px; }
-.wcb-person[data-open] .wcb-chevron { transform: rotate(90deg); }
-.wcb-person-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 14px; }
-.wcb-fact { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.wcb-fact-key { color: var(--wcb-text-3); font-size: 11.5px; }
-.wcb-fact-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.wcb-fact-input { width: 100%; }
-.wcb-member:first-child { border-top: none; }
+.wcb-members { display: flex; flex-direction: column; gap: 4px; padding: 4px; border: .5px solid var(--wcb-line); border-radius: 10px; }
+.wcb-member { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-radius: 8px; }
+.wcb-member + .wcb-member { border-top: .5px solid var(--wcb-line); border-top-left-radius: 0; border-top-right-radius: 0; }
 .wcb-member-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.wcb-member-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--wcb-text-3); font-size: 12px; }
+
+/* A person line: the colored badge is the only thing that opens the details. */
+.wcb-person-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.wcb-person-meta { flex: none; display: flex; align-items: center; gap: 6px; color: var(--wcb-text-3); font-size: 12px; margin-left: auto; }
+.wcb-avatar {
+  flex: none; position: relative; display: grid; place-items: center;
+  width: 26px; height: 26px; padding: 0; border-radius: 50%;
+  border: .5px solid transparent;
+}
+.wcb-avatar[data-kind="user"] { color: #2a6df4; background: color-mix(in srgb, #2a6df4 12%, transparent); }
+.wcb-avatar[data-kind="group"] { color: #b06f00; background: color-mix(in srgb, #bf8700 18%, transparent); }
+.wcb-avatar[data-button] { cursor: pointer; transition: transform .12s ease, box-shadow .12s ease; }
+.wcb-avatar[data-button]:hover:not(:disabled) {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--wcb-text) 22%, transparent);
+}
+.wcb-avatar[data-button]:active:not(:disabled) { transform: none; }
+.wcb-avatar[data-button]:focus-visible { outline: 2px solid var(--wcb-brand); outline-offset: 2px; }
+.wcb-avatar[data-button]:disabled { cursor: not-allowed; opacity: .5; }
+/* The pencil badge: "pressing this opens the details form". */
+.wcb-avatar-pencil {
+  position: absolute; right: -3px; bottom: -3px;
+  width: 13px; height: 13px; border-radius: 50%;
+  display: grid; place-items: center;
+  color: var(--wcb-text-2); background: var(--wcb-surface);
+  border: .5px solid var(--wcb-line-2);
+}
+
+/* The session line a member owns: four read-only facts until it is clicked. */
+.wcb-session-block { display: flex; flex-direction: column; gap: 4px; margin-left: 34px; }
+.wcb-session {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px;
+  width: 100%; padding: 5px 10px; border-radius: 8px; cursor: pointer;
+  border: .5px solid transparent; background: var(--wcb-surface-2);
+  color: inherit; font: inherit; text-align: left;
+}
+.wcb-session:hover:not(:disabled) { border-color: var(--wcb-line-2); }
+.wcb-session[data-open] { border-color: color-mix(in srgb, var(--wcb-brand) 45%, transparent); background: var(--wcb-surface); }
+.wcb-session:focus-visible { outline: 2px solid var(--wcb-brand); outline-offset: 1px; }
+.wcb-session:disabled { cursor: not-allowed; opacity: .7; }
+.wcb-session-fact { display: inline-flex; align-items: center; gap: 5px; min-width: 0; color: var(--wcb-text-2); font-size: 12px; }
+.wcb-session-key { color: var(--wcb-text-3); font-size: 11px; }
+.wcb-session-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; color: var(--wcb-text); }
+.wcb-session-icon { color: var(--wcb-icon-preset, var(--wcb-text-3)); }
+.wcb-session-hint { grid-column: 1 / -1; margin-top: 0; }
 .wcb-member-edit {
-  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) minmax(0, 1fr); gap: 8px;
-  align-items: end; padding: 10px; border-radius: 10px; background: var(--wcb-surface-2);
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px;
+  align-items: end; padding: 8px 10px; border-radius: 8px; background: var(--wcb-surface-2);
 }
 @media (max-width: 820px) { .wcb-member-edit { grid-template-columns: 1fr; } }
 .wcb-member-actions { display: flex; gap: 6px; align-items: center; justify-content: flex-end; }
+
+/* The person dialog (portalled, so it re-declares the page tokens). */
+.wcb-modal { padding: 0; }
+.wcb-modal-content { display: flex; flex-direction: column; gap: 14px; }
+.wcb-person-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px 18px; }
+.wcb-person-facts + .wcb-hint { margin-top: 0; }
+/* The session block sits under the identity facts, behind a hairline. */
+.wcb-dialog-section { border-top: .5px solid var(--wcb-line); padding-top: 14px; }
+.wcb-dialog-section .wcb-binding-field { margin-top: 12px; }
+.wcb-fact { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.wcb-fact-key { color: var(--wcb-text-3); font-size: 11.5px; }
+.wcb-fact-value { min-width: 0; overflow-wrap: anywhere; }
+.wcb-fact-input { width: 100%; }
+.wcb-dialog-actions { display: flex; gap: 8px; align-items: center; justify-content: flex-end; }
 .wcb-rejected-text {
   color: var(--wcb-text-2); font-size: 12.5px; padding: 6px 10px; border-radius: 8px;
   background: var(--wcb-surface-2); border-left: 2px solid var(--wcb-line-2);

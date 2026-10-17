@@ -97,6 +97,14 @@ export interface SessionSummary {
     readonly values?: {
       readonly title?: string | null;
       readonly modelSelection?: { readonly lastUsed?: unknown; readonly next?: unknown } | null;
+      /** Preset projection: the preset the Session actually runs. */
+      readonly agentPreset?: string | null;
+      /** Token meter's occupancy fold: prompt-side tokens against the window. */
+      readonly contextPressure?: {
+        readonly contextWindow?: number;
+        readonly pressureTokens?: number;
+        readonly projectedTokens?: number;
+      } | null;
       readonly [key: string]: unknown;
     };
   };
@@ -135,6 +143,8 @@ export interface SessionCreateRequest {
   readonly workspaceId?: string;
   readonly cwd?: string;
   readonly sessionId?: string;
+  /** Agent preset to compose the Session with; omitted means the DSH default. */
+  readonly agentPreset?: string;
 }
 
 export interface SessionController {
@@ -153,6 +163,22 @@ export interface SessionController {
 export interface AgentDefaultModel {
   currentSelection(): ModelSelectionValue;
   saveSelection(next: ModelSelectionValue): Promise<void>;
+}
+
+/** One declared agent preset (`ctx.get('agentPresets')`); `name` is unset for shipped ones. */
+export interface AgentPresetRow {
+  readonly id: string;
+  readonly name?: string;
+  readonly description?: string;
+  /** Activation failure; the preset stays listed but cannot start a Session. */
+  readonly broken?: string;
+}
+
+/** `ctx.agentPresets`: the roster a Session's preset must come from. */
+export interface AgentPresetRegistry {
+  list(): Promise<readonly AgentPresetRow[]>;
+  /** Metadata of one preset, or of the default when `id` is omitted. */
+  resolve(id?: string): Promise<AgentPresetRow>;
 }
 
 export interface WorkspaceEntity {

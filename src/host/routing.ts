@@ -91,7 +91,9 @@ export function createRouter(options: RouterOptions): Router {
         options.log?.warn(`WeCom could not create a Session: ${error instanceof Error ? error.message : String(error)}`);
         return {
           ok: false, binding, group,
-          message: `无法在分组「${group.name}」的 Workspace 中创建会话：${error instanceof Error ? error.message : String(error)}`,
+          // The Workspace, the preset and the model all take part in creating a
+          // Session, so name the group rather than guessing which one failed.
+          message: `无法在分组「${group.name}」中创建会话：${error instanceof Error ? error.message : String(error)}`,
         };
       }
     },

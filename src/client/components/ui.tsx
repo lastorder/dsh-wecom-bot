@@ -1,6 +1,10 @@
 /** Small layout pieces shared by the page sections. */
 import type { ReactNode, SelectHTMLAttributes } from 'react';
-import { IconChevronRightOutlineRegular, Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives';
+import {
+  IconChevronRightOutlineRegular, IconEditOutlineRegular, IconUserOutlineRegular, IconUsersOutlineRegular,
+  Input, Modal, Tag,
+} from '@deepseek-ai/dsh-client-ui-primitives';
+import type { BindingKind } from '../../shared/protocol.ts';
 
 /** Native select styled with the page's theme tokens. */
 export function Select({ className, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
@@ -109,82 +113,126 @@ export function CheckRow({ checked, onToggle, label, children, meta, disabled }:
 }
 
 /**
- * One person row. The header is the only thing visible until it is clicked;
- * clicking reveals the details below (type, WeCom id, editable 备注), which is
- * where every person component — a group's members, the administrator list —
- * edits the note that replaces the id in the row itself.
+ * A private chat and a group chat at a glance: blue person, amber group. Used
+ * on its own where the row cannot be opened (a refused sender) and inside
+ * {@link PersonAvatar} where it can.
  */
-export function PersonRow({ open, onToggle, icon, kind, title, toggleLabel, meta, actions, children }: {
-  open: boolean;
-  onToggle(): void;
-  icon?: ReactNode;
-  /** Accessible name of the row toggle, e.g. `爱丽丝 的详情`. */
-  toggleLabel?: string;
-  /** Type tag shown before the name. */
-  kind?: ReactNode;
-  title: ReactNode;
-  /** Right-aligned summary in the header (activity, Session state, …). */
-  meta?: ReactNode;
-  /** Buttons kept outside the toggle, so clicking them never expands the row. */
-  actions?: ReactNode;
-  children?: ReactNode;
+export function KindBadge({ kind, plain }: { kind: BindingKind; plain?: boolean }) {
+  return (
+    <span className="wcb-avatar" data-kind={kind} data-plain={plain ? '' : undefined} aria-hidden="true">
+      {kind === 'group' ? <IconUsersOutlineRegular size={15} /> : <IconUserOutlineRegular size={15} />}
+    </span>
+  );
+}
+
+/**
+ * The colored kind badge that is the *only* click target of a person row.
+ *
+ * The pencil on the corner says that pressing it opens the details — which is
+ * also where the 备注 is edited. Nothing else in the row is a button, so the
+ * Session line below keeps its own click behavior.
+ */
+export function PersonAvatar({ kind, label, disabled, onClick }: {
+  kind: BindingKind;
+  /** Accessible name, e.g. `爱丽丝 的详情`. */
+  label: string;
+  disabled?: boolean;
+  onClick(): void;
 }) {
   return (
-    <div className="wcb-person" data-open={open ? '' : undefined}>
-      <div className="wcb-person-head">
-        <button
-          type="button" className="wcb-person-toggle" aria-expanded={open}
-          aria-label={toggleLabel} onClick={onToggle}
-        >
-          {icon && <span className="wcb-binding-icon">{icon}</span>}
-          {kind}
-          <span className="wcb-row-title" title={typeof title === 'string' ? title : undefined}>{title}</span>
-          {meta && <span className="wcb-person-meta">{meta}</span>}
-          <span className="wcb-chevron"><IconChevronRightOutlineRegular size={14} /></span>
-        </button>
-        {actions && <span className="wcb-person-actions">{actions}</span>}
-      </div>
-      {open && <div className="wcb-person-body">{children}</div>}
+    <button
+      type="button" className="wcb-avatar" data-kind={kind} data-button=""
+      aria-label={label} title="查看详情、编辑备注"
+      disabled={disabled} onClick={onClick}
+    >
+      {kind === 'group' ? <IconUsersOutlineRegular size={15} /> : <IconUserOutlineRegular size={15} />}
+      <span className="wcb-avatar-pencil" aria-hidden="true"><IconEditOutlineRegular size={9} /></span>
+    </button>
+  );
+}
+
+/**
+ * One person in a list: the badge, the name it is known by, and a right-hand
+ * summary. The type is never spelled out here — the badge's color carries it,
+ * and the dialog names it in words.
+ */
+export function PersonRow({ kind, title, meta, label, disabled, onOpen }: {
+  kind: BindingKind;
+  title: ReactNode;
+  /** Right-aligned summary (activity, group, …). */
+  meta?: ReactNode;
+  label: string;
+  disabled?: boolean;
+  onOpen(): void;
+}) {
+  return (
+    <div className="wcb-person-head">
+      <PersonAvatar kind={kind} label={label} disabled={disabled} onClick={onOpen} />
+      <span className="wcb-row-title" title={typeof title === 'string' ? title : undefined}>{title}</span>
+      {meta && <span className="wcb-person-meta">{meta}</span>}
     </div>
   );
 }
 
-/** Type / WeCom id / 备注 of one person; the note saves when the field blurs. */
-export function PersonFacts({ kind, id, label, disabled, noteLabel, onNote }: {
-  kind: string;
+/** One row of the details dialog: a labelled value. */
+export function Fact({ name, children, mono }: { name: string; children: ReactNode; mono?: boolean }) {
+  return (
+    <div className="wcb-fact">
+      <span className="wcb-fact-key">{name}</span>
+      <span className={['wcb-fact-value', mono ? 'wcb-mono' : ''].filter(Boolean).join(' ')}>{children}</span>
+    </div>
+  );
+}
+
+/**
+ * One person's details, in a dialog: what kind of principal it is, its WeCom
+ * id, and the editable 备注 that replaces the id everywhere else. The note
+ * saves on blur — it is Host state, not part of the Config form.
+ */
+export function PersonDialog({ open, onClose, title, typeLabel, id, label, noteLabel, disabled, onNote, children, footer }: {
+  open: boolean;
+  onClose(): void;
+  /** What the dialog is about (the name the row showed). */
+  title: ReactNode;
+  typeLabel: string;
   id: string;
   label: string;
-  disabled?: boolean;
   noteLabel: string;
+  disabled?: boolean;
   onNote(next: string): void;
+  /** Person-specific extras: the Session it owns, the way out of the group, … */
+  children?: ReactNode;
+  footer?: ReactNode;
 }) {
   return (
-    <div className="wcb-person-facts">
-      <div className="wcb-fact">
-        <span className="wcb-fact-key">类型</span>
-        <span className="wcb-fact-value">{kind}</span>
+    <Modal
+      open={open} onClose={onClose} title={title} closeLabel="关闭"
+      className="wcb-modal" contentClassName="wcb-modal-content"
+    >
+      <div className="wcb-person-facts">
+        <Fact name="类型">{typeLabel}</Fact>
+        <Fact name="企微 ID" mono>{id}</Fact>
+        <div className="wcb-fact">
+          <span className="wcb-fact-key">备注</span>
+          <Input
+            key={label}
+            defaultValue={label}
+            placeholder={id}
+            disabled={disabled}
+            aria-label={noteLabel}
+            className="wcb-fact-input"
+            onBlur={event => {
+              const next = event.target.value.trim();
+              if (next !== label) onNote(next);
+            }}
+            onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+          />
+        </div>
       </div>
-      <div className="wcb-fact">
-        <span className="wcb-fact-key">企微 ID</span>
-        <span className="wcb-fact-value wcb-mono">{id}</span>
-      </div>
-      <div className="wcb-fact">
-        <span className="wcb-fact-key">备注</span>
-        <Input
-          key={label}
-          defaultValue={label}
-          placeholder={id}
-          disabled={disabled}
-          aria-label={noteLabel}
-          className="wcb-fact-input"
-          onBlur={event => {
-            const next = event.target.value.trim();
-            if (next !== label) onNote(next);
-          }}
-          onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }}
-        />
-      </div>
-    </div>
+      <div className="wcb-hint">备注即时生效，会代替企微 ID 显示；它属于这个人，移出分组后仍然保留。</div>
+      {children}
+      {footer && <div className="wcb-dialog-actions">{footer}</div>}
+    </Modal>
   );
 }
 

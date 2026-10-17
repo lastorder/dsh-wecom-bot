@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import {
-  Button, IconPlusOutlineRegular, IconShieldOutlineRegular, IconTrashOutlineRegular, IconUserOutlineRegular, Input, Tag,
+  Button, IconPlusOutlineRegular, IconShieldOutlineRegular, IconTrashOutlineRegular, Input, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { AdminView, WorkspaceOption } from '../../shared/protocol.ts';
 import { useRoutingApply } from '../hooks.ts';
 import { displayPath, personKey, setAll, setLabel, toggle } from '../model.ts';
-import { Card, CheckRow, Collapse, Empty, PersonFacts, PersonRow, Select } from './ui.tsx';
+import { Card, CheckRow, Collapse, Empty, Fact, PersonDialog, PersonRow } from './ui.tsx';
 
 /**
  * Step 4: administrators. This is the one place that grants the power to leave
@@ -159,7 +159,7 @@ export function AdminCard({ draft, admins, workspaces, disabled, onChange, onCha
   );
 }
 
-/** One administrator: the row shows the note (or the userid), details on click. */
+/** One administrator: the badge opens the details; 移除 sits in the dialog. */
 function AdminRow({ id, label, groupName, disabled, onNote, onRemove }: {
   id: string;
   label: string;
@@ -168,34 +168,46 @@ function AdminRow({ id, label, groupName, disabled, onNote, onRemove }: {
   onNote(next: string): void;
   onRemove(): void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [details, setDetails] = useState(false);
+  const name = label || id;
   return (
-    <PersonRow
-      open={open}
-      onToggle={() => setOpen(value => !value)}
-      icon={<IconUserOutlineRegular size={15} />}
-      kind={<Tag tone="success">管理员</Tag>}
-      title={label || id}
-      toggleLabel={`${label || id} 的详情`}
-      meta={<span className="wcb-row-sub">{groupName ? `分组：${groupName}` : '不在任何分组'}</span>}
-      actions={(
-        <Button
-          variant="ghost" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled}
-          aria-label={`移除管理员 ${id}`} onClick={onRemove}
-        >
-          移除
-        </Button>
-      )}
-    >
-      <PersonFacts
-        kind="管理员（个人 userid）"
+    <div className="wcb-member">
+      <PersonRow
+        kind="user"
+        title={name}
+        label={`${name} 的详情`}
+        disabled={disabled}
+        onOpen={() => setDetails(true)}
+        meta={<>
+          <Tag tone="success">管理员</Tag>
+          <span className="wcb-row-sub">{groupName ? `分组：${groupName}` : '不在任何分组'}</span>
+        </>}
+      />
+      <PersonDialog
+        open={details}
+        onClose={() => setDetails(false)}
+        title={name}
+        typeLabel="管理员（个人 userid）"
         id={id}
         label={label}
-        disabled={disabled}
         noteLabel={`管理员 ${id} 的备注`}
+        disabled={disabled}
         onNote={onNote}
-      />
-      <div className="wcb-hint">备注即时生效，会代替 userid 显示。移除管理员属于插件设置，需要点「保存配置」才生效。</div>
-    </PersonRow>
+        footer={(
+          <Button
+            variant="ghost" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled}
+            aria-label={`移除管理员 ${id}`} onClick={onRemove}
+          >
+            移除管理员
+          </Button>
+        )}
+      >
+        <div className="wcb-person-facts">
+          <Fact name="授权来源">插件设置里的管理员列表（需要「保存配置」）</Fact>
+          <Fact name="所属分组">{groupName ?? '不在任何分组'}</Fact>
+        </div>
+        <div className="wcb-hint">移除管理员属于插件设置，需要点「保存配置」才生效。</div>
+      </PersonDialog>
+    </div>
   );
 }

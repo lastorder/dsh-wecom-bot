@@ -2,9 +2,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  changedOperations, choiceLabel, displayPath, draftFrom, dshDefaultLabel, effortsFor,
-  groupModelLabel, isDirty, modelKey, modelLabel, parseModelKey, personKey, personTitle, relativeTime,
-  setLabel, updateMember,
+  changedOperations, choiceLabel, contextLabel, displayPath, draftFrom, dshDefaultLabel, effortLabel,
+  effortsFor, formatTokens, groupModelLabel, isDirty, modelKey, modelLabel, parseModelKey, personKey, personTitle,
+  presetLabel, presetName, relativeTime, setLabel, updateMember,
   sessionOptions, setAll, storedFrom, toggle, validate,
 } from '../src/client/model.ts';
 
@@ -83,6 +83,40 @@ test('a group label falls back to the DSH default, and a member to its WeCom id'
   assert.deepEqual(updateMember('user:alice', { sessionId: 's1' }), {
     op: 'member.update', key: 'user:alice', patch: { sessionId: 's1' },
   });
+});
+
+const PRESETS = {
+  presets: [
+    { id: 'standard', isDefault: true },
+    { id: 'ptc', name: 'PTC 模式' },
+    { id: 'custom' },
+  ],
+  fetchedAt: 1,
+};
+
+test('presets are named by their published name, the shipped one, or the id', () => {
+  assert.equal(presetName(PRESETS.presets[0]), '标准', 'a shipped preset has no name of its own');
+  assert.equal(presetName(PRESETS.presets[1]), 'PTC 模式');
+  assert.equal(presetName(PRESETS.presets[2]), 'custom', 'an unknown id names itself');
+  assert.equal(presetLabel(PRESETS, 'ptc'), 'PTC 模式');
+  assert.equal(presetLabel(PRESETS, 'gone'), 'gone');
+  assert.equal(presetLabel(PRESETS, ''), '跟随 DSH 默认（标准）');
+  assert.equal(presetLabel(null, ''), '跟随 DSH 默认');
+  assert.equal(presetLabel({ presets: [], fetchedAt: 1 }, ''), '跟随 DSH 默认');
+});
+
+test('an effort is named from the catalog, and context occupancy is compact', () => {
+  assert.equal(effortLabel(CATALOG, { provider: 'p', model: 'r', reasoningEffort: 'low' }), '低');
+  assert.equal(effortLabel(CATALOG, { provider: 'p', model: 'r', reasoningEffort: 'gone' }), 'gone');
+  assert.equal(effortLabel(CATALOG, { provider: 'p', model: 'm' }), '');
+  assert.equal(effortLabel(CATALOG, undefined), '');
+  assert.equal(formatTokens(812), '812');
+  assert.equal(formatTokens(12_300), '12.3k');
+  assert.equal(formatTokens(200_000), '200k');
+  assert.equal(formatTokens(1_200_000), '1.2M');
+  assert.equal(contextLabel({ used: 12_300, window: 200_000 }), '12.3k / 200k（6%）');
+  assert.equal(contextLabel({ used: 900 }), '900');
+  assert.equal(contextLabel(undefined), '');
 });
 
 test('session options list the group Workspace Sessions and keep an unlisted bound one', () => {

@@ -3,7 +3,7 @@ import type { SessionController } from '../dsh.js';
 import type { Journal } from '../journal.js';
 import type { Round } from '../rounds.js';
 import type { SessionDirectory } from './directory.js';
-import { displayTitle, oneLine, shortId } from './format.js';
+import { shortId } from './format.js';
 import type { InboundMessage } from './inbound.js';
 import { parseAnswer, type InteractionRegistry } from './interactions.js';
 import {

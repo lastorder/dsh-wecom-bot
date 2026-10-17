@@ -47,7 +47,7 @@ test('the default group always exists and cannot be removed', async () => {
   assert.equal(await store.updateGroup('default', { workspace: '/srv/app' }) !== undefined, true);
   await store.flush();
   const parsed = JSON.parse(await readFile(store.file, 'utf8'));
-  assert.equal(parsed.version, 3);
+  assert.equal(parsed.version, 4);
   assert.deepEqual(parsed.groups.map(group => group.id), ['default']);
 });
 
@@ -150,47 +150,60 @@ test('an unreadable file is quarantined instead of being overwritten', async () 
   assert.equal(store.group('default').id, 'default');
 });
 
-test('a file from a future version is ignored rather than half-read', async () => {
-  const dir = await directory();
-  await writeFile(join(dir, 'bindings.json'), JSON.stringify({ version: 99, bindings: [{ kind: 'user', id: 'alice' }] }));
-  const stages = [];
-  const store = createRoutingStore({ directory: dir, onError: (error, stage) => stages.push(stage) });
-  await store.load();
-  assert.deepEqual(store.bindings(), []);
-  assert.deepEqual(stages, ['version']);
-});
-
-test('a v1 bindings file is migrated into the default group', async () => {
+test('a file of another version is set aside instead of being read or overwritten', async () => {
   const dir = await directory();
   await writeFile(join(dir, 'bindings.json'), JSON.stringify({
-    version: 1,
-    bindings: [
-      { kind: 'user', id: 'alice', sessionId: 'session-1', workspace: '/srv/app', provider: 'p', model: 'm', reasoningEffort: 'low', note: '爱丽丝' },
-      { kind: 'group', id: 'chat-1', workspace: '/srv/other' },
-    ],
+    version: 3,
+    groups: [{ id: 'default', name: '默认分组' }],
+    bindings: [{ kind: 'user', id: 'alice', groupId: 'default', sessionId: 's1' }],
+    labels: { 'user:alice': '爱丽丝' },
   }));
   const stages = [];
   const store = createRoutingStore({ directory: dir, onError: (error, stage) => stages.push(stage) });
   await store.load();
-  assert.deepEqual(stages, ['migrate']);
-  assert.equal(store.group('default').workspace, '/srv/app', 'the first configured Workspace wins');
-  assert.equal(store.group('default').model, 'm');
-  assert.equal(store.group('default').reasoningEffort, 'low');
-  assert.deepEqual(store.bindings().map(record => record.groupId), ['default', 'default']);
-  assert.equal(store.label('user:alice'), '爱丽丝', 'the old note becomes the label');
-  assert.equal(store.get('user:alice').sessionId, 'session-1');
-  // The migrated shape is written back, so the next start reads version 3.
+  assert.deepEqual(store.bindings(), [], 'nothing from an unread file is trusted');
+  assert.equal(store.group('default').name, '默认分组');
+  assert.deepEqual(stages, ['version']);
+  await stat(join(dir, 'bindings.json.v3'));
+  await assert.rejects(stat(join(dir, 'bindings.json')), 'the old file is moved, not clobbered');
+
+  // Starting fresh writes the current version and keeps the old file around.
+  await store.create('user', 'bob', { groupId: 'default' });
   await store.flush();
-  const rewritten = JSON.parse(await readFile(store.file, 'utf8'));
-  assert.equal(rewritten.version, 3);
-  assert.equal(rewritten.labels['user:alice'], '爱丽丝', 'the note moved onto the person');
-  assert.deepEqual(rewritten.groups.map(group => group.id), ['default']);
+  const parsed = JSON.parse(await readFile(store.file, 'utf8'));
+  assert.equal(parsed.version, 4);
+  assert.deepEqual(parsed.bindings.map(record => record.id), ['bob']);
+  await stat(join(dir, 'bindings.json.v3'));
+});
+
+test('a group keeps its Workspace, model, effort and preset across a reload', async () => {
+  const dir = await directory();
+  const store = createRoutingStore({ directory: dir, onError: fail });
+  await store.load();
+  const guests = await store.createGroup('客人');
+  await store.updateGroup(guests.id, {
+    workspace: '/srv/app', provider: 'p', model: 'm', reasoningEffort: 'low', preset: 'standard',
+  });
+  await store.flush();
+
+  const reloaded = createRoutingStore({ directory: dir, onError: fail });
+  await reloaded.load();
+  const group = reloaded.group(guests.id);
+  assert.deepEqual(
+    [group.workspace, group.provider, group.model, group.reasoningEffort, group.preset],
+    ['/srv/app', 'p', 'm', 'low', 'standard'],
+  );
+  assert.equal(reloaded.group('default').preset, '', 'a group that picks none follows the DSH default');
+  // The preset is trimmed like every other group field.
+  assert.equal((await reloaded.updateGroup(guests.id, { preset: '  ptc  ' })).preset, 'ptc');
+  await reloaded.createGroup('空');
+  assert.equal(reloaded.groups().at(-1).preset, '');
 });
 
 test('corrupt entries and duplicates are dropped while loading', async () => {
   const dir = await directory();
   await writeFile(join(dir, 'bindings.json'), JSON.stringify({
-    version: 2,
+    version: 4,
     groups: [{ id: 'g1', name: ' 朋友 ' }, { id: 'g1', name: '重复' }, null, { id: 'x'.repeat(80) }, { name: '没有 id' }],
     bindings: [
       { kind: 'user', id: 'alice', groupId: 'missing', sessionId: 'session-1', createdAt: 1, updatedAt: 2 },
@@ -198,21 +211,22 @@ test('corrupt entries and duplicates are dropped while loading', async () => {
       { kind: 'nonsense', id: 'x', createdAt: 1, updatedAt: 2 },
       { kind: 'group', id: 'bad\nid', createdAt: 1, updatedAt: 2 },
       null,
-      { kind: 'group', id: ' chat-1 ', groupId: 'g1', label: ' 群 ', createdAt: 'x', updatedAt: 2 },
+      { kind: 'group', id: ' chat-1 ', groupId: 'g1', createdAt: 'x', updatedAt: 2 },
+      { kind: 'user', id: 'nobody', groupId: 'g1' },
     ],
   }));
   const store = createRoutingStore({ directory: dir, onError: fail });
   await store.load();
-  assert.deepEqual(store.bindings().map(record => `${record.kind}:${record.id}`), ['user:alice', 'group:chat-1']);
+  assert.deepEqual(store.bindings().map(record => `${record.kind}:${record.id}`),
+    ['user:alice', 'group:chat-1', 'user:nobody']);
   assert.equal(store.get('user:alice').sessionId, 'session-1', 'the first record wins');
   assert.equal(store.get('user:alice').groupId, 'default', 'a member never points at a missing group');
-  assert.equal(store.label('group:chat-1'), '群', 'a v2 note on the binding is lifted, trimmed');
   assert.equal(store.get('group:chat-1').createdAt, 0, 'an unusable timestamp becomes 0');
   assert.deepEqual(store.groups().map(group => group.name).sort(), ['朋友', '默认分组'].sort(), 'a duplicate group id is ignored');
   assert.equal(await store.remove('user:alice'), true);
   assert.equal(await store.remove('user:alice'), false);
-  assert.equal(await store.update('user:nobody', { sessionId: 'x' }), undefined);
-  assert.deepEqual(store.bindings().map(record => record.id), ['chat-1']);
+  assert.equal(await store.update('user:nonexistent', { sessionId: 'x' }), undefined);
+  assert.deepEqual(store.bindings().map(record => record.id), ['chat-1', 'nobody']);
 });
 
 test('a note belongs to the person: it survives removal, deletion and having no group', async () => {
@@ -244,28 +258,6 @@ test('a note belongs to the person: it survives removal, deletion and having no 
   assert.equal(reloaded.label('user:bob'), '鲍勃');
   assert.equal(reloaded.label('user:root'), '运维');
   assert.deepEqual(reloaded.bindings(), [], 'notes outlive every membership');
-});
-
-test('a v2 file is lifted to v3 with its notes moved onto the people', async () => {
-  const dir = await directory();
-  await writeFile(join(dir, 'bindings.json'), JSON.stringify({
-    version: 2,
-    groups: [{ id: 'default', name: '默认分组', workspace: '', provider: '', model: '' }],
-    bindings: [
-      { kind: 'user', id: 'alice', groupId: 'default', label: '爱丽丝', sessionId: 's1' },
-      { kind: 'group', id: 'chat-1', groupId: 'default', label: '', sessionId: '' },
-    ],
-  }));
-  const stages = [];
-  const store = createRoutingStore({ directory: dir, onError: (error, stage) => stages.push(stage) });
-  await store.load();
-  assert.deepEqual(stages, ['migrate']);
-  assert.equal(store.label('user:alice'), '爱丽丝');
-  assert.equal(store.label('group:chat-1'), '');
-  await store.flush();
-  const rewritten = JSON.parse(await readFile(store.file, 'utf8'));
-  assert.equal(rewritten.version, 3);
-  assert.equal(rewritten.bindings.every(record => !('label' in record)), true, 'the note is no longer on the membership');
 });
 
 test('a move to an unknown group keeps the current membership', async () => {

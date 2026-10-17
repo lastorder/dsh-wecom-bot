@@ -43,6 +43,28 @@ test('catalog follows the DSH sidebar: Workspace order, pinned first, then most 
   assert.equal(view.total, 5);
 });
 
+test('a Session row carries the preset it runs and how full its context is', () => {
+  const items = [
+    row('s1', 1, { projections: { values: {
+      title: 'A', agentPreset: ' ptc ',
+      contextPressure: { contextWindow: 200_000, pressureTokens: 12_000, projectedTokens: 13_500 },
+    } } }),
+    row('s2', 2, { projections: { values: { title: 'B', contextPressure: { pressureTokens: 900 } } } }),
+    row('s3', 3, titled('C')),
+    row('s4', 4, { projections: { values: { title: 'D', contextPressure: { contextWindow: 1000 } } } }),
+    row('s5', 5, { projections: { values: { title: 'E', agentPreset: null } } }),
+  ];
+  const catalog = buildCatalog(items, undefined, 1);
+  assert.equal(catalog.get('s1').preset, 'ptc');
+  assert.deepEqual(catalog.get('s1').context, { used: 13_500, window: 200_000 },
+    'the projected total is what the next request will carry');
+  assert.deepEqual(catalog.get('s2').context, { used: 900 }, 'no window reported: the used count only');
+  assert.equal(catalog.get('s3').preset, undefined);
+  assert.equal(catalog.get('s3').context, undefined);
+  assert.equal(catalog.get('s4').context, undefined, 'a window with no sample says nothing about occupancy');
+  assert.equal(catalog.get('s5').preset, undefined, 'a null preset is the default, not a name');
+});
+
 test('without a Workspace registry the catalog groups by working directory', () => {
   const catalog = buildCatalog([row('x', 1, { cwd: '/p/old' }), row('y', 9, { cwd: '/p/new' }), row('z', 5)], undefined);
   assert.deepEqual(catalog.groups.map(g => [g.kind, g.title]), [['directory', 'new'], ['directory', 'old'], ['ungrouped', '未分组']]);

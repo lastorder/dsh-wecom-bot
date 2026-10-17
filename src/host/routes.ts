@@ -38,8 +38,14 @@ export function stateRoute(runtime: Pick<Runtime, 'state'>): FetchRoute {
   };
 }
 
-/** Whether one parsed body entry is a routing op this Host understands. */
-function isOp(value: unknown): value is RoutingOp {
+/**
+ * Whether one parsed body entry is a routing op this Host understands.
+ *
+ * Every {@link RoutingOp} variant must be accepted here: the route rejects a
+ * whole batch for one unknown op, so a missing case silently disables a page
+ * feature (a 备注 edit, say) while the client keeps offering it.
+ */
+export function isRoutingOp(value: unknown): value is RoutingOp {
   if (!value || typeof value !== 'object') return false;
   const record = value as Record<string, unknown>;
   switch (record.op) {
@@ -55,6 +61,8 @@ function isOp(value: unknown): value is RoutingOp {
       return typeof record.key === 'string' && Boolean(record.patch) && typeof record.patch === 'object';
     case 'member.remove':
       return typeof record.key === 'string';
+    case 'label.set':
+      return typeof record.key === 'string' && typeof record.label === 'string';
     default:
       return false;
   }
@@ -81,7 +89,7 @@ export function routingRoute(runtime: Pick<Runtime, 'routingView' | 'applyRoutin
       if (!Array.isArray(ops) || !ops.length) {
         return json({ ok: false, error: '缺少要应用的修改。' } satisfies RoutingResponse, 400);
       }
-      if (ops.length > MAX_OPS || !ops.every(isOp)) {
+      if (ops.length > MAX_OPS || !ops.every(isRoutingOp)) {
         return json({ ok: false, error: '修改格式不正确。' } satisfies RoutingResponse, 400);
       }
       try {

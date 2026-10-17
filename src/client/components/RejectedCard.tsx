@@ -1,11 +1,11 @@
 import { useState } from 'react';
 import {
-  IconCheckCircleOutlineRegular, IconUserOutlineRegular, IconUsersOutlineRegular, Button, Input, Tag,
+  IconCheckCircleOutlineRegular, Button, Input, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives';
 import { postRouting } from '../api.ts';
 import type { BridgeStateView, GroupView, RejectedSenderView } from '../../shared/protocol.ts';
-import { BINDING_KIND_LABEL, addMember, relativeTime } from '../model.ts';
-import { Card, Empty, Select } from './ui.tsx';
+import { addMember, relativeTime } from '../model.ts';
+import { Card, Empty, KindBadge, Select } from './ui.tsx';
 
 /**
  * Step 3: senders the Bot refused because they belong to no group.
@@ -73,10 +73,8 @@ function RejectedRow({ row, groups, disabled, onChanged }: {
   return (
     <div className="wcb-member">
       <div className="wcb-member-head">
-        <span className="wcb-binding-icon">
-          {row.kind === 'group' ? <IconUsersOutlineRegular size={15} /> : <IconUserOutlineRegular size={15} />}
-        </span>
-        <Tag tone={row.kind === 'group' ? 'warning' : 'info'}>{BINDING_KIND_LABEL[row.kind]}</Tag>
+        {/* The badge says 个人 or 群聊 by color; authorizing still happens below. */}
+        <KindBadge kind={row.kind} plain />
         <span className="wcb-row-title" title={row.id}>{row.displayName}</span>
         <span style={{ flex: 1 }} />
         <span className="wcb-row-sub">{row.messages} 次 · {relativeTime(row.lastSeenAt)}</span>

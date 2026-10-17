@@ -13,13 +13,16 @@ const out = resolve(root, 'preview');
 const dark = process.argv.includes('--dark');
 const empty = process.argv.includes('--empty');
 const advanced = process.argv.includes('--advanced');
+// A separate shot of the person dialog: the badge is the only way in, and the
+// dialog is where the note and the group move live.
+const dialog = process.argv.includes('--dialog');
 const read = path => readFile(resolve(root, path), 'utf8');
 
 const now = Date.now();
 const REPO = '/Users/me/Workspace/learn/dsh-wecom-bot';
 const PLUGIN_WS = '/Users/me/.dsh/wecom-bot/workspace';
 const state = {
-  version: 3,
+  version: 4,
   connection: empty ? { phase: 'unconfigured', since: now - 30_000, detail: '缺少 Bot ID' } : { phase: 'online', since: now - 25 * 60_000 },
   traffic: empty ? { since: now, received: 0, rejected: 0, prompts: 0, notifications: 0, failures: 0 }
     : { since: now - 3_600_000, received: 21, rejected: 2, prompts: 9, notifications: 11, failures: 0, lastMessageAt: now - 90_000 },
@@ -40,13 +43,13 @@ const state = {
   sessions: {
     groups: [
       { key: 'w1', kind: 'workspace', title: 'dsh-wecom-bot', path: REPO, sessions: [
-        { sessionId: '0dd82b7f-516c-41dc-b0a0-ac95e596a05a', title: '企业微信 Bot 插件开发', running: true, pinned: true, updatedAt: now - 60_000, model: { provider: 'deepseek-account', model: 'deepseek-reasoner' } },
-        { sessionId: 'fa761602-210c-4653-8dc6-9d74e1f71507', title: '配置页重构与日志', running: false, pinned: false, updatedAt: now - 3 * 3_600_000 },
+        { sessionId: '0dd82b7f-516c-41dc-b0a0-ac95e596a05a', title: '企业微信 Bot 插件开发', running: true, pinned: true, updatedAt: now - 60_000, model: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' }, preset: 'standard', context: { used: 128_000, window: 128_000 } },
+        { sessionId: 'fa761602-210c-4653-8dc6-9d74e1f71507', title: '配置页重构与日志', running: false, pinned: false, updatedAt: now - 3 * 3_600_000, model: { provider: 'deepseek-account', model: 'deepseek-chat' }, preset: 'minimal' },
         { sessionId: '8e05784f-03c2-41a7-b675-7a60b64efa01', title: null, running: false, pinned: false, updatedAt: now - 2 * 86_400_000 },
       ] },
       { key: 'w3', kind: 'workspace', title: '企业微信', path: PLUGIN_WS, sessions: [
-        { sessionId: '934bf135-e3e5-4c8e-9784-45ddc1457c05', title: '周报整理', running: false, pinned: false, updatedAt: now - 5 * 86_400_000 },
-        { sessionId: '5b19e0f2-6d3a-4a1e-9d3f-1a2b3c4d5e6f', title: '群里的运维问答', running: true, pinned: false, updatedAt: now - 2 * 86_400_000 },
+        { sessionId: '934bf135-e3e5-4c8e-9784-45ddc1457c05', title: '周报整理', running: false, pinned: false, updatedAt: now - 5 * 86_400_000, model: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' }, preset: 'standard', context: { used: 12_300, window: 128_000 } },
+        { sessionId: '5b19e0f2-6d3a-4a1e-9d3f-1a2b3c4d5e6f', title: '群里的运维问答', running: true, pinned: false, updatedAt: now - 2 * 86_400_000, model: { provider: 'deepseek-account', model: 'deepseek-chat' }, preset: 'ptc', context: { used: 41_000, window: 128_000 } },
       ] },
       { key: 'ungrouped', kind: 'ungrouped', title: '未分组', sessions: [
         { sessionId: 'db3af9bd-edb8-4c11-8869-9e63c4174f9c', title: '临时问题', running: false, pinned: false, updatedAt: now - 9 * 86_400_000 },
@@ -63,14 +66,15 @@ const state = {
         id: 'default', name: '默认分组', isDefault: true,
         workspace: '', workspaceTitle: '企业微信', workspacePath: PLUGIN_WS,
         // No model of its own: the header says it follows the DSH default.
-        provider: '', model: '', effectiveProvider: '', effectiveModel: '',
+        provider: '', model: '', effectiveProvider: '', effectiveModel: '', preset: '',
         memberCount: empty ? 0 : 3, messages: empty ? 0 : 20, lastSeenAt: now - 90_000,
         members: empty ? [] : [
           {
             key: 'user:ZhangSan', kind: 'user', id: 'ZhangSan', label: '张三', displayName: '张三', admin: true,
             sessionId: '934bf135-e3e5-4c8e-9784-45ddc1457c05', sessionTitle: '周报整理',
             sessionState: 'bound', sessionRunning: false,
-            sessionModel: { provider: 'deepseek-account', model: 'deepseek-reasoner' },
+            sessionModel: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' },
+            sessionPreset: 'standard', sessionContext: { used: 12_300, window: 128_000 },
             messages: 14, lastSeenAt: now - 90_000, createdAt: now - 3_600_000,
           },
           {
@@ -83,6 +87,7 @@ const state = {
             sessionId: '5b19e0f2-6d3a-4a1e-9d3f-1a2b3c4d5e6f', sessionTitle: '群里的运维问答',
             sessionState: 'bound', sessionRunning: true,
             sessionModel: { provider: 'deepseek-account', model: 'deepseek-chat' },
+            sessionPreset: 'ptc', sessionContext: { used: 41_000, window: 128_000 },
             messages: 4, lastSeenAt: now - 600_000, createdAt: now - 1_800_000,
           },
         ],
@@ -90,15 +95,16 @@ const state = {
       {
         id: 'g1', name: '同事', isDefault: false,
         workspace: REPO, workspaceTitle: 'dsh-wecom-bot', workspacePath: REPO,
-        provider: 'deepseek-account', model: 'deepseek-chat',
-        effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-chat',
+        provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high', preset: 'ptc',
+        effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-reasoner', effectiveReasoningEffort: 'high',
         memberCount: empty ? 0 : 1, messages: 0,
         members: empty ? [] : [
           {
             key: 'group:wrOgBBBBBBBBother', kind: 'group', id: 'wrOgBBBBBBBBother', label: '研发群', displayName: '研发群', admin: false,
             sessionId: '0dd82b7f-516c-41dc-b0a0-ac95e596a05a', sessionTitle: '企业微信 Bot 插件开发',
             sessionState: 'bound', sessionRunning: true,
-            sessionModel: { provider: 'deepseek-account', model: 'deepseek-reasoner' },
+            sessionModel: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' },
+            sessionPreset: 'standard', sessionContext: { used: 61_500, window: 128_000 },
             messages: 6, lastSeenAt: now - 3 * 3_600_000, createdAt: now - 86_400_000,
           },
         ],
@@ -113,6 +119,15 @@ const state = {
     ],
     dshDefault: { provider: 'deepseek-account', model: 'deepseek-chat' },
     failures: [], fetchedAt: now - 12_000,
+  },
+  presets: {
+    presets: [
+      { id: 'standard', isDefault: true },
+      { id: 'ptc' },
+      { id: 'minimal' },
+      { id: 'cordis' },
+    ],
+    fetchedAt: now - 12_000,
   },
   workspaces: [
     { id: 'w1', path: REPO, title: 'dsh-wecom-bot', pluginOwned: false, sessionCount: 3, archivedSessionCount: 4 },
@@ -180,6 +195,13 @@ const PRIMITIVES_CSS = `
 .p-dot{display:inline-block;border-radius:50%}.p-dot[data-state=done]{background:var(--dsw-alias-state-success-primary)}
 .p-dot[data-state=warning]{background:var(--dsw-alias-state-warn-primary)}.p-dot[data-state=error]{background:var(--dsw-alias-state-error-primary)}
 .p-dot[data-state=idle]{background:var(--dsw-alias-label-tertiary)}.p-dot[data-state=ongoing]{border:2px solid var(--dsw-alias-label-tertiary);border-right-color:transparent;box-sizing:border-box}
+.p-modal{position:fixed;inset:0;z-index:1000;display:grid;place-items:center;padding:24px}
+.p-modal-mask{position:absolute;inset:0;background:#0008;backdrop-filter:blur(2px)}
+.p-modal-card{position:relative;width:min(560px,100%);max-height:80vh;overflow:auto;padding:20px 22px;border-radius:16px;background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);box-shadow:0 24px 60px #0005;font-family:inherit}
+.p-modal-head{display:flex;align-items:center;gap:8px;margin-bottom:14px}
+.p-modal-title{flex:1;font-size:15px;font-weight:650;color:var(--dsw-alias-label-primary)}
+.p-modal-close{border:none;background:none;cursor:pointer;color:var(--dsw-alias-label-tertiary);font-size:16px;line-height:1;padding:2px 4px}
+.p-modal-foot{display:flex;gap:8px;justify-content:flex-end;margin-top:14px}
 `;
 
 const html = `<!doctype html>
@@ -215,6 +237,8 @@ const icons = {
   IconCopyOutlineRegular: icon('M5.5 5.5h8v8h-8ZM10.5 5.5v-3h-8v8h3'),
   IconTrashOutlineRegular: icon('M2.5 4.5h11M6 4.5V2.5h4v2M4 4.5l.8 9h6.4l.8-9M6.5 7v4M9.5 7v4'),
   IconPlusOutlineRegular: icon('M8 2.5v11M2.5 8h11'),
+  IconEditOutlineRegular: icon('M2.5 13.5h2.5L13 5.5 10.5 3 2.5 11v2.5ZM9.5 4l2.5 2.5'),
+  IconAgentPresetOutlineRegular: icon('M8 1.5 9.7 6.3 14.5 8 9.7 9.7 8 14.5 6.3 9.7 1.5 8 6.3 6.3Z'),
 };
 const primitives = {
   ...icons,
@@ -223,6 +247,20 @@ const primitives = {
   Switch: ({ checked, onChange, label, disabled }) => h('button', { type: 'button', role: 'switch', 'aria-checked': checked, 'aria-label': label, disabled, className: 'p-switch', onClick: () => onChange(!checked) }, h('span')),
   Tag: ({ tone = 'outline', children }) => h('span', { className: 'p-tag', 'data-tone': tone }, children),
   StateDot: ({ state, size }) => h('span', { className: 'p-dot', 'data-state': state, style: { width: size || (state === 'ongoing' ? 12 : 8), height: size || (state === 'ongoing' ? 12 : 8) } }),
+  // The real Modal portals to document.body; so does this one, with the same
+  // mask/dialog/head/body/footer shape the shell's CSS module produces.
+  Modal: ({ open, onClose, title, closeLabel, children, footer, className }) => (open
+    ? ReactDOM.createPortal(
+      h('div', { className: 'p-modal' },
+        h('div', { className: 'p-modal-mask', onClick: onClose }),
+        h('div', { className: ['p-modal-card', className || ''].join(' '), role: 'dialog', 'aria-modal': 'true', 'aria-label': title },
+          h('div', { className: 'p-modal-head' },
+            h('span', { className: 'p-modal-title' }, title),
+            h('button', { type: 'button', className: 'p-modal-close', 'aria-label': closeLabel, onClick: onClose }, '×')),
+          h('div', { className: 'p-modal-body' }, children),
+          footer && h('div', { className: 'p-modal-foot' }, footer))),
+      document.body)
+    : null),
   writeClipboard: async () => true,
 };
 const modules = { react: React, 'react/jsx-runtime': runtime, '@deepseek-ai/dsh-client-ui-primitives': primitives };
@@ -254,12 +292,15 @@ plugin.apply({
   effect: fn => fn(),
 });
 ReactDOM.createRoot(document.getElementById('root')).render(page({ view: 'page' }));
-// The page opens with every group folded, so the preview expands the first one,
-// presses its 编辑 button and opens one person's details to show what clicking
-// each thing reveals.
+// The page opens with every group folded, so the preview expands the first one
+// and presses its 编辑 button, which is what reveals the group settings.
 if (!${empty}) setTimeout(() => { document.querySelectorAll('.wcb-group-toggle')[0]?.click(); }, 200);
-if (!${empty}) setTimeout(() => { document.querySelector('[aria-label="编辑 默认分组"]')?.click(); }, 350);
-if (!${empty}) setTimeout(() => { document.querySelector('[aria-label="张三 的详情"]')?.click(); }, 500);
+// The dialog shot keeps the group folded back to its member list: the point is
+// the person, not the group form.
+if (!${empty} && !${dialog}) setTimeout(() => { document.querySelector('[aria-label="编辑 默认分组"]')?.click(); }, 350);
+// The --dialog variant goes one step further: the badge opens the person
+// details, which is where the 备注 and the group move live.
+if (${dialog}) setTimeout(() => { document.querySelector('[aria-label="张三 的详情"]')?.click(); }, 500);
 if (${advanced}) setTimeout(() => {
   document.querySelector('details').open = true;
   // Also open the notification scope, so the variant shows which Workspaces it
@@ -279,7 +320,7 @@ console.log(file);
 
 const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 if (existsSync(chrome)) {
-  const png = resolve(out, `settings${dark ? '-dark' : ''}${empty ? '-empty' : ''}${advanced ? '-advanced' : ''}.png`);
+  const png = resolve(out, `settings${dark ? '-dark' : ''}${empty ? '-empty' : ''}${advanced ? '-advanced' : ''}${dialog ? '-dialog' : ''}.png`);
   const flags = ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1', '--virtual-time-budget=3000'];
   // Measure at the real width first (the page has a <820px breakpoint), then
   // screenshot exactly that tall, so the PNG has no empty band at the bottom.

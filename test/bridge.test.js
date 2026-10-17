@@ -124,7 +124,7 @@ test('an authorized member gets a Session in their group Workspace on first cont
   assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1');
   await h.store.flush();
   const file = JSON.parse(await readFile(h.store.file, 'utf8'));
-  assert.equal(file.version, 3);
+  assert.equal(file.version, 4);
   assert.equal(file.bindings[0].sessionId, 'session-created-1');
   h.stop();
 });
@@ -339,6 +339,25 @@ test('the group model is installed on a new Session and the DSH default is resto
   h.stop();
 });
 
+test('a group preset composes the Session it creates, once', async () => {
+  const h = await harness({}, {}, { group: { preset: 'ptc' } });
+  await h.send('你好');
+  assert.equal(h.ctx.creates.length, 1);
+  assert.equal(h.ctx.creates[0].agentPreset, 'ptc', 'the Session is created with the group preset');
+  assert.equal(h.journal.find('binding.session.created')[0].preset, 'ptc');
+  await h.send('继续');
+  assert.equal(h.ctx.creates.length, 1, 'a preset is a creation fact: the same Session is reused');
+  h.stop();
+});
+
+test('a group without a preset lets DSH compose its default', async () => {
+  const h = await harness();
+  await h.send('你好');
+  assert.equal('agentPreset' in h.ctx.creates[0], false);
+  assert.equal(h.journal.find('binding.session.created')[0].preset, null);
+  h.stop();
+});
+
 test('every member of a group shares its Workspace and model', async () => {
   const h = await harness({}, {}, {
     group: { workspace: TEST_WORKSPACE_PATH, provider: 'deepseek-account', model: 'deepseek-reasoner' },
@@ -548,7 +567,7 @@ test('a group Workspace that cannot be resolved answers with an explanation inst
   await h.send('你好');
   assert.equal(h.ctx.prompts.length, 0);
   assert.equal(h.ctx.creates.length, 0);
-  assert.match(lastReply(h), /无法在分组「默认分组」的 Workspace 中创建会话/);
+  assert.match(lastReply(h), /无法在分组「默认分组」中创建会话/);
   assert.equal(h.journal.find('round.complete').at(-1).outcome, 'blocked');
   h.stop();
 });

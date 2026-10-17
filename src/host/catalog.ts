@@ -1,6 +1,6 @@
 import { basename } from 'node:path';
 import type {
-  CatalogGroup, CatalogSession, HiddenSelection, ModelSelection, SessionCatalogView,
+  CatalogGroup, CatalogSession, ContextUsage, HiddenSelection, ModelSelection, SessionCatalogView,
 } from '../shared/protocol.js';
 import type { SessionSummary, WorkspaceRegistry } from './dsh.js';
 
@@ -64,6 +64,26 @@ export function sessionModel(summary: SessionSummary | undefined): ModelSelectio
   return pick(value?.lastUsed) ?? pick(value?.next);
 }
 
+/** Agent preset the Session runs, from the `agentPreset` projection. */
+export function sessionPreset(summary: SessionSummary | undefined): string | undefined {
+  const value = summary?.projections?.values?.agentPreset;
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+/** Context occupancy of the Session, from the `contextPressure` projection. */
+export function sessionContext(summary: SessionSummary | undefined): ContextUsage | undefined {
+  const value = summary?.projections?.values?.contextPressure;
+  if (!value || typeof value !== 'object') return undefined;
+  const tokens = (raw: unknown): number | undefined =>
+    typeof raw === 'number' && Number.isFinite(raw) && raw >= 0 ? Math.round(raw) : undefined;
+  // `projectedTokens` follows the surface movement since the last request, so it
+  // is what the *next* request will carry; it falls back to the last sample.
+  const used = tokens(value.projectedTokens) ?? tokens(value.pressureTokens);
+  if (used === undefined) return undefined;
+  const window = tokens(value.contextWindow);
+  return { used, ...(window ? { window } : {}) };
+}
+
 export function buildCatalog(
   items: readonly SessionSummary[], registry: WorkspaceRegistry | undefined, generatedAt = Date.now(),
 ): SessionCatalog {
@@ -81,6 +101,8 @@ export function buildCatalog(
   }
   const toSession = (summary: SessionSummary): CatalogSession => {
     const model = sessionModel(summary);
+    const preset = sessionPreset(summary);
+    const context = sessionContext(summary);
     return {
       sessionId: summary.sessionId,
       title: sessionTitle(summary),
@@ -88,6 +110,8 @@ export function buildCatalog(
       pinned: pinned.has(summary.sessionId),
       updatedAt: summary.updatedAt ?? 0,
       ...(model ? { model } : {}),
+      ...(preset ? { preset } : {}),
+      ...(context ? { context } : {}),
     };
   };
   const byDisplayOrder = (a: CatalogSession, b: CatalogSession) =>

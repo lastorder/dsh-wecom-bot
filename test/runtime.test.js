@@ -114,7 +114,7 @@ test('runtime connects with the resolved Secret, never logs it, and serves the f
   assert.deepEqual(cached.sessions.groups.map(group => group.title), ['Alpha', '未分组'],
     'the blank Session is hidden until the turn starts');
   const state = await runtime.state({ refresh: true });
-  assert.equal(state.version, 3);
+  assert.equal(state.version, 4);
   assert.deepEqual(state.sessions.groups.map(group => group.title).sort(), ['Alpha', '未分组', '企业微信'].sort());
   assert.deepEqual(state.rejected, []);
   assert.equal(state.traffic.prompts, 1, 'the first message created a Session and prompted it');
@@ -208,7 +208,7 @@ test('the routing route creates groups, authorizes senders and validates every e
 
     // Whatever the page did, it is durable.
     const stored = JSON.parse(await readFile(join(home, 'wecom-bot', 'bindings.json'), 'utf8'));
-    assert.equal(stored.version, 3);
+    assert.equal(stored.version, 4);
     assert.deepEqual(stored.groups.map(item => item.name), ['默认分组', '朋友']);
     assert.deepEqual(stored.bindings, []);
   }

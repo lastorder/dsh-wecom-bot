@@ -4,8 +4,8 @@
  * directly.
  */
 import type {
-  BindingKind, CatalogGroup, CatalogSession, GroupMemberView, GroupView, ModelCatalogView,
-  ModelChoice, ModelSelection, RoutingOp,
+  AgentPresetOption, BindingKind, CatalogGroup, CatalogSession, ContextUsage, GroupMemberView, GroupView,
+  ModelCatalogView, ModelChoice, ModelSelection, PresetCatalogView, RoutingOp,
 } from '../shared/protocol.ts';
 import { DEFAULT_SECRET_REF } from '../shared/protocol.ts';
 import type { FormOperation, StoredConfig } from './types.ts';
@@ -167,6 +167,54 @@ export function modelLabel(catalog: ModelCatalogView | null | undefined, selecti
   return choice ? choiceLabel(choice) : `${selection.provider}/${selection.model}`;
 }
 
+/** The effort's display name, or the raw id when the catalog does not know it. */
+export function effortLabel(
+  catalog: ModelCatalogView | null | undefined, selection: ModelSelection | undefined,
+): string {
+  const effort = selection?.reasoningEffort;
+  if (!effort) return '';
+  const choice = catalog?.choices.find(item => item.provider === selection!.provider && item.model === selection!.model);
+  return choice?.efforts?.find(item => item.id === effort)?.name ?? effort;
+}
+
+/** Names of the presets DSH ships without publishing one. */
+const BUILT_IN_PRESET_NAME: Record<string, string> = {
+  standard: '标准',
+  ptc: 'PTC',
+  minimal: '极简',
+  cordis: 'Cordis',
+};
+
+export function presetName(preset: AgentPresetOption): string {
+  return preset.name || BUILT_IN_PRESET_NAME[preset.id] || preset.id;
+}
+
+/** A preset's label; the empty id means "whatever DSH composes by default". */
+export function presetLabel(presets: PresetCatalogView | null | undefined, id: string | undefined): string {
+  if (!id) {
+    const fallback = presets?.presets.find(preset => preset.isDefault);
+    return fallback ? `跟随 DSH 默认（${presetName(fallback)}）` : '跟随 DSH 默认';
+  }
+  const found = presets?.presets.find(preset => preset.id === id);
+  return found ? presetName(found) : id;
+}
+
+/** Compact token count: 812, 12.3k, 200k, 1.2M. */
+export function formatTokens(value: number): string {
+  if (value < 1000) return String(Math.round(value));
+  if (value < 100_000) return `${(value / 1000).toFixed(1)}k`;
+  if (value < 1_000_000) return `${Math.round(value / 1000)}k`;
+  return `${(value / 1_000_000).toFixed(1)}M`;
+}
+
+/** `12.3k / 200k（6%）`, or just the used count when DSH reported no window. */
+export function contextLabel(context: ContextUsage | undefined): string {
+  if (!context) return '';
+  const used = formatTokens(context.used);
+  if (!context.window) return used;
+  return `${used} / ${formatTokens(context.window)}（${Math.round((context.used / context.window) * 100)}%）`;
+}
+
 export function dshDefaultLabel(catalog: ModelCatalogView | null | undefined): string {
   const value = catalog?.dshDefault;
   if (!value) return '跟随 DSH 默认模型';
@@ -253,6 +301,7 @@ export function updateGroup(id: string, patch: {
   provider?: string;
   model?: string;
   reasoningEffort?: string;
+  preset?: string;
 }): RoutingOp {
   return { op: 'group.update', id, patch };
 }

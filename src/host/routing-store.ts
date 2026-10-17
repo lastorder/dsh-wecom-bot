@@ -6,8 +6,8 @@ import {
 } from '../shared/protocol.js';
 
 /**
- * Durable routing state: the user groups (each owning a Workspace and a model)
- * and the members assigned to them.
+ * Durable routing state: the user groups (each owning a Workspace, a model and
+ * an agent preset) and the members assigned to them.
  *
  * A member row is what authorizes one WeCom principal — private chat senders
  * by their userid, group chats by their chatid — and it also records the DSH
@@ -18,13 +18,14 @@ import {
  * `<DSH home>/wecom-bot/bindings.json`, and every write is serialized and
  * atomic (write-then-rename).
  *
- * Version 1 held bindings only, each with its own Workspace and model; those
- * are migrated into {@link DEFAULT_GROUP_ID}, seeded from the first binding
- * that configured a Workspace or model. Version 3 moved the operator note
- * (备注) off the membership and onto the person: a note is about who somebody
- * is, not about which group they are in, so it survives being moved between
- * groups, being removed, and belonging to no group at all (an administrator).
- * Version 2 files carry the note on each binding and are lifted on read.
+ * The operator note (备注) is keyed by person, not by membership: a note is
+ * about who somebody is, so it survives being moved between groups, being
+ * removed, and belonging to no group at all (an administrator).
+ *
+ * There is deliberately no migration path from the pre-group versions: the
+ * plugin has no deployed users on them, and a file of another version is set
+ * aside rather than half-read, so a future change only has to describe the
+ * current version.
  */
 
 export interface BindingKeyParts {
@@ -39,6 +40,7 @@ export interface GroupPatch {
   readonly provider?: string;
   readonly model?: string;
   readonly reasoningEffort?: string;
+  readonly preset?: string;
 }
 
 export interface BindingPatch {
@@ -141,6 +143,7 @@ function normalizeGroup(value: unknown): GroupRecord | undefined {
     provider: text(record.provider),
     model: text(record.model),
     reasoningEffort: text(record.reasoningEffort),
+    preset: text(record.preset),
     createdAt: stamp(record.createdAt),
     updatedAt: stamp(record.updatedAt),
   };
@@ -182,7 +185,7 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
     const at = now();
     const created: GroupRecord = {
       id: DEFAULT_GROUP_ID, name: DEFAULT_GROUP_NAME, workspace: '',
-      provider: '', model: '', reasoningEffort: '', createdAt: at, updatedAt: at,
+      provider: '', model: '', reasoningEffort: '', preset: '', createdAt: at, updatedAt: at,
     };
     groups.set(DEFAULT_GROUP_ID, created);
     return created;
@@ -191,6 +194,11 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
   function loadOnce(): Promise<void> {
     loaded ??= readFileOnce();
     return loaded;
+  }
+
+  /** Move an unreadable file aside so the next write cannot destroy it. */
+  async function setAside(suffix: string): Promise<void> {
+    await rename(file, `${file}.${suffix}`).catch(cause => report(cause, 'quarantine'));
   }
 
   async function readFileOnce(): Promise<void> {
@@ -207,14 +215,16 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
       parsed = JSON.parse(raw) as StoredFile;
     } catch (error) {
       report(error, 'parse');
-      // Keep the unreadable file instead of silently overwriting it.
-      await rename(file, `${file}.corrupt`).catch(cause => report(cause, 'quarantine'));
+      await setAside('corrupt');
       defaultGroup();
       return;
     }
     const version = Number(parsed.version);
-    if (![1, 2, 3].includes(version) || !Array.isArray(parsed.bindings)) {
-      report(new Error(`unsupported routing file version: ${String(parsed.version)}`), 'version');
+    if (version !== ROUTING_VERSION || !Array.isArray(parsed.bindings)) {
+      // Every earlier layout is gone by design (there is no deployment on one),
+      // so this is a read error, not something to migrate.
+      report(new Error(`routing file version ${String(parsed.version)} is not ${ROUTING_VERSION}`), 'version');
+      await setAside(`v${Number.isFinite(version) ? version : 'unknown'}`);
       defaultGroup();
       return;
     }
@@ -226,7 +236,6 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
       }
     }
     defaultGroup();
-    let migrated = version < ROUTING_VERSION;
     for (const [key, value] of Object.entries((parsed.labels ?? {}) as Record<string, unknown>)) {
       const note = normalizeLabel(value);
       if (!note || !parseBindingKey(key)) continue;
@@ -235,40 +244,11 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
     for (const entry of parsed.bindings) {
       const record = normalizeBinding(entry);
       if (!record) continue;
-      // v2 kept the note on the membership; it belongs to the person.
-      const legacyLabel = normalizeLabel((entry as Record<string, unknown>).label
-        ?? (entry as Record<string, unknown>).note);
-      const key = bindingKey(record.kind, record.id);
-      if (legacyLabel && !labels.has(key)) {
-        labels.set(key, legacyLabel);
-        if (version === 2) migrated = true;
-      }
-      // v1 put Workspace/model on the binding: seed the default group from the
-      // first row that configured one, so an upgrade keeps its Workspace.
-      if (version === 1) {
-        const legacy = entry as Record<string, unknown>;
-        const target = groups.get(DEFAULT_GROUP_ID)!;
-        if (!target.workspace && text(legacy.workspace)) {
-          groups.set(DEFAULT_GROUP_ID, { ...target, workspace: text(legacy.workspace) });
-        }
-        if (!target.provider && text(legacy.provider) && text(legacy.model)) {
-          const current = groups.get(DEFAULT_GROUP_ID)!;
-          groups.set(DEFAULT_GROUP_ID, {
-            ...current, provider: text(legacy.provider), model: text(legacy.model),
-            reasoningEffort: text(legacy.reasoningEffort),
-          });
-        }
-      }
-      if (!bindings.has(key)) bindings.set(key, record);
+      if (!bindings.has(bindingKey(record.kind, record.id))) bindings.set(bindingKey(record.kind, record.id), record);
     }
     // A member must never reference a group that is not there.
     for (const [key, record] of bindings) {
       if (!groups.has(record.groupId)) bindings.set(key, { ...record, groupId: DEFAULT_GROUP_ID });
-    }
-    if (migrated) {
-      report(new Error(`migrated a v${version} bindings file to v${ROUTING_VERSION}`), 'migrate');
-      // Write the migrated shape back, so the next start reads it directly.
-      void persist();
     }
   }
 
@@ -330,7 +310,7 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
       const label = normalizeLabel(name) || `分组 ${groups.size}`;
       const id = `g${at.toString(36)}${Math.random().toString(36).slice(2, 6)}`;
       return putGroup({
-        id, name: label, workspace: '', provider: '', model: '', reasoningEffort: '',
+        id, name: label, workspace: '', provider: '', model: '', reasoningEffort: '', preset: '',
         createdAt: at, updatedAt: at,
       });
     },
@@ -346,6 +326,7 @@ export function createRoutingStore(options: RoutingStoreOptions): RoutingStore {
         ...(patch.provider !== undefined ? { provider: patch.provider.trim() } : {}),
         ...(patch.model !== undefined ? { model: patch.model.trim() } : {}),
         ...(patch.reasoningEffort !== undefined ? { reasoningEffort: patch.reasoningEffort.trim() } : {}),
+        ...(patch.preset !== undefined ? { preset: patch.preset.trim() } : {}),
         updatedAt: now(),
       };
       return putGroup(next);

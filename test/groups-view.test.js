@@ -22,13 +22,20 @@ async function context(extra = {}) {
     desired: group => (group.provider && group.model
       ? { provider: group.provider, model: group.model, ...(group.reasoningEffort ? { reasoningEffort: group.reasoningEffort } : {}) }
       : undefined),
-    async describe(sessionId) {
-      return { title: `标题 ${sessionId}`, state: 'bound', workspace: '企业微信', workspacePath: TEST_WORKSPACE_PATH, running: false };
-    },
+    describe: extra.describe ?? (async sessionId => ({
+      title: `标题 ${sessionId}`, state: 'bound', workspace: '企业微信', workspacePath: TEST_WORKSPACE_PATH, running: false,
+    })),
   };
   const observations = extra.observations ?? createObservationStore();
+  // The roster the page reads; `null` means this deployment has no registry.
+  const presets = extra.presets === null ? undefined : {
+    snapshot: () => presetView,
+    async load() { return presetView; },
+    known: id => presetView.presets.some(preset => preset.id === id),
+  };
+  const presetView = extra.presets ?? { presets: [{ id: 'standard', isDefault: true }, { id: 'ptc', isDefault: false }], fetchedAt: 1 };
   const deps = {
-    store, provisioner, workspaces, observations,
+    store, provisioner, workspaces, observations, presets,
     models: { snapshot: () => undefined }, catalogs: { async load() { throw new Error('unused'); } },
     isAdmin: user => user === 'root',
   };
@@ -139,6 +146,41 @@ test('a note is a property of the person, not of the membership', async () => {
   const multiline = await apply([{ op: 'label.set', key: 'user:root', label: '两\u0000行' }]);
   assert.equal(multiline.ok, false);
   assert.match(multiline.error, /单行/);
+});
+
+test('a group preset is validated against the DSH roster', async () => {
+  const { store, apply, view } = await context();
+  assert.equal((await view()).groups[0].preset, '', 'a new group follows the DSH default');
+  assert.equal((await apply([{ op: 'group.update', id: 'default', patch: { preset: 'ptc' } }])).ok, true);
+  assert.equal(store.group('default').preset, 'ptc');
+  assert.equal((await view()).groups[0].preset, 'ptc');
+
+  const unknown = await apply([{ op: 'group.update', id: 'default', patch: { preset: 'nope' } }]);
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.error, /没有 preset nope/);
+  assert.equal(store.group('default').preset, 'ptc', 'a rejected edit leaves the group alone');
+
+  assert.equal((await apply([{ op: 'group.update', id: 'default', patch: { preset: '' } }])).ok, true);
+  assert.equal(store.group('default').preset, '');
+
+  // A deployment without a preset registry cannot judge ids, so it accepts them.
+  const bare = await context({ presets: null });
+  assert.equal((await bare.apply([{ op: 'group.update', id: 'default', patch: { preset: 'anything' } }])).ok, true);
+});
+
+test('a member row reports the preset and context of the Session it owns', async () => {
+  const describe = async sessionId => ({
+    title: `标题 ${sessionId}`, state: 'bound', workspace: '企业微信', workspacePath: TEST_WORKSPACE_PATH,
+    running: true, model: { provider: 'p', model: 'm' }, preset: 'ptc',
+    context: { used: 12_000, window: 200_000 },
+  });
+  const { store, view } = await context({ describe });
+  await store.create('user', 'alice', { groupId: 'default' });
+  await store.update('user:alice', { sessionId: 's1' });
+  const [member] = (await view()).groups[0].members;
+  assert.equal(member.sessionPreset, 'ptc');
+  assert.deepEqual(member.sessionContext, { used: 12_000, window: 200_000 });
+  assert.equal(member.sessionRunning, true);
 });
 
 test('the Workspace list counts live Sessions only', async () => {

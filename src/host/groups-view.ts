@@ -1,9 +1,11 @@
 import {
-  DEFAULT_GROUP_ID, MAX_GROUPS, type BindingRecord, type BindingSessionState, type GroupMemberView,
-  type GroupRecord, type GroupView, type ModelSelection, type RoutingOp, type RoutingView,
+  DEFAULT_GROUP_ID, MAX_GROUPS, type BindingRecord, type BindingSessionState, type ContextUsage,
+  type GroupMemberView, type GroupRecord, type GroupView, type ModelSelection, type RoutingOp,
+  type RoutingView,
 } from '../shared/protocol.js';
 import type { CatalogService } from './catalog.js';
 import type { ModelService } from './models.js';
+import type { PresetService } from './presets.js';
 import type { ObservationStore } from './observation.js';
 import { bindingKey, normalizeLabel, parseBindingKey, validBindingId, type RoutingStore } from './routing-store.js';
 import type { Router } from './routing.js';
@@ -17,7 +19,8 @@ import type { WorkspaceService } from './workspaces.js';
  * implicit membership for an administrator who was never added), and the page
  * is the only way to authorize anyone else — assigning a rejected sender to a
  * group *is* the authorization. Every change is validated here: a group must
- * exist, a Workspace must resolve, and a model must exist in the DSH catalog.
+ * exist, a Workspace must resolve, and a model and an agent preset must exist
+ * in the DSH catalogs.
  */
 
 export interface RoutingViewDeps {
@@ -25,6 +28,7 @@ export interface RoutingViewDeps {
   readonly provisioner: SessionProvisioner;
   readonly workspaces: WorkspaceService;
   readonly models: ModelService;
+  readonly presets?: PresetService;
   readonly catalogs: CatalogService;
   readonly observations?: ObservationStore;
   readonly isAdmin: (user: string) => boolean;
@@ -38,12 +42,16 @@ async function memberView(deps: RoutingViewDeps, binding: BindingRecord): Promis
   let sessionState: BindingSessionState = binding.sessionId ? 'bound' : 'auto';
   let sessionRunning = false;
   let sessionModel: ModelSelection | undefined;
+  let sessionPreset: string | undefined;
+  let sessionContext: ContextUsage | undefined;
   if (binding.sessionId) {
     const described = await deps.provisioner.describe(binding.sessionId);
     sessionTitle = described.title;
     sessionState = described.state;
     sessionRunning = described.running;
     sessionModel = described.model;
+    sessionPreset = described.preset;
+    sessionContext = described.context;
   }
   const seen = deps.observations?.stats(binding.kind, binding.id);
   return {
@@ -58,6 +66,8 @@ async function memberView(deps: RoutingViewDeps, binding: BindingRecord): Promis
     sessionState,
     sessionRunning,
     ...(sessionModel ? { sessionModel } : {}),
+    ...(sessionPreset ? { sessionPreset } : {}),
+    ...(sessionContext ? { sessionContext } : {}),
     messages: seen?.messages ?? 0,
     ...(seen?.lastSeenAt ? { lastSeenAt: seen.lastSeenAt } : {}),
     createdAt: binding.createdAt,
@@ -101,6 +111,7 @@ async function groupView(deps: RoutingViewDeps, group: GroupRecord): Promise<Gro
     provider: group.provider,
     model: group.model,
     ...(group.reasoningEffort ? { reasoningEffort: group.reasoningEffort } : {}),
+    preset: group.preset,
     ...(desired
       ? {
         effectiveProvider: desired.provider,
@@ -152,6 +163,16 @@ export async function applyRoutingOps(deps: RoutingViewDeps, ops: readonly Routi
       /* an unreadable catalog only means the model cannot be verified here */
     }
   }
+  // A preset edit is accepted only against the real roster, for the same reason
+  // as a model: a typo would otherwise fail the next Session creation instead.
+  const touchesPreset = ops.some(op => op.op === 'group.update' && op.patch.preset !== undefined);
+  if (touchesPreset && !deps.presets?.snapshot()) {
+    try {
+      await deps.presets?.load();
+    } catch {
+      /* an unreadable roster only means the preset cannot be verified here */
+    }
+  }
   const modelChanged = new Set<string>();
   for (const op of ops.slice(0, 200)) {
     switch (op.op) {
@@ -185,6 +206,11 @@ export async function applyRoutingOps(deps: RoutingViewDeps, ops: readonly Routi
         }
         if (nextProvider && nextModel && !deps.models.known({ provider: nextProvider, model: nextModel })) {
           return { ok: false, error: `DSH 当前没有模型 ${nextProvider}/${nextModel}，请重新选择。`, changed };
+        }
+        const nextPreset = (patch.preset ?? group.preset).trim();
+        // Without a preset service there is nothing to validate against.
+        if (nextPreset && deps.presets && !deps.presets.known(nextPreset)) {
+          return { ok: false, error: `DSH 当前没有 preset ${nextPreset}，请重新选择。`, changed };
         }
         const updated = await deps.store.updateGroup(op.id, patch);
         if (!updated) return { ok: false, error: `分组不存在：${op.id}`, changed };

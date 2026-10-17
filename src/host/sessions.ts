@@ -1,4 +1,6 @@
-import type { BindingSessionState, BindingRecord, GroupRecord, ModelSelection } from '../shared/protocol.js';
+import type {
+  BindingSessionState, BindingRecord, ContextUsage, GroupRecord, ModelSelection,
+} from '../shared/protocol.js';
 import type { CatalogService, SessionCatalog } from './catalog.js';
 import type { SessionController } from './dsh.js';
 import type { ModelService } from './models.js';
@@ -8,11 +10,15 @@ import type { WorkspaceService } from './workspaces.js';
  * Session provisioning: turn a membership into a real DSH Session.
  *
  * A member without a Session id gets one the first time a message is routed
- * to it — created in its group's Workspace and, when the group configures a
- * model, with that model installed as the Session-local selection. Later
- * messages reuse the bound Session; only a Session that DSH reports as
- * archived, subagent-owned or gone is replaced, and the replacement is
- * persisted before the prompt is submitted.
+ * to it — created in its group's Workspace with the group's agent preset, and,
+ * when the group configures a model, with that model installed as the
+ * Session-local selection. Later messages reuse the bound Session; only a
+ * Session that DSH reports as archived, subagent-owned or gone is replaced,
+ * and the replacement is persisted before the prompt is submitted.
+ *
+ * The preset is a creation fact: DSH refuses to re-compose a Session that has
+ * already had a turn, so changing a group's preset affects Sessions it creates
+ * from then on, never one it already owns.
  */
 
 export interface SessionDescription {
@@ -24,6 +30,8 @@ export interface SessionDescription {
   readonly workspacePath: string;
   readonly running: boolean;
   readonly model?: ModelSelection;
+  readonly preset?: string;
+  readonly context?: ContextUsage;
 }
 
 export interface Provisioned {
@@ -137,14 +145,16 @@ export function createSessionProvisioner(options: SessionProvisionerOptions): Se
         });
       }
       const workspace = await options.workspaces.resolve(group.workspace);
-      const created = await options.sessionController.create(
-        workspace.id ? { workspaceId: workspace.id } : { cwd: workspace.path },
-      );
+      const preset = group.preset.trim();
+      const created = await options.sessionController.create({
+        ...(workspace.id ? { workspaceId: workspace.id } : { cwd: workspace.path }),
+        ...(preset ? { agentPreset: preset } : {}),
+      });
       await options.bindings.update(options.bindingKey(binding), { sessionId: created.sessionId });
       journal.write({
         event: 'binding.session.created', binding: options.bindingKey(binding),
         sessionId: created.sessionId, workspace: workspace.path, workspaceId: workspace.id,
-        group: group.id, model: selection ?? null,
+        group: group.id, model: selection ?? null, preset: preset || null,
       });
       let model: ModelSelection | undefined;
       if (selection) {
@@ -171,6 +181,8 @@ export function createSessionProvisioner(options: SessionProvisionerOptions): Se
             workspacePath: entry.group.path ?? '',
             running: entry.running,
             ...(entry.model ? { model: entry.model } : {}),
+            ...(entry.preset ? { preset: entry.preset } : {}),
+            ...(entry.context ? { context: entry.context } : {}),
           };
         }
         const hidden = catalog.hiddenReason(sessionId);

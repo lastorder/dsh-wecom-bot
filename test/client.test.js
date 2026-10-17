@@ -15,18 +15,25 @@ globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const source = readFileSync(new URL('../dist/client.js', import.meta.url), 'utf8');
 const h = React.createElement;
 
-// Minimal stand-ins for the DSH Web shell primitives.
+// Minimal stand-ins for the DSH Web shell primitives. The real Modal portals to
+// document.body; here its children render inline so the tree stays inspectable.
 const primitives = new Proxy({
   Button: ({ variant, size, icon, children, ...rest }) => h('button', { ...rest, 'data-variant': variant }, icon, children),
   Input: ({ icon, ...rest }) => h('input', rest),
   Switch: ({ checked, onChange, label, disabled }) => h('button', { role: 'switch', 'aria-checked': checked, 'aria-label': label, disabled, onClick: () => onChange(!checked) }),
   Tag: ({ tone, children }) => h('span', { 'data-tone': tone }, children),
   StateDot: ({ state }) => h('i', { 'data-state': state }),
+  Modal: ({ open, onClose, title, closeLabel, children, footer }) => (open
+    ? h('div', { role: 'dialog', 'aria-label': typeof title === 'string' ? title : undefined },
+      h('button', { type: 'button', 'aria-label': closeLabel, onClick: onClose }),
+      children,
+      footer)
+    : null),
   writeClipboard: async () => true,
 }, { get: (target, key) => target[key] ?? (() => null) });
 
 const STATE = {
-  version: 3,
+  version: 4,
   connection: { phase: 'online', since: Date.now() - 60_000 },
   traffic: { since: 0, received: 3, rejected: 1, prompts: 1, notifications: 2, failures: 0 },
   rejected: [{
@@ -37,7 +44,7 @@ const STATE = {
   sessions: {
     groups: [
       { key: 'w1', kind: 'workspace', title: 'dsh-wecom-bot', path: '/Users/me/dsh-wecom-bot', sessions: [
-        { sessionId: 'session-aaaa', title: '企业微信插件开发', running: true, pinned: true, updatedAt: Date.now(), model: { provider: 'deepseek-account', model: 'deepseek-chat' } },
+        { sessionId: 'session-aaaa', title: '企业微信插件开发', running: true, pinned: true, updatedAt: Date.now(), model: { provider: 'deepseek-account', model: 'deepseek-chat' }, preset: 'standard', context: { used: 12_300, window: 200_000 } },
         { sessionId: 'session-bbbb', title: null, running: false, pinned: false, updatedAt: Date.now() - 3_600_000 },
       ] },
     ],
@@ -50,20 +57,21 @@ const STATE = {
       {
         id: 'default', name: '默认分组', isDefault: true,
         workspace: '', workspaceTitle: '企业微信', workspacePath: '/Users/me/.dsh/wecom-bot/workspace',
-        provider: '', model: '', effectiveProvider: '', effectiveModel: '',
+        provider: '', model: '', effectiveProvider: '', effectiveModel: '', preset: '',
         memberCount: 1, messages: 2, lastSeenAt: Date.now(),
         members: [{
           key: 'user:alice', kind: 'user', id: 'alice', label: '爱丽丝', displayName: '爱丽丝', admin: false,
           sessionId: 'session-aaaa', sessionTitle: '企业微信插件开发', sessionState: 'bound', sessionRunning: true,
-          sessionModel: { provider: 'deepseek-account', model: 'deepseek-chat' },
+          sessionModel: { provider: 'deepseek-account', model: 'deepseek-chat', reasoningEffort: 'high' },
+          sessionPreset: 'standard', sessionContext: { used: 12_300, window: 200_000 },
           messages: 2, lastSeenAt: Date.now(), createdAt: 1,
         }],
       },
       {
         id: 'g1', name: '朋友', isDefault: false,
         workspace: '/Users/me/dsh-wecom-bot', workspaceTitle: 'dsh-wecom-bot', workspacePath: '/Users/me/dsh-wecom-bot',
-        provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high',
-        effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-reasoner',
+        provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high', preset: 'ptc',
+        effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-reasoner', effectiveReasoningEffort: 'high',
         memberCount: 1, messages: 0,
         members: [{
           key: 'group:wrOgAAAA', kind: 'group', id: 'wrOgAAAA', label: '', displayName: 'wrOgAAAA', admin: false,
@@ -80,6 +88,14 @@ const STATE = {
     ],
     dshDefault: { provider: 'deepseek-account', model: 'deepseek-chat' },
     failures: [], fetchedAt: Date.now(),
+  },
+  presets: {
+    presets: [
+      { id: 'standard', isDefault: true },
+      { id: 'ptc' },
+      { id: 'minimal' },
+    ],
+    fetchedAt: Date.now(),
   },
   workspaces: [
     { id: 'w1', path: '/Users/me/dsh-wecom-bot', title: 'dsh-wecom-bot', pluginOwned: false, sessionCount: 2, archivedSessionCount: 4 },
@@ -222,13 +238,54 @@ test('the page shows five cards and keeps every group collapsed until it is clic
   assert.ok(byLabel(root, '默认分组 的名称'));
   assert.ok(byLabel(root, '默认分组 的 Workspace'));
   assert.ok(byLabel(root, '默认分组 的模型'));
+  assert.ok(byLabel(root, '默认分组 的 effort'), 'effort is configurable beside the model');
+  assert.ok(byLabel(root, '默认分组 的 preset'));
   assert.equal(queryByLabel(root, '朋友 的名称'), undefined, 'the other group stays untouched');
-  // Clicking the person reveals the type, the WeCom id and the editable note.
+  // The badge — and only the badge — opens the person details.
+  assert.equal(buttonByLabel(root, '爱丽丝 的详情').type, 'button');
   await act(async () => { buttonByLabel(root, '爱丽丝 的详情').props.onClick(); });
-  assert.ok(byLabel(root, 'alice 的会话'));
   assert.ok(byLabel(root, 'alice 的备注'));
   assert.ok(byLabel(root, '把 alice 移动到分组'));
   assert.ok(text(renderer.toJSON()).includes('企微 ID'), 'the row only showed the note; the id lives in the details');
+  renderer.unmount();
+});
+
+test('a person row names nobody by type: the badge colors a person from a group chat', async () => {
+  const harness = mount();
+  const renderer = await render(harness);
+  const root = renderer.root;
+  await act(async () => { buttonWithText(root, '默认分组').props.onClick(); });
+  await act(async () => { buttonWithText(root, '朋友').props.onClick(); });
+  const rows = root.findAll(node => node.props?.['data-kind'] === 'user' || node.props?.['data-kind'] === 'group');
+  const kinds = rows.map(node => node.props['data-kind']);
+  assert.ok(kinds.includes('user'), 'alice is a private chat');
+  assert.ok(kinds.includes('group'), 'wrOgAAAA is a group chat');
+  // Every person-ish row (two members, one refused sender) drops the type word.
+  const memberRows = root.findAll(node => node.type === 'div' && node.props.className === 'wcb-member');
+  assert.ok(memberRows.length >= 3);
+  for (const row of memberRows) {
+    const line = text(row);
+    assert.equal(line.includes('个人'), false, 'the row no longer spells the type out');
+    assert.equal(line.includes('群聊'), false);
+  }
+  renderer.unmount();
+});
+
+test('a member Session line reports name, preset, model, effort and context until clicked', async () => {
+  const harness = mount();
+  const renderer = await render(harness);
+  const root = renderer.root;
+  await act(async () => { buttonWithText(root, '默认分组').props.onClick(); });
+  const row = text(renderer.toJSON());
+  assert.ok(row.includes('企业微信插件开发'), 'the Session name');
+  assert.ok(row.includes('标准'), 'the preset it runs');
+  assert.ok(row.includes('DeepSeek Chat'), 'the model of its last request');
+  assert.ok(row.includes('高'), 'and the effort it uses');
+  assert.ok(row.includes('12.3k / 200k'), 'and how full its context is');
+  assert.equal(queryByLabel(root, 'alice 的会话选择'), undefined, 'nothing is editable until the line is clicked');
+
+  await act(async () => { buttonByLabel(root, '爱丽丝 的会话').props.onClick(); });
+  assert.ok(byLabel(root, 'alice 的会话选择'), 'clicking reveals the Session picker');
   renderer.unmount();
 });
 
@@ -298,11 +355,44 @@ test('group and member edits are posted immediately, without touching the Config
   await flush();
   assert.deepEqual(posts(harness).at(-1), [{ op: 'group.update', id: 'default', patch: { workspace: '/Users/me/dsh-wecom-bot' } }]);
 
-  // A member's note is edited from the person details the row opens.
+  // The group's preset is edited in the same card.
+  await act(async () => { byLabel(root, '默认分组 的 preset').props.onChange({ target: { value: 'ptc' } }); });
+  await flush();
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'group.update', id: 'default', patch: { preset: 'ptc' } }]);
+
+  // A member's note is edited from the person details the badge opens.
   await act(async () => { buttonByLabel(root, '爱丽丝 的详情').props.onClick(); });
   await act(async () => { byLabel(root, 'alice 的备注').props.onBlur({ target: { value: '同事小张' } }); });
   await flush();
   assert.deepEqual(posts(harness).at(-1), [{ op: 'label.set', key: 'user:alice', label: '同事小张' }]);
+  renderer.unmount();
+});
+
+test('the effort of a group is adjustable next to its model, and reported in the summary', async () => {
+  const state = {
+    ...STATE,
+    routing: {
+      ...STATE.routing,
+      groups: [{
+        ...STATE.routing.groups[0],
+        provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'low',
+        effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-reasoner', effectiveReasoningEffort: 'low',
+      }, STATE.routing.groups[1]],
+    },
+  };
+  const harness = mount({ stored: { botId: 'bot' }, state });
+  const renderer = await render(harness);
+  const root = renderer.root;
+  assert.ok(text(renderer.toJSON()).includes('Reasoner（deepseek-reasoner） · 低'),
+    'the collapsed summary shows the model and its effort');
+
+  await act(async () => { buttonByLabel(root, '编辑 默认分组').props.onClick(); });
+  await act(async () => { byLabel(root, '默认分组 的 effort').props.onChange({ target: { value: 'high' } }); });
+  await flush();
+  assert.deepEqual(posts(harness).at(-1), [{
+    op: 'group.update', id: 'default',
+    patch: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' },
+  }]);
   renderer.unmount();
 });
 

@@ -5,7 +5,8 @@
  */
 declare module '@deepseek-ai/dsh-client-ui-primitives' {
   import type {
-    ButtonHTMLAttributes, ForwardRefExoticComponent, InputHTMLAttributes, ReactElement, ReactNode, RefAttributes,
+    ButtonHTMLAttributes, ForwardRefExoticComponent, InputHTMLAttributes, KeyboardEvent, ReactElement,
+    ReactNode, RefAttributes,
   } from 'react';
 
   export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -38,6 +39,23 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
     className?: string;
   }): ReactElement;
 
+  export interface ModalProps {
+    open: boolean;
+    onClose(): void;
+    title: ReactNode;
+    closeLabel: string;
+    description?: ReactNode;
+    children?: ReactNode;
+    footer?: ReactNode;
+    className?: string;
+    contentClassName?: string;
+    headless?: boolean;
+    backdropBlur?: boolean;
+    onKeyDownCapture?(event: KeyboardEvent<HTMLElement>): void;
+  }
+  /** Overlay dialog portalled to document.body; Escape and focus are handled for you. */
+  export function Modal(props: ModalProps): ReactElement | null;
+
   export interface IconProps { size?: number; className?: string }
   export function IconSearchOutlineRegular(props: IconProps): ReactElement;
   export function IconRefreshOutlineRegular(props: IconProps): ReactElement;
@@ -46,6 +64,9 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   export function IconPinFillRegular(props: IconProps): ReactElement;
   export function IconUserOutlineRegular(props: IconProps): ReactElement;
   export function IconUsersOutlineRegular(props: IconProps): ReactElement;
+  export function IconEditOutlineRegular(props: IconProps): ReactElement;
+  export function IconAgentPresetOutlineRegular(props: IconProps): ReactElement;
+  export function IconContextInjectionOutlineRegular(props: IconProps): ReactElement;
   export function IconShieldOutlineRegular(props: IconProps): ReactElement;
   export function IconWarningTriangleOutlineRegular(props: IconProps): ReactElement;
   export function IconCheckCircleOutlineRegular(props: IconProps): ReactElement;

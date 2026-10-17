@@ -20,8 +20,12 @@ export const PLUGIN_HOME_DIRECTORY = 'wecom-bot';
 export const PLUGIN_WORKSPACE_DIRECTORY = 'workspace';
 /** Sidebar title of the plugin's own Workspace. */
 export const PLUGIN_WORKSPACE_TITLE = '企业微信';
-/** Persisted groups+bindings file version (v1 = bindings only, v2 = groups). */
-export const ROUTING_VERSION = 3;
+/**
+ * Persisted groups+bindings file version (4 = groups own Workspace, model and
+ * preset; notes live on the person). A file of any other version is set aside
+ * instead of migrated — there is no earlier deployment to keep working.
+ */
+export const ROUTING_VERSION = 4;
 /** Upper bound on persisted members across all groups. */
 export const MAX_BINDINGS = 500;
 /** Upper bound on user groups. */
@@ -70,6 +74,14 @@ export interface ModelSelection {
   readonly reasoningEffort?: string;
 }
 
+/** How full a Session's context window is, as DSH's `contextPressure` fold sees it. */
+export interface ContextUsage {
+  /** Prompt-side tokens the next request will carry. */
+  readonly used: number;
+  /** The model's context window, when DSH reported one. */
+  readonly window?: number;
+}
+
 export interface CatalogSession {
   readonly sessionId: string;
   /** Stored DSH title; null for an unnamed Session. */
@@ -79,6 +91,9 @@ export interface CatalogSession {
   readonly updatedAt: number;
   /** Model of the Session's latest request, when DSH reports one. */
   readonly model?: ModelSelection;
+  /** Agent preset the Session runs, when DSH reports one. */
+  readonly preset?: string;
+  readonly context?: ContextUsage;
 }
 
 export interface CatalogGroup {
@@ -123,9 +138,9 @@ export interface JournalInfo {
 export type BindingKind = 'user' | 'group';
 
 /**
- * A user group: the unit that owns a Workspace and a model. The built-in
- * {@link DEFAULT_GROUP_ID} group cannot be deleted and owns the plugin's own
- * Workspace unless it is pointed elsewhere.
+ * A user group: the unit that owns a Workspace, a model and an agent preset.
+ * The built-in {@link DEFAULT_GROUP_ID} group cannot be deleted and owns the
+ * plugin's own Workspace unless it is pointed elsewhere.
  */
 export interface GroupRecord {
   readonly id: string;
@@ -136,6 +151,8 @@ export interface GroupRecord {
   readonly provider: string;
   readonly model: string;
   readonly reasoningEffort: string;
+  /** Agent preset for Sessions created in this group; empty means the DSH default. */
+  readonly preset: string;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -175,12 +192,16 @@ export interface GroupMemberView {
   readonly sessionRunning: boolean;
   /** Model of the Session's latest request, when DSH reports one. */
   readonly sessionModel?: ModelSelection;
+  /** Agent preset the bound Session runs, when DSH reports one. */
+  readonly sessionPreset?: string;
+  /** Context occupancy of the bound Session, when DSH reports one. */
+  readonly sessionContext?: ContextUsage;
   readonly messages: number;
   readonly lastSeenAt?: number;
   readonly createdAt: number;
 }
 
-/** One group card: its Workspace/model plus its members. */
+/** One group card: its Workspace/model/preset plus its members. */
 export interface GroupView {
   readonly id: string;
   readonly name: string;
@@ -195,6 +216,8 @@ export interface GroupView {
   readonly provider: string;
   readonly model: string;
   readonly reasoningEffort?: string;
+  /** Agent preset new Sessions in this group start with; empty means the DSH default. */
+  readonly preset: string;
   /** Model a new Session in this group would use. */
   readonly effectiveProvider: string;
   readonly effectiveModel: string;
@@ -258,8 +281,24 @@ export interface ModelCatalogView {
   readonly fetchedAt: number;
 }
 
-export interface WorkspaceOption {
+/** One selectable agent preset from DSH's preset roster. */
+export interface AgentPresetOption {
   readonly id: string;
+  /** Published name; empty for a shipped preset the page names itself. */
+  readonly name?: string;
+  readonly description?: string;
+  /** The preset DSH uses for a Session whose group picks none. */
+  readonly isDefault: boolean;
+  /** Activation failure worth showing next to the choice. */
+  readonly broken?: string;
+}
+
+export interface PresetCatalogView {
+  readonly presets: readonly AgentPresetOption[];
+  readonly fetchedAt: number;
+}
+
+export interface WorkspaceOption {  readonly id: string;
   readonly path: string;
   readonly title: string;
   /** The plugin's own Workspace under the DSH home. */
@@ -293,6 +332,7 @@ export type RoutingOp =
       readonly provider?: string;
       readonly model?: string;
       readonly reasoningEffort?: string;
+      readonly preset?: string;
     };
   }
   | { readonly op: 'group.delete'; readonly id: string }
@@ -330,7 +370,7 @@ export interface RoutingResponse {
 }
 
 export interface BridgeStateView {
-  readonly version: 3;
+  readonly version: 4;
   readonly connection: ConnectionStatus;
   readonly traffic: TrafficStats;
   /** Senders refused since Host start, newest first. */
@@ -341,6 +381,8 @@ export interface BridgeStateView {
   readonly routingError?: string;
   readonly models: ModelCatalogView | null;
   readonly modelsError?: string;
+  readonly presets: PresetCatalogView | null;
+  readonly presetsError?: string;
   readonly workspaces: readonly WorkspaceOption[];
   readonly admins: readonly AdminView[];
   readonly adminWorkspaces: readonly string[];
