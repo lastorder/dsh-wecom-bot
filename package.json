@@ -1,6 +1,6 @@
 {
   "name": "dsh-wecom-bot",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "type": "module",
   "packageManager": "pnpm@11.22.0",
   "description": "Bridge a WeCom (企业微信) smart bot to DeepSeek Harness: user groups own a Workspace, a model and an agent preset, members get their own Session, refused senders are told to ask an operator and wait in an authorization list on the plugin page, administrators can switch Sessions and select the Workspace their commands default to.",
