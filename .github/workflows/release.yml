@@ -20,6 +20,11 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  # A lost tag event (an outage, a webhook GitHub never delivered) can be
+  # re-run without retagging: dispatch this workflow on the tag ref. It still
+  # goes through the same verify, version check, OIDC trust and npm stage; the
+  # maintainer's approval on npmjs.com is unchanged.
+  workflow_dispatch:
 
 permissions:
   contents: write # to create the GitHub Release and upload its tarball asset
