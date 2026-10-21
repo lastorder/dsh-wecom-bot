@@ -235,6 +235,80 @@ test('a created group reports its id, and an authorization reports who was let i
   assert.equal(moved.authorized, undefined, 'moving somebody is not an authorization');
 });
 
+test('a settings edit reports exactly the administrators it promoted', async () => {
+  const { apply } = await context();
+  const first = await apply([{ op: 'settings.set', patch: { adminUserIds: ['root'] } }]);
+  assert.deepEqual(first.promotedAdmins, ['root']);
+  const second = await apply([{ op: 'settings.set', patch: { adminUserIds: ['root', 'second'] } }]);
+  assert.deepEqual(second.promotedAdmins, ['second'], 'only the person added is promoted');
+  const untouched = await apply([{ op: 'settings.set', patch: { remoteApprovals: true } }]);
+  assert.equal(untouched.promotedAdmins, undefined, 'a patch that does not name the list promotes nobody');
+  const removed = await apply([{ op: 'settings.set', patch: { adminUserIds: [] } }]);
+  assert.equal(removed.promotedAdmins, undefined, 'removal is not a promotion');
+});
+
+test('joining and moving groups are reported for notification, while a repeat add is not', async () => {
+  const { apply } = await context();
+  const joined = await apply([{ op: 'member.add', groupId: 'default', kind: 'user', id: 'alice' }]);
+  assert.deepEqual(joined.authorized, [{ kind: 'user', id: 'alice', groupId: 'default' }]);
+  const repeat = await apply([{ op: 'member.add', groupId: 'default', kind: 'user', id: 'alice' }]);
+  assert.equal(repeat.authorized, undefined, 'an existing member is not greeted twice');
+  assert.equal(repeat.assigned, undefined);
+
+  const friends = await apply([{ op: 'group.add', name: '朋友' }]);
+  const moved = await apply([
+    { op: 'member.update', key: 'user:alice', patch: { groupId: friends.createdGroupId } },
+  ]);
+  assert.deepEqual(moved.assigned, [{
+    kind: 'user', id: 'alice', groupId: friends.createdGroupId, previousGroupId: 'default',
+  }]);
+  const back = await apply([{ op: 'member.add', groupId: 'default', kind: 'user', id: 'alice' }]);
+  assert.deepEqual(back.assigned, [{
+    kind: 'user', id: 'alice', groupId: 'default', previousGroupId: friends.createdGroupId,
+  }], 're-adding a known member into another group is a move');
+  assert.equal(back.authorized, undefined, 'and not a first authorization');
+});
+
+test('a batch that fails later still reports the settings and authorizations it applied', async () => {
+  const { store, apply } = await context();
+  const result = await apply([
+    { op: 'settings.set', patch: { adminUserIds: ['root'] } },
+    { op: 'member.add', groupId: 'default', kind: 'user', id: 'alice' },
+    { op: 'settings.set', patch: { questionTimeoutMs: 1 } },
+  ]);
+  assert.equal(result.ok, false);
+  assert.equal(result.settingsChanged, true);
+  assert.deepEqual(result.promotedAdmins, ['root']);
+  assert.deepEqual(result.authorized, [{ kind: 'user', id: 'alice', groupId: 'default' }]);
+  assert.deepEqual(store.settings().adminUserIds, ['root'], 'the earlier edit stays applied');
+  assert.ok(store.get('user:alice'), 'and so does the authorization before the failing op');
+});
+
+test('notifications describe only the final net assignment of a batch', async () => {
+  const { store, apply } = await context();
+  const group = await store.createGroup('朋友');
+  const removed = await apply([
+    { op: 'settings.set', patch: { adminUserIds: ['temporary'] } },
+    { op: 'settings.set', patch: { adminUserIds: [] } },
+    { op: 'member.add', kind: 'user', id: 'temporary', groupId: 'default' },
+    { op: 'member.remove', key: 'user:temporary' },
+  ]);
+  assert.equal(removed.ok, true);
+  assert.equal(removed.authorized, undefined);
+  assert.equal(removed.promotedAdmins, undefined);
+  const joined = await apply([
+    { op: 'member.add', kind: 'user', id: 'alice', groupId: 'default' },
+    { op: 'member.update', key: 'user:alice', patch: { groupId: group.id } },
+  ]);
+  assert.deepEqual(joined.authorized, [{ kind: 'user', id: 'alice', groupId: group.id }]);
+  assert.equal(joined.assigned, undefined, 'first authorization greets the user in their final group');
+  const returned = await apply([
+    { op: 'member.update', key: 'user:alice', patch: { groupId: 'default' } },
+    { op: 'member.update', key: 'user:alice', patch: { groupId: group.id } },
+  ]);
+  assert.equal(returned.assigned, undefined, 'no misleading move notification for a round trip');
+});
+
 test('the Workspace list counts live Sessions only', async () => {
   const { ctx, workspaces } = await context();
   ctx.registry.rows.push({ id: 'w9', path: '/w/live', title: 'Live', sessionIds: ['s1', 's2', 's3'] });

@@ -79,7 +79,7 @@ export function CredentialsCard({ scope, base, disabled, remote, onChanged }: {
             aria-label="Bot Secret"
             onChange={event => setSecret(event.target.value)}
           />
-          <Button variant="ghost" size="sm" type="button" onClick={() => setReveal(value => !value)} disabled={!secret}>
+          <Button variant="outline" size="sm" type="button" onClick={() => setReveal(value => !value)} disabled={!secret}>
             {reveal ? '隐藏' : '显示'}
           </Button>
           {status.configured ? <Tag tone="success">已保存</Tag> : <Tag tone="warning">未设置</Tag>}

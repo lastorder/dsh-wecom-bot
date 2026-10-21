@@ -220,12 +220,60 @@ test('a group chat is refused until the group itself is added to a group', async
   h.stop();
 });
 
-test('an administrator may talk to the Bot without being added to a group', async () => {
+test('an administrator can use commands without implicit group membership', async () => {
   const h = await harness({ adminUserIds: ['root'] }, {}, { members: [] });
-  await h.send('在吗', { chat: 'root', user: 'root' });
-  assert.match(lastReply(h), /已提交给 DSH/);
-  assert.equal(h.store.get('user:root').groupId, 'default', 'implicitly authorized into the default group');
-  assert.equal(h.store.label('user:root'), '', 'with no note of its own');
+  for (const text of ['/help', '/whoami', '/status', '在吗']) {
+    await h.send(text, { chat: 'root', user: 'root' });
+    assert.equal(h.store.get('user:root'), undefined, text);
+  }
+  assert.match(lastReply(h), /尚未加入分组或选择会话/);
+  assert.equal(h.ctx.creates.length, 0);
+  assert.equal(h.ctx.prompts.length, 0);
+  await h.send('/new', { chat: 'root', user: 'root' });
+  await h.send('开始', { chat: 'root', user: 'root' });
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1');
+  assert.equal(h.store.get('user:root'), undefined, '/new selects a Session, never membership');
+  await h.send('/reset', { chat: 'root', user: 'root' });
+  await h.send('重试', { chat: 'root', user: 'root' });
+  assert.equal(h.ctx.creates.length, 1, 'reset cannot silently create a default-group Session');
+  h.stop();
+});
+
+test('a settings edit reaches the running bridge immediately, administrator commands included', async () => {
+  const h = await harness({}, {
+    workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1'] }],
+  }, { members: [['user', 'newcomer']] });
+  await h.send('/whoami', { chat: 'newcomer', user: 'newcomer' });
+  assert.match(lastReply(h), /\*\*管理员\*\*：否/);
+  await h.send('/new', { chat: 'newcomer', user: 'newcomer' });
+  assert.match(lastReply(h), /需要管理员权限/);
+  const created = h.ctx.creates.length;
+
+  // What the page writes: the same bridge object, no restart and no reconnect.
+  h.bridge.updateSettings({ ...h.settings, adminUserIds: ['newcomer'] });
+  await h.send('/whoami', { chat: 'newcomer', user: 'newcomer' });
+  assert.match(lastReply(h), /\*\*管理员\*\*：是/);
+  await h.send('/new', { chat: 'newcomer', user: 'newcomer' });
+  assert.match(lastReply(h), /已创建并切换到新会话/);
+  assert.equal(h.ctx.creates.length, created + 1);
+
+  // Demotion is the same path in reverse: the command layer must not keep the
+  // snapshot it was built with either.
+  h.bridge.updateSettings({ ...h.settings, adminUserIds: [] });
+  await h.send('/whoami', { chat: 'newcomer', user: 'newcomer' });
+  assert.match(lastReply(h), /\*\*管理员\*\*：否/);
+  await h.send('/new', { chat: 'newcomer', user: 'newcomer' });
+  assert.match(lastReply(h), /需要管理员权限/);
+  h.stop();
+});
+
+test('a Workspace scope edit reaches the running directory too', async () => {
+  const h = await harness({ adminUserIds: ['root'], adminWorkspaces: [] }, {
+    workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1'] }],
+  }, { members: [] });
+  assert.equal(await h.bridge.directory.permitted('s1'), true);
+  h.bridge.updateSettings({ ...h.settings, adminWorkspaces: ['/w/beta'] });
+  assert.equal(await h.bridge.directory.permitted('s1'), false);
   h.stop();
 });
 
@@ -314,7 +362,7 @@ test('an administrator command is refused in a group chat, whoever sends it', as
 test('an administrator can switch Sessions, and /reset returns to their own membership', async () => {
   const h = await harness({ adminUserIds: ['root'] }, {
     workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1', 's2'] }],
-  }, { members: [] });
+  }, { members: [['user', 'root']] });
   await h.send('/sessions', { chat: 'root', user: 'root' });
   assert.match(lastReply(h), /可切换的会话/);
   assert.match(lastReply(h), /Alpha 任务/);
@@ -469,6 +517,19 @@ test('an unanswered question falls back to the DSH page', async () => {
   h.stop();
 });
 
+test('a question-timeout edit reaches the running bridge for the next question', async () => {
+  // The bridge started with a minute; the ⑤ card now says 20ms. The next
+  // question must use the new value, not a snapshot taken at construction.
+  const h = await harness({ questionTimeoutMs: 60_000 });
+  await h.send('hi');
+  h.bridge.updateSettings({ ...h.settings, questionTimeoutMs: 20 });
+  const result = await h.bridge.onQuestion({
+    agent: { id: 'session-created-1' }, questions: [{ id: 'q', question: 'Q?' }],
+  }, async () => ({ answers: [{ id: 'q', selected: [], custom: 'DSH' }] }));
+  assert.equal(result.answers[0].custom, 'DSH');
+  h.stop();
+});
+
 test('a stale code can never answer a newer question with the same id', async () => {
   const h = await harness();
   h.client.emit('authenticated');
@@ -484,7 +545,7 @@ test('a stale code can never answer a newer question with the same id', async ()
   const secondCode = h.client.sends.at(-1).body.markdown.content.match(/\/answer ([a-z0-9]{6})/)[1];
   assert.notEqual(secondCode, firstCode);
   await h.send(`/answer ${firstCode} stale`);
-  assert.match(lastReply(h), /没有对应的待回答提问/);
+  assert.match(lastReply(h), /该请求已处理或已结束/);
   await h.send(`/answer ${secondCode} fresh`);
   assert.equal((await second).answers[0].custom, 'fresh');
   h.stop();
@@ -504,7 +565,7 @@ test('plan reviews and hidden details stay in DSH and are only announced', async
   h.stop();
 });
 
-test('remote approval is off by default and never available to a group', async () => {
+test('a request with no administrator immediately delegates and never grants approval to a group', async () => {
   const off = await harness();
   await off.send('hi');
   assert.equal(await off.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'rejected'), 'rejected');
@@ -534,7 +595,7 @@ test('each remote approval has a fresh code; an old code cannot approve a later 
   const secondCode = h.client.sends.at(-1).body.markdown.content.match(/\/approve ([a-z0-9]{6})/)[1];
   assert.notEqual(secondCode, firstCode);
   await h.send(`/approve ${firstCode}`, { chat: 'root', user: 'root' });
-  assert.match(lastReply(h), /没有可在此单聊审批的请求/);
+  assert.match(lastReply(h), /该请求已处理或已结束/);
   await h.send(`/approve ${secondCode}`, { chat: 'group-1', user: 'alice' });
   assert.match(lastReply(h), /需要管理员权限/, 'a group chat never answers an approval');
   await h.send(`/approve ${secondCode}`, { chat: 'root', user: 'root' });
@@ -586,6 +647,143 @@ test('an accepted message is never kept in memory, and refused text is bounded',
   assert.equal(row.id, 'mallory');
   assert.equal(row.text.length, 121, 'a bounded excerpt plus the ellipsis');
   assert.equal(Object.isFrozen(row), true);
+  h.stop();
+});
+
+test('an administrator cannot implicitly authorize a group chat or switch it through a quote', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [] });
+  await h.send('hi', { chat: 'group-1', user: 'root' });
+  assert.match(lastReply(h), /用户未授权/);
+  assert.equal(h.store.get('group:group-1'), undefined);
+  assert.equal(h.ctx.creates.length, 0);
+  await h.authorize('group', 'group-1');
+  await h.send('群的消息', { chat: 'group-1', user: 'root', quote: '> 发送 /use s1 可定位到该会话。' });
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1');
+  h.stop();
+});
+
+test('demotion or a narrower scope invalidates a prompt still awaiting its reply ACK', async () => {
+  for (const patch of [{ adminUserIds: [] }, { adminWorkspaces: ['/not/alpha'] }]) {
+    const h = await harness({ adminUserIds: ['root'] }, {
+      workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1'] }],
+    }, { members: [['user', 'root']] });
+    await h.send('/use s1', { chat: 'root', user: 'root' });
+    let release;
+    h.client.replyStream = () => new Promise(resolve => { release = resolve; });
+    h.client.emit('message', frame('must not reach the foreign Session', { chat: 'root', user: 'root' }));
+    assert.ok(await until(() => Boolean(release)));
+    h.bridge.updateSettings({ ...h.settings, ...patch });
+    release({});
+    await h.bridge.whenIdle();
+    assert.equal(h.ctx.prompts.length, 0, JSON.stringify(patch));
+    h.stop();
+  }
+});
+
+test('a group move during the passive ACK never submits to the old Session', async () => {
+  const h = await harness();
+  await h.send('first');
+  const next = await h.addGroup('新分组');
+  let release;
+  const replyStream = h.client.replyStream;
+  h.client.replyStream = () => new Promise(resolve => { release = resolve; });
+  h.client.emit('message', frame('racing with the move'));
+  assert.ok(await until(() => Boolean(release)));
+  await h.store.update('user:alice', { groupId: next.id });
+  h.client.replyStream = replyStream;
+  release({});
+  await h.bridge.whenIdle();
+  assert.equal(h.ctx.prompts.length, 1, 'only the first, pre-move message was submitted');
+  assert.match(lastReply(h), /分组或会话已变更/);
+  assert.equal(h.store.get('user:alice').sessionId, '');
+  await h.send('next');
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-2');
+  h.stop();
+});
+
+test('narrowing Workspace scope or replacing administrators retires existing nonces immediately', async () => {
+  for (const patch of [{ adminWorkspaces: ['/different/workspace'] }, { adminUserIds: ['new-admin'] }]) {
+    const h = await harness({ remoteApprovals: true, adminUserIds: ['root'] });
+    h.client.emit('authenticated');
+    let fallback = 0;
+    const request = h.bridge.onApproval({ agent: { id: 's1' }, toolName: 'bash' }, async () => { fallback++; return 'unavailable'; });
+    assert.ok(await until(() => h.client.sends.length > 0));
+    const nonce = h.client.sends.at(-1).body.markdown.content.match(/\/approve ([a-z0-9]{6})/)[1];
+    h.bridge.updateSettings({ ...h.settings, ...patch });
+    assert.equal(await request, 'unavailable');
+    assert.equal(fallback, 1);
+    await h.send(`/approve ${nonce}`, { chat: 'root', user: 'root' });
+    assert.doesNotMatch(lastReply(h), /已允许本次工具调用/);
+    h.stop();
+  }
+});
+
+test('queued Session notifications re-check demotions, scope and membership when reconnecting', async () => {
+  for (const change of ['demote', 'scope', 'move']) {
+    const h = await harness({ adminUserIds: ['root'] });
+    await h.send('first');
+    await h.endTurn('session-created-1', { text: 'private old-session content' });
+    assert.equal(h.client.sends.length, 0, 'still offline');
+    if (change === 'demote') h.bridge.updateSettings({ ...h.settings, adminUserIds: [] });
+    if (change === 'scope') h.bridge.updateSettings({ ...h.settings, adminWorkspaces: ['/not/the/workspace'] });
+    if (change === 'move') {
+      const group = await h.addGroup('新分组');
+      await h.store.update('user:alice', { groupId: group.id });
+    }
+    h.client.emit('authenticated');
+    await settle();
+    assert.deepEqual(sentChats(h), change === 'move' ? ['root'] : ['alice'], change);
+    h.stop();
+  }
+});
+
+test('a routing edit invalidates an archive command awaiting Session details', async () => {
+  for (const change of ['move', 'remove']) {
+    const h = await harness();
+    await h.send('first');
+    let release;
+    h.bridge.directory.describe = () => new Promise(resolve => { release = resolve; });
+    h.client.emit('message', frame('/delete confirm'));
+    assert.ok(await until(() => Boolean(release)));
+    if (change === 'move') {
+      const group = await h.addGroup('新组');
+      await h.store.update('user:alice', { groupId: group.id });
+    } else await h.store.remove('user:alice');
+    h.bridge.resetRouting('alice');
+    release({ title: 'old Session' });
+    await h.bridge.whenIdle();
+    assert.deepEqual(h.ctx.registry.archivedCalls, [], change);
+    h.stop();
+  }
+});
+
+test('a moved member cannot answer a pending question from the previous Session', async () => {
+  const h = await harness();
+  h.client.emit('authenticated');
+  await h.send('first');
+  const controller = new AbortController();
+  const ask = h.bridge.onQuestion({ agent: { id: 'session-created-1' }, signal: controller.signal,
+    questions: [{ id: 'q', question: 'Question?' }] }, async () => ({ answers: [] }));
+  assert.ok(await until(() => h.client.sends.length > 0));
+  const nonce = h.client.sends.at(-1).body.markdown.content.match(/\/answer ([a-z0-9]{6})/)[1];
+  const group = await h.addGroup('新组');
+  await h.store.update('user:alice', { groupId: group.id });
+  await h.send(`/answer ${nonce} answer`);
+  assert.match(lastReply(h), /该提问不属于你当前可操作的会话/);
+  controller.abort();
+  assert.deepEqual(await ask, { answers: [] });
+  h.stop();
+});
+
+test('demotion discards an administrator switch instead of resurrecting it after re-promotion', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {
+    workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1'] }],
+  }, { members: [['user', 'root']] });
+  await h.send('/use s1', { chat: 'root', user: 'root' });
+  h.bridge.updateSettings({ ...h.settings, adminUserIds: [] });
+  h.bridge.updateSettings(h.settings);
+  await h.send('continue', { chat: 'root', user: 'root' });
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1');
   h.stop();
 });
 
@@ -828,9 +1026,60 @@ test('tool approvals are announced to administrators only', async () => {
   const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'root'], ['user', 'alice']] });
   h.client.emit('authenticated');
   await h.send('hi');
-  await h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
+  const pending = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
   await settle();
   assert.deepEqual(sentChats(h), ['root'], 'the member whose Session it is never receives it');
   assert.match(h.client.sends.at(-1).body.markdown.content, /DSH 权限请求/);
+  h.stop();
+  assert.equal(await pending, 'unavailable');
+});
+
+test('an approval is only offered to administrators whose scope covers the Session', async () => {
+  const scoped = await harness(
+    { adminUserIds: ['root'], adminWorkspaces: ['/somewhere/else'] }, {},
+    { members: [['user', 'root'], ['user', 'alice']] },
+  );
+  scoped.client.emit('authenticated');
+  await scoped.send('hi');
+  const before = scoped.client.sends.length;
+  assert.equal(await scoped.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable'), 'unavailable');
+  await settle();
+  assert.equal(scoped.client.sends.length, before, 'neither a member nor an out-of-scope admin is told');
+  const entry = scoped.journal.find('dsh.approval').at(-1);
+  assert.equal(entry.remote, false);
+  assert.deepEqual(entry.chats, []);
+  scoped.stop();
+});
+
+test('an error-terminated Session reaches scoped administrators without a WeCom round', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'root'], ['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi');
+  const chats = await h.endTurn('session-created-1', { reason: 'error', text: '' });
+  assert.deepEqual([...chats].sort(), ['alice', 'root'], 'the bound member and the scoped admin both hear');
+  assert.match(h.client.sends.at(-1).body.markdown.content, /错误/);
+
+  const scoped = await harness(
+    { adminUserIds: ['root'], adminWorkspaces: ['/somewhere/else'] }, {},
+    { members: [['user', 'root'], ['user', 'alice']] },
+  );
+  scoped.client.emit('authenticated');
+  await scoped.send('hi');
+  assert.deepEqual(await scoped.endTurn('session-created-1', { reason: 'error', text: '' }), ['alice'],
+    'an out-of-scope administrator is not told');
+  scoped.stop();
+  h.stop();
+});
+
+test('a normal cancellation is still only relayed while a WeCom round is waiting', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  const before = h.client.sends.length;
+  assert.deepEqual(await h.endTurn('session-created-1', { reason: 'aborted' }), [],
+    'a GUI-origin cancellation with no WeCom round is not fanned out');
+  assert.equal(h.client.sends.length, before);
+  await h.send('hi');
+  assert.deepEqual([...(await h.endTurn('session-created-1', { reason: 'aborted' }))].sort(), ['alice', 'root'],
+    'a round that is waiting still hears its turn end');
   h.stop();
 });

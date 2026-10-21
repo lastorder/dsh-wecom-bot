@@ -1,4 +1,4 @@
-import { DEFAULT_GROUP_ID, type RejectionReason } from '../../shared/protocol.js';
+import type { RejectionReason } from '../../shared/protocol.js';
 import { pathListed, type BridgeSettings } from '../config.js';
 import type { BindingKeyParts } from '../store.js';
 
@@ -7,10 +7,10 @@ import type { BindingKeyParts } from '../store.js';
  *
  * There is exactly one answer — membership of a user group, which is what the
  * settings page grants when it assigns a rejected sender to a group.
- * Administrators are the one exception: they are listed in the Config, so they
- * are trusted by definition and reach the default group without being added
- * (otherwise the person who configured the Bot could lock themselves out of
- * their own `adminUserIds`).
+ * Administrators are the one exception in private chats: the store's settings
+ * grant access to commands without creating membership. Plain messages still
+ * need an explicit group or a Session chosen with `/new` or `/use`. An admin
+ * sending from an unassigned group chat never authorizes that shared chat.
  *
  * Routing is not decided here: which Session a conversation reaches comes from
  * its member row, and only administrators may leave their own membership.
@@ -26,7 +26,7 @@ export interface AccessPolicy {
 }
 
 export type AccessDecision =
-  | { readonly accepted: true; readonly groupId: string; readonly implicit: boolean }
+  | { readonly accepted: true; readonly groupId?: string }
   | { readonly accepted: false; readonly reason: RejectionReason };
 
 export interface AccessPolicyOptions {
@@ -47,8 +47,8 @@ export function createAccessPolicy(
     adminWorkspaceAllowed: (path: string | undefined) => pathListed(adminWorkspaces, path),
     evaluate(parts) {
       const member = options.memberOf(parts);
-      if (member) return { accepted: true, groupId: member, implicit: false };
-      if (adminUserIds.has(parts.user)) return { accepted: true, groupId: DEFAULT_GROUP_ID, implicit: true };
+      if (member) return { accepted: true, groupId: member };
+      if (parts.chatType === 'single' && adminUserIds.has(parts.user)) return { accepted: true };
       return { accepted: false, reason: 'unauthorized' };
     },
   };

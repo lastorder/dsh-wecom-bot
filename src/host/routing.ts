@@ -1,6 +1,7 @@
 import { DEFAULT_GROUP_ID, type BindingRecord, type GroupRecord } from '../shared/protocol.js';
 import { bindingKey, bindingKeyFor, type BindingKeyParts, type PluginStore } from './store.js';
-import type { SessionProvisioner } from './sessions.js';
+import { SessionBindingChangedError, type SessionProvisioner } from './sessions.js';
+import { routingChangedText } from './bridge/notices.js';
 
 /**
  * Routing: which Session one WeCom conversation talks to.
@@ -71,23 +72,34 @@ export function createRouter(options: RouterOptions): Router {
     provisioner,
     ensure,
     groupOf,
-    async route(parts, groupId) {
-      let binding: BindingRecord;
-      try {
-        binding = await ensure(parts, groupId);
-      } catch (error) {
-        return { ok: false, message: error instanceof Error && /limit/.test(error.message)
-          ? '成员数量已达上限，请在配置页清理后再试。'
-          : '无法创建成员记录，请查看插件日志。' };
-      }
+    async route(parts, _groupId) {
+      // Only an explicit authorization creates memberships. A principal removed
+      // after the bridge's access check must not be silently re-authorized here.
+      const binding = store.get(bindingKeyFor(parts));
+      if (!binding) return { ok: false, message: routingChangedText() };
       const group = groupOf(binding);
       try {
         const provisioned = await provisioner.ensure(binding, group);
+        const current = store.get(routerKey(binding));
+        // Provisioning can yield after its final check; never turn a removed
+        // binding back into a successful route by falling back to its old row.
+        if (!current || current !== provisioned.binding || current.groupId !== group.id
+          || current.sessionId !== provisioned.sessionId || store.group(group.id) !== group) {
+          throw new SessionBindingChangedError();
+        }
         return {
-          ok: true, binding: store.get(bindingKey(binding.kind, binding.id)) ?? binding, group,
+          ok: true, binding: current, group,
           sessionId: provisioned.sessionId, created: provisioned.created,
         };
       } catch (error) {
+        if (error instanceof SessionBindingChangedError) {
+          const current = store.get(routerKey(binding));
+          return {
+            ok: false,
+            ...(current ? { binding: current, group: groupOf(current) } : {}),
+            message: routingChangedText(),
+          };
+        }
         options.log?.warn(`WeCom could not create a Session: ${error instanceof Error ? error.message : String(error)}`);
         return {
           ok: false, binding, group,
@@ -104,7 +116,7 @@ export function createRouter(options: RouterOptions): Router {
       const selection = provisioner.desired(group);
       if (!selection) return;
       for (const binding of store.inGroup(groupId)) {
-        if (!binding.sessionId) continue;
+        if (!binding.sessionId || binding.sessionSelection) continue;
         try {
           await provisioner.applyModel(binding.sessionId, selection);
         } catch (error) {

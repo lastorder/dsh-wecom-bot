@@ -59,6 +59,9 @@ export function isStoreOp(value: unknown): value is StoreOp {
       return typeof record.groupId === 'string' && (record.kind === 'user' || record.kind === 'group');
     case 'member.update':
       return typeof record.key === 'string' && Boolean(record.patch) && typeof record.patch === 'object';
+    case 'member.model':
+      return typeof record.key === 'string' && typeof record.sessionId === 'string'
+        && Boolean(record.selection) && typeof record.selection === 'object' && !Array.isArray(record.selection);
     case 'member.remove':
     case 'member.archive':
       return typeof record.key === 'string';

@@ -170,9 +170,9 @@ export interface StoreSettings {
   readonly adminUserIds: readonly string[];
   /** Workspaces an administrator's notices cover; empty means every one. */
   readonly adminWorkspaces: readonly string[];
-  /** How long the Bot waits for a WeCom answer before falling back to DSH. */
+  /** Legacy serialized value; DSH and WeCom now handle interactions concurrently. */
   readonly questionTimeoutMs: number;
-  /** Whether tool approvals may be answered from a WeCom private chat. */
+  /** Legacy serialized value; scoped administrator approvals are always enabled. */
   readonly remoteApprovals: boolean;
   /** Whether the JSONL conversation journal is written. */
   readonly logEnabled: boolean;
@@ -208,6 +208,14 @@ export interface GroupRecord {
   readonly updatedAt: number;
 }
 
+/** A principal's previous Session in one group; never shared across principals. */
+export interface GroupSessionMemory {
+  readonly sessionId: string;
+  /** Configured Workspace when remembered; a Workspace edit invalidates it. */
+  readonly workspace: string;
+  readonly selection?: ModelSelection;
+}
+
 /** One authorized WeCom principal: its group membership and its Session. */
 export interface BindingRecord {
   readonly kind: BindingKind;
@@ -217,6 +225,10 @@ export interface BindingRecord {
   readonly groupId: string;
   /** Bound Session id; empty means "create one on the next message". */
   readonly sessionId: string;
+  /** Explicit model for this Session only; replacements use group defaults. */
+  readonly sessionSelection?: ModelSelection;
+  /** At most one remembered Session per existing group, scoped to this principal. */
+  readonly sessionsByGroup?: Readonly<Record<string, GroupSessionMemory>>;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -243,6 +255,8 @@ export interface GroupMemberView {
   readonly sessionRunning: boolean;
   /** Model of the Session's latest request, when DSH reports one. */
   readonly sessionModel?: ModelSelection;
+  /** Configured model for the next request, including a per-Session override. */
+  readonly sessionSelection?: ModelSelection;
   /** Agent preset the bound Session runs, when DSH reports one. */
   readonly sessionPreset?: string;
   /** Context occupancy of the bound Session, when DSH reports one. */
@@ -402,6 +416,13 @@ export type StoreOp =
       readonly sessionId?: string;
     };
   }
+  | {
+    /** Edit only this exact bound Session; a stale page cannot target its replacement. */
+    readonly op: 'member.model';
+    readonly key: string;
+    readonly sessionId: string;
+    readonly selection: ModelSelection;
+  }
   | { readonly op: 'member.remove'; readonly key: string }
   /**
    * Archive the member's bound Session and clear the binding, so the next
@@ -450,7 +471,7 @@ export interface BridgeStateView {
   readonly presets: PresetCatalogView | null;
   readonly presetsError?: string;
   readonly workspaces: readonly WorkspaceOption[];
-  /** The store's settings block, as the ④管理员 / ⑤高级设置 cards edit it. */
+  /** The store's settings block, as the ④管理员 / ⑤连接与日志 cards edit it. */
   readonly settings: StoreSettings;
   readonly admins: readonly AdminView[];
   /** Non-fatal setup problems worth showing on the page. */

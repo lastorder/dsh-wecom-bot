@@ -20,6 +20,10 @@ const dialog = process.argv.includes('--dialog');
 // confirmation that archives a member's Session.
 const picker = process.argv.includes('--picker');
 const archive = process.argv.includes('--archive');
+// The Session identity dialog: clicking the compact state must not navigate.
+const session = process.argv.includes('--session');
+// Every group left folded: the shot for the aligned overview grid.
+const collapsed = process.argv.includes('--collapsed');
 const read = path => readFile(resolve(root, path), 'utf8');
 
 const now = Date.now();
@@ -308,14 +312,15 @@ plugin.apply({
 ReactDOM.createRoot(document.getElementById('root')).render(page({ view: 'page' }));
 // The page opens with every group folded, so the preview expands the first one
 // and presses its 编辑 button, which is what reveals the group settings.
-if (!${empty}) setTimeout(() => { document.querySelectorAll('.wcb-group-toggle')[0]?.click(); }, 200);
+if (!${empty} && !${collapsed}) setTimeout(() => { document.querySelectorAll('.wcb-group-toggle')[0]?.click(); }, 200);
 // The dialog shot keeps the group folded back to its member list: the point is
 // the person, not the group form.
-if (!${empty} && !${dialog} && !${archive} && !${picker}) setTimeout(() => { document.querySelector('[aria-label="编辑 默认分组"]')?.click(); }, 350);
+if (!${empty} && !${dialog} && !${archive} && !${picker} && !${session} && !${collapsed}) setTimeout(() => { document.querySelector('[aria-label="编辑 默认分组"]')?.click(); }, 350);
 // The --dialog variant goes one step further: the badge opens the person
 // details, which is where the 备注 and the group move live.
 if (${dialog}) setTimeout(() => { document.querySelector('[aria-label="张三 的详情"]')?.click(); }, 500);
 if (${archive}) setTimeout(() => { document.querySelector('[aria-label="归档 张三 的会话"]')?.click(); }, 500);
+if (${session}) setTimeout(() => { document.querySelector('[aria-label="查看 张三 的会话详情"]')?.click(); }, 500);
 if (${picker}) setTimeout(() => { document.querySelector('[aria-label="添加管理员"]')?.click(); }, 500);
 if (${advanced}) setTimeout(() => {
   document.querySelector('details').open = true;
@@ -336,7 +341,7 @@ console.log(file);
 
 const chrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 if (existsSync(chrome)) {
-  const png = resolve(out, `settings${dark ? '-dark' : ''}${empty ? '-empty' : ''}${advanced ? '-advanced' : ''}${dialog ? '-dialog' : ''}${picker ? '-picker' : ''}${archive ? '-archive' : ''}.png`);
+  const png = resolve(out, `settings${dark ? '-dark' : ''}${empty ? '-empty' : ''}${advanced ? '-advanced' : ''}${dialog ? '-dialog' : ''}${picker ? '-picker' : ''}${archive ? '-archive' : ''}${session ? '-session' : ''}${collapsed ? '-collapsed' : ''}.png`);
   const flags = ['--headless=new', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=1', '--virtual-time-budget=3000'];
   // Measure at the real width first (the page has a <820px breakpoint), then
   // screenshot exactly that tall, so the PNG has no empty band at the bottom.

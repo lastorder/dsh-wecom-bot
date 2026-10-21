@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Button, IconPlusOutlineRegular, IconShieldOutlineRegular, IconTrashOutlineRegular, Input, Modal, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives';
-import type { AdminView, BridgeStateView, WorkspaceOption } from '../../shared/protocol.ts';
+import type { BridgeStateView, GroupView } from '../../shared/protocol.ts';
 import { useStoreApply, useStoreSettingsSave } from '../hooks.ts';
-import { displayPath, personKey, scopeIncludes, setLabel, toggle, toggleScope } from '../model.ts';
-import { Card, CheckRow, Collapse, Empty, Fact, PersonDialog, PersonRow } from './ui.tsx';
+import { addMember, displayPath, personKey, scopeIncludes, setLabel, toggle, toggleScope } from '../model.ts';
+import { Card, CheckRow, Collapse, Empty, Fact, PersonDialog, PersonRow, Select } from './ui.tsx';
 
 /**
  * Step 4: administrators. This is the one place that grants the power to leave
@@ -36,6 +36,7 @@ export function AdminCard({ state, disabled, onChanged }: {
   const save = useStoreSettingsSave(onChanged);
   const routing = useStoreApply(onChanged);
   const admins = state?.admins ?? [];
+  const groups = state?.routing?.groups ?? [];
   const workspaces = state?.workspaces ?? [];
   const all = draft.adminWorkspaces.length === 0;
   const busy = disabled || save.saving;
@@ -148,7 +149,9 @@ export function AdminCard({ state, disabled, onChanged }: {
                 id={id}
                 label={known.get(id)?.label ?? ''}
                 groupName={known.get(id)?.groupName}
+                groups={groups}
                 disabled={busy || routing.busy === personKey('user', id)}
+                onAssign={groupId => routing.apply(personKey('user', id), [addMember(groupId, 'user', id)])}
                 onNote={next => { void routing.apply(personKey('user', id), [setLabel(personKey('user', id), next)]); }}
                 onRemove={() => { void apply({ adminUserIds: toggle(draft.adminUserIds, id, false) }); }}
               />
@@ -164,7 +167,7 @@ export function AdminCard({ state, disabled, onChanged }: {
           title={<><IconShieldOutlineRegular size={15} /> 可接收通知的 Workspace</>}
           summary={all ? '全部 Workspace' : `${draft.adminWorkspaces.length} / ${workspaces.length || draft.adminWorkspaces.length} 个 Workspace`}
           actions={all ? undefined : (
-            <Button variant="ghost" size="sm" disabled={busy} onClick={() => { void apply({ adminWorkspaces: [] }); }}>
+            <Button variant="outline" size="sm" disabled={busy} onClick={() => { void apply({ adminWorkspaces: [] }); }}>
               全选
             </Button>
           )}
@@ -244,16 +247,19 @@ export function AdminCard({ state, disabled, onChanged }: {
   );
 }
 
-/** One administrator: the badge opens the details; 移除 sits in the dialog. */
-function AdminRow({ id, label, groupName, disabled, onNote, onRemove }: {
+/** The badge opens details; an unassigned administrator can explicitly join a group. */
+function AdminRow({ id, label, groupName, groups, disabled, onAssign, onNote, onRemove }: {
   id: string;
   label: string;
   groupName?: string;
+  groups: readonly Pick<GroupView, 'id' | 'name'>[];
   disabled: boolean;
+  onAssign(groupId: string): Promise<unknown>;
   onNote(next: string): void;
   onRemove(): void;
 }) {
   const [details, setDetails] = useState(false);
+  const [assigning, setAssigning] = useState(false);
   const name = label || id;
   return (
     <div className="wcb-member">
@@ -265,9 +271,38 @@ function AdminRow({ id, label, groupName, disabled, onNote, onRemove }: {
         onOpen={() => setDetails(true)}
         meta={<>
           <Tag tone="success">管理员</Tag>
-          <span className="wcb-row-sub">{groupName ? `分组：${groupName}` : '不在任何分组'}</span>
+          {groupName ? <span className="wcb-row-sub">分组：{groupName}</span> : (
+            <button
+              type="button" className="wcb-link" disabled={disabled}
+              aria-label={`为 ${name} 分配分组`} aria-expanded={assigning}
+              onClick={() => setAssigning(value => !value)}
+            >
+              不在任何分组
+            </button>
+          )}
         </>}
       />
+      {assigning && !groupName && (
+        <div className="wcb-member-edit">
+          <label className="wcb-binding-field">
+            <span className="wcb-binding-label">加入分组</span>
+            <Select
+              value="" autoFocus disabled={disabled || !groups.length}
+              aria-label={`管理员 ${id} 的分组`}
+              onChange={event => {
+                const groupId = event.target.value;
+                if (!groupId) return;
+                void onAssign(groupId).then(result => { if (result) setAssigning(false); });
+              }}
+            >
+              <option value="" disabled>{groups.length ? '请选择分组' : '暂无可用分组'}</option>
+              {groups.map(group => <option key={group.id} value={group.id}>{group.name}</option>)}
+            </Select>
+            <span className="wcb-hint">选择后立即加入；下一条消息按该组的 Workspace、模型与 preset 创建会话，管理员权限不变。</span>
+          </label>
+          <Button variant="ghost" size="sm" disabled={disabled} onClick={() => setAssigning(false)}>取消</Button>
+        </div>
+      )}
       <PersonDialog
         open={details}
         onClose={() => setDetails(false)}
@@ -280,7 +315,7 @@ function AdminRow({ id, label, groupName, disabled, onNote, onRemove }: {
         onNote={onNote}
         footer={(
           <Button
-            variant="ghost" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled}
+            variant="outline" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled}
             aria-label={`移除管理员 ${id}`} onClick={onRemove}
           >
             移除管理员

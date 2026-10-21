@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply, Config, inject } from '../dist/host/index.js';
 import { createRuntime } from '../dist/host/runtime.js';
+import { storeRoute } from '../dist/host/routes.js';
 import { fakeClient, fakeHost, finishedSession, frame, memoryJournal, settle, until, writeStore } from './helpers.js';
 
 // Every runtime in this file must own a throwaway DSH home: the store writes
@@ -448,10 +449,190 @@ test('the live bridge adopts an edited administrator list', () => withHome(async
   assert.equal(ctx.prompts.length, 0, 'a sender nobody authorized reaches no Session');
 
   await runtime.applyOps([{ op: 'settings.set', patch: { adminUserIds: ['newcomer'] } }]);
-  await settle();
+  client.emit('message', frame('/new', { chat: 'newcomer', user: 'newcomer' }));
+  assert.ok(await until(() => ctx.creates.length > 0));
   client.emit('message', frame('hello again', { chat: 'newcomer', user: 'newcomer' }));
-  await until(() => ctx.prompts.length > 0);
-  assert.equal(ctx.prompts.length, 1, 'the same connection now admits them');
+  assert.ok(await until(() => ctx.prompts.length > 0));
+  assert.equal(ctx.prompts.length, 1, 'the same connection now admits their explicitly selected Session');
+  assert.equal(runtime.store.get('user:newcomer'), undefined, 'promotion never creates membership');
+  await runtime.stop();
+}));
+
+test('promoting an administrator tells them, without a reconnect, and the bridge obeys at once', () => withHome(async home => {
+  await writeStore(home, { settings: { adminUserIds: [] } });
+  const { ctx } = hostWithServices();
+  const client = fakeClient();
+  const clients = [];
+  const runtime = createRuntime({
+    ctx, journal: memoryJournal(), log: silent,
+    config: Config({ botId: 'bot' }),
+    createClient: () => { clients.push(client); return client; },
+  });
+  await runtime.start();
+  client.emit('authenticated');
+
+  const result = await runtime.applyOps([{ op: 'settings.set', patch: { adminUserIds: ['newcomer'] } }]);
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.promotedAdmins, ['newcomer']);
+  assert.equal(clients.length, 1, 'the socket was never replaced');
+  await settle();
+  assert.deepEqual(client.sends.map(send => send.chat), ['newcomer'], 'the new administrator is told in their private chat');
+  assert.match(client.sends[0].body.markdown.content, /你已被设为管理员/);
+
+  // The very next administrator command runs on the connection already open.
+  client.emit('message', frame('/new', { chat: 'newcomer', user: 'newcomer' }));
+  await until(() => ctx.creates.length > 0);
+  assert.equal(ctx.creates.length, 1, 'the promotion was already part of the access policy');
+  await runtime.stop();
+}));
+
+test('a batch that fails after a settings edit still updates the running bridge', () => withHome(async home => {
+  await writeStore(home, { settings: { adminUserIds: [] } });
+  const { ctx } = hostWithServices();
+  const client = fakeClient();
+  const runtime = createRuntime({
+    ctx, journal: memoryJournal(), log: silent,
+    config: Config({ botId: 'bot' }),
+    createClient: () => client,
+  });
+  await runtime.start();
+  client.emit('authenticated');
+
+  const result = await runtime.applyOps([
+    { op: 'settings.set', patch: { adminUserIds: ['newcomer'] } },
+    { op: 'settings.set', patch: { questionTimeoutMs: 1 } },
+  ]);
+  assert.equal(result.ok, false);
+  assert.equal(result.settingsChanged, true, 'the accepted edit is still reported');
+  // The failing op stopped the batch but must not stop the settings from being
+  // adopted: otherwise the promotion waits for the next plugin start.
+  client.emit('message', frame('/new', { chat: 'newcomer', user: 'newcomer' }));
+  await until(() => ctx.creates.length > 0);
+  assert.equal(ctx.creates.length, 1, 'the live bridge already knows the new administrator');
+  await runtime.stop();
+}));
+
+test('moving a member to another group tells them where they landed', () => withHome(async home => {
+  await writeStore(home, { settings: { adminUserIds: [] } });
+  const { ctx } = hostWithServices();
+  const client = fakeClient();
+  const runtime = createRuntime({
+    ctx, journal: memoryJournal(), log: silent,
+    config: Config({ botId: 'bot' }),
+    createClient: () => client,
+  });
+  await runtime.start();
+  client.emit('authenticated');
+  await runtime.store.create('user', 'alice', { groupId: 'default' });
+  const friends = await runtime.store.createGroup('朋友');
+
+  const result = await runtime.applyOps([
+    { op: 'member.update', key: 'user:alice', patch: { groupId: friends.id } },
+  ]);
+  assert.equal(result.ok, true);
+  await settle();
+  assert.deepEqual(client.sends.map(send => send.chat), ['alice']);
+  const notice = client.sends[0].body.markdown.content;
+  assert.match(notice, /你已被调整到新的分组/);
+  assert.match(notice, /朋友/);
+  await runtime.stop();
+}));
+
+test('a moved administrator loses both the persisted Session and the temporary switch', () => withHome(async home => {
+  await writeStore(home, { settings: { adminUserIds: ['alice'] } });
+  const { ctx } = hostWithServices();
+  const client = fakeClient();
+  const runtime = createRuntime({ ctx, journal: memoryJournal(), log: silent,
+    config: Config({ botId: 'bot' }), createClient: () => client });
+  await runtime.start();
+  client.emit('authenticated');
+  await runtime.store.create('user', 'alice', { groupId: 'default', label: '爱丽丝' });
+  await runtime.store.update('user:alice', { sessionId: 's1' });
+  client.emit('message', frame('/use s1'));
+  assert.ok(await until(() => client.replies.some(reply => /已切换到/.test(reply.content))));
+  const group = await runtime.store.createGroup('新组');
+  const path = mkdtempSync(join(home, 'group-'));
+  await runtime.store.updateGroup(group.id, { workspace: path, preset: 'ptc', provider: 'deepseek-account', model: 'deepseek-reasoner' });
+  const result = await runtime.applyOps([{ op: 'member.update', key: 'user:alice', patch: { groupId: group.id } }]);
+  assert.equal(result.ok, true, result.error);
+  assert.equal(runtime.store.get('user:alice').sessionId, '');
+  assert.deepEqual(runtime.store.forSession('s1'), []);
+  client.emit('message', frame('after the move'));
+  assert.ok(await until(() => ctx.prompts.length > 0));
+  const created = ctx.creates[0];
+  assert.equal(ctx.registry.list().find(row => row.id === created.workspaceId).path, path);
+  assert.equal(created.agentPreset, 'ptc');
+  assert.equal(ctx.prompts[0].sessionId, 'session-created-1', 'not the formerly switched s1');
+  assert.equal(runtime.store.label('user:alice'), '爱丽丝');
+  assert.equal(ctx.registry.archivedCalls.length, 0, 'unbinding preserves the old history');
+  await runtime.stop();
+}));
+
+test('a Workspace edit invalidates first-Session creation even when the binding was empty', () => withHome(async home => {
+  const { ctx } = hostWithServices();
+  const client = fakeClient();
+  const runtime = createRuntime({ ctx, journal: memoryJournal(), log: silent,
+    config: Config({ botId: 'bot' }), createClient: () => client });
+  await runtime.start();
+  await runtime.store.create('user', 'alice', { groupId: 'default' });
+  const create = ctx.sessionController.create;
+  let release;
+  ctx.sessionController.create = async request => {
+    await new Promise(resolve => { release = resolve; });
+    return create(request);
+  };
+  client.emit('message', frame('in the old Workspace'));
+  assert.ok(await until(() => Boolean(release)));
+  const path = mkdtempSync(join(home, 'new-workspace-'));
+  const result = await runtime.applyOps([{ op: 'group.update', id: 'default', patch: { workspace: path } }]);
+  assert.equal(result.ok, true, result.error);
+  ctx.sessionController.create = create;
+  release();
+  assert.ok(await until(() => client.replies.some(reply => /分组或会话已变更/.test(reply.content))));
+  assert.equal(runtime.store.get('user:alice').sessionId, '');
+  assert.equal(ctx.prompts.length, 0);
+  client.emit('message', frame('in the new Workspace'));
+  assert.ok(await until(() => ctx.prompts.length > 0));
+  const created = ctx.creates.at(-1);
+  assert.equal(ctx.registry.list().find(row => row.id === created.workspaceId).path, path);
+  assert.equal(ctx.prompts[0].sessionId, 'session-created-2');
+  await runtime.stop();
+}));
+
+test('unexpected errors after a settings edit cannot leave live administrator policy stale', () => withHome(async () => {
+  const { ctx } = hostWithServices();
+  const client = fakeClient();
+  const runtime = createRuntime({ ctx, journal: memoryJournal(), log: silent,
+    config: Config({ botId: 'bot' }), createClient: () => client });
+  await runtime.start();
+  runtime.store.updateGroup = async () => { throw new Error('unexpected store error'); };
+  const result = await runtime.applyOps([
+    { op: 'settings.set', patch: { adminUserIds: ['newcomer'] } },
+    { op: 'group.update', id: 'default', patch: { name: 'fail' } },
+    { op: 'settings.set', patch: { adminUserIds: [] } },
+  ]);
+  assert.equal(result.ok, false);
+  assert.match(result.error, /unexpected store error/);
+  assert.equal(result.settingsChanged, true);
+  client.emit('message', frame('/new', { chat: 'newcomer', user: 'newcomer' }));
+  assert.ok(await until(() => ctx.creates.length > 0));
+  await runtime.stop();
+}));
+
+test('the store route rejects malformed patches without losing earlier live settings', () => withHome(async () => {
+  const { ctx, routes } = hostWithServices();
+  const client = fakeClient();
+  const runtime = createRuntime({ ctx, journal: memoryJournal(), log: silent,
+    config: Config({ botId: 'bot' }), createClient: () => client });
+  await runtime.start();
+  const response = await storeRoute(runtime).fetch(post([
+    { op: 'settings.set', patch: { adminUserIds: ['newcomer'] } },
+    { op: 'group.update', id: 'default', patch: { workspace: 42 } },
+  ]));
+  assert.equal(response.status, 422);
+  assert.match((await response.json()).error, /必须是文本/);
+  client.emit('message', frame('/new', { chat: 'newcomer', user: 'newcomer' }));
+  assert.ok(await until(() => ctx.creates.length > 0));
   await runtime.stop();
 }));
 

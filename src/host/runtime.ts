@@ -1,7 +1,8 @@
 import { WSClient } from '@wecom/aibot-node-sdk';
 import { createBridge, type Bridge, type BridgeClient } from './bridge/index.js';
-import { authorizedNotice } from './bridge/notices.js';
+import { adminGrantedNotice, authorizedNotice, groupAssignedNotice } from './bridge/notices.js';
 import { createAccessPolicy } from './bridge/policy.js';
+import { createInteractionTransport } from './interaction-transport.js';
 import { applyStoreOps, buildRoutingView, type StoreOpResult } from './groups-view.js';
 import { createStore, type PluginStore } from './store.js';
 import { catalogView, createCatalogService, type CatalogService } from './catalog.js';
@@ -135,6 +136,17 @@ export function createRuntime(options: RuntimeOptions): Runtime {
 
   let bridge: Bridge | undefined;
   let stopBridge: (() => void) | undefined;
+  const interactionTransport = createInteractionTransport({
+    ctx, journal,
+    async onQuestion(request, delivery) {
+      if (!bridge) return delivery.decline();
+      return bridge.onQuestion(request, async () => { await delivery.decline(); return { answers: [] }; }, delivery);
+    },
+    async onApproval(request, delivery) {
+      if (!bridge) return delivery.decline();
+      return bridge.onApproval(request, async () => { await delivery.decline(); return 'unavailable'; }, delivery);
+    },
+  });
   /**
    * The connection identity of the live bridge: Bot ID, resolved Secret and the
    * WebSocket endpoint. Only these three ever justify dropping the socket — the
@@ -242,16 +254,22 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     const created = createBridge({
       ctx, client, settings, router, log, journal, observations, rounds, catalogs, status, scrub,
       ops: sessionOps, workspaces,
+      brokeredInteractions: Boolean(interactionTransport), notificationOnly: !interactionTransport,
     });
     stopBridge = created.start();
     bridge = created;
   }
 
-  function schedule(): void {
+  /**
+   * Queue one reconfigure and hand back the queue, so an edit that must be
+   * visible immediately can await the running bridge adopting it.
+   */
+  function schedule(): Promise<void> {
     queue = queue.then(reconfigure).catch(error => {
       log.error('WeCom reconfigure failed (details in the plugin journal)');
       journal.write({ event: 'bridge.error', level: 'error', stage: 'reconfigure', error });
     });
+    return queue;
   }
 
   async function onTurnEnd(session: SessionHandle, end: SessionEvent): Promise<void> {
@@ -331,46 +349,85 @@ export function createRuntime(options: RuntimeOptions): Runtime {
         ctx.on('app-boot/config-reload', schedule),
         ctx.on('credentials/reference-updated', ref => { if (ref === config.secretEnv.get().trim()) schedule(); }),
         ctx.on('session/event', onSessionEvent),
+        ctx.on('api-session/error', sessionId => {
+          // The event's message may contain a provider failure chain. Never relay
+          // raw exception text; the Session pointer is enough to inspect safely.
+          void bridge?.onSessionError(sessionId).catch(() => {
+            journal.write({ event: 'bridge.error', stage: 'session-error', sessionId });
+          });
+        }),
       ];
       for (const dispose of off) if (typeof dispose === 'function') disposers.push(dispose);
       await store.load();
       schedule();
       await queue;
+      await interactionTransport?.start();
     },
     async stop() {
       disposed = true;
       for (const dispose of disposers.splice(0)) dispose();
       await queue;
+      await interactionTransport?.stop();
       teardown();
       rounds.closeAll('interrupted');
       await store.flush();
     },
     routingView,
     async applyOps(ops) {
+      await store.load();
+      const before = new Map(store.bindings().map(binding => [`${binding.kind}:${binding.id}`, binding]));
       const policy = createAccessPolicy(readBridgeSettings(config, store.settings()), { memberOf: () => undefined });
       const result = await applyStoreOps({
         store, provisioner, workspaces, models, presets, router, catalogs, observations, log,
         ops: sessionOps,
         isAdmin: user => policy.isAdmin(user),
       }, ops);
-      if (result.ok) {
-        catalogs.invalidate();
-        // A settings edit lands in the store, and the running bridge has to hear
-        // about it: administrators, the notification scope and the question timeout
-        // are read per message. This queues `reconfigure`, which sees an unchanged
-        // connection identity and updates the live bridge instead of reconnecting.
-        if (result.settingsChanged) schedule();
-        // Authorization is what the person was waiting for: tell them once, in
-        // the chat they already messaged from. An offline bridge simply drops
-        // it — the next thing they send will work anyway.
-        for (const entry of result.authorized ?? []) {
-          const group = store.group(entry.groupId);
-          bridge?.notify(entry.id, authorizedNotice(group?.name ?? '默认分组'), 'authorized');
-          journal.write({
-            event: 'wecom.authorized', kind: entry.kind, chatId: entry.id, group: entry.groupId,
-            notified: Boolean(bridge),
-          });
+      if (result.changed > 0) catalogs.invalidate();
+      const after = new Map(store.bindings().map(binding => [`${binding.kind}:${binding.id}`, binding]));
+      for (const key of new Set([...before.keys(), ...after.keys()])) {
+        const previous = before.get(key);
+        const current = after.get(key);
+        if (previous?.groupId !== current?.groupId || (previous?.sessionId && !current?.sessionId)) {
+          bridge?.resetRouting((current ?? previous)!.id);
         }
+      }
+      // A settings edit lands in the store, and the running bridge has to hear
+      // about it: administrators, the notification scope and the question timeout
+      // are read per message. `reconfigure` sees an unchanged connection identity
+      // and updates the live bridge instead of reconnecting. Await it: the page
+      // says the edit is live as soon as this call returns, and a promotion must
+      // be usable by the very next command, not one microtask later.
+      //
+      // This runs even when `ok` is false: an earlier op in the batch stays
+      // applied, and leaving the bridge with its old administrators is exactly
+      // the "only after a restart" bug.
+      if (result.settingsChanged) await schedule();
+      // Authorization is what the person was waiting for: tell them once, in
+      // the chat they already messaged from. An offline bridge simply drops
+      // it — the next thing they send will work anyway.
+      for (const entry of result.authorized ?? []) {
+        const group = store.group(entry.groupId);
+        bridge?.notify(entry.id, authorizedNotice(group?.name ?? '默认分组'), 'authorized');
+        journal.write({
+          event: 'wecom.authorized', kind: entry.kind, chatId: entry.id, group: entry.groupId,
+          notified: Boolean(bridge),
+        });
+      }
+      // A move changes the group a person belongs to, so tell them where they
+      // landed instead of leaving them to discover it from a different Session.
+      for (const entry of result.assigned ?? []) {
+        const group = store.group(entry.groupId);
+        bridge?.notify(entry.id, groupAssignedNotice(group?.name ?? '默认分组'), 'group-assigned');
+        journal.write({
+          event: 'wecom.group.assigned', kind: entry.kind, chatId: entry.id,
+          group: entry.groupId, previousGroup: entry.previousGroupId, notified: Boolean(bridge),
+        });
+      }
+      // Promotion is a privilege change, not just another checkbox: the person
+      // is told what they may now do, in the private chat those commands need.
+      for (const id of result.promotedAdmins ?? []) {
+        bridge?.notify(id, adminGrantedNotice(), 'admin');
+        journal.write({ event: 'wecom.admin.granted', chatId: id, notified: Boolean(bridge) });
       }
       return result;
     },
@@ -402,6 +459,9 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       const { view: modelView, error: modelsError } = await modelsView(refresh);
       const { view: presetView, error: presetsError } = await presetsView(refresh);
       const notices: string[] = [];
+      if (interactionTransport && !interactionTransport.ready()) {
+        notices.push('企业微信交互通道暂不可用：请在 DSH 页面回答问题与审批，页面操作不受影响。');
+      }
       const defaultGroup = routing?.groups.find(group => group.isDefault);
       if (defaultGroup?.workspaceError) notices.push(`默认分组的 Workspace 不可用：${defaultGroup.workspaceError}`);
       if (settings.adminUserIds.length && !settings.adminWorkspaces.length) {

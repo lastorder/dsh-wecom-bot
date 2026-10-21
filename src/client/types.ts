@@ -64,6 +64,13 @@ export interface SlotRegistry {
   inject(name: string, register: () => () => void): () => void;
 }
 
+/** The only face used from the installed uiWorkspace Client navigation service. */
+export interface SessionNavigation {
+  openSession(sessionId: string): void;
+}
+
+export type OpenSession = (sessionId: string) => void | Promise<void>;
+
 export interface ClientContext {
   get(name: string): unknown;
   effect(setup: () => () => void, label?: string): unknown;

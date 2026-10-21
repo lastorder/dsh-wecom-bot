@@ -113,6 +113,12 @@ export function createJournal(options: JournalOptions): Journal {
   let dropped = 0;
   let closed = false;
   let directoryReady = false;
+  /**
+   * The day and retention a prune last ran with. Both parts matter: a retention
+   * edit on ⑤连接与日志 must be honored by the next write, not by tomorrow's first
+   * write or a plugin restart, so it becomes a new prune key instead of being
+   * hidden behind "today was already pruned".
+   */
   let prunedFor = '';
   let lastErrorAt = 0;
 
@@ -124,9 +130,10 @@ export function createJournal(options: JournalOptions): Journal {
   }
 
   async function prune(today: string): Promise<void> {
-    if (prunedFor === today) return;
-    prunedFor = today;
     const keepDays = Math.max(1, options.retentionDays());
+    const key = `${today}:${keepDays}`;
+    if (prunedFor === key) return;
+    prunedFor = key;
     const cutoff = new Date(`${today}T00:00:00`);
     cutoff.setDate(cutoff.getDate() - keepDays + 1);
     const oldest = localDate(cutoff);

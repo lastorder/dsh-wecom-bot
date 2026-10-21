@@ -12,15 +12,21 @@ import { limitBytes, MAX_NOTICE_BYTES } from './format.js';
  */
 
 export type NoticeKind =
-  | 'turn-complete' | 'question' | 'review' | 'approval' | 'approval-request' | 'prompt-failed'
+  | 'turn-complete' | 'session-error' | 'question' | 'review' | 'approval' | 'approval-request' | 'prompt-failed'
   /** Sent by the page when an operator authorizes a sender. */
-  | 'authorized';
+  | 'authorized'
+  /** Sent by the page when an operator moves a sender to another group. */
+  | 'group-assigned'
+  /** Sent by the page when an operator adds somebody to the administrator list. */
+  | 'admin';
 
 export interface Notice {
   readonly chat: string;
   readonly text: string;
   readonly kind: NoticeKind;
   readonly sessionId?: string;
+  /** An actionable notice may not outlive this exact pending interaction. */
+  readonly interactionNonce?: string;
   readonly roundIds?: readonly string[];
 }
 
@@ -49,6 +55,8 @@ export function createOutbox(options: {
   readonly log: Logger;
   readonly status: StatusTracker;
   readonly maxQueue?: number;
+  /** Re-check live authorization immediately before each queued send. */
+  readonly allow?: (notice: Notice) => Promise<boolean>;
 }): Outbox {
   const { client, journal, log, status } = options;
   const maxQueue = options.maxQueue ?? 100;
@@ -71,6 +79,13 @@ export function createOutbox(options: {
           ...(notice.roundIds?.length ? { roundIds: notice.roundIds } : {}),
         };
         try {
+          if (options.allow && !await options.allow(notice)) {
+            journal.write({ event: 'wecom.send.dropped', ...meta, reason: 'authorization-changed' });
+            continue;
+          }
+          if (closed) return;
+          // Authentication may have dropped while the permission lookup ran.
+          if (!online) { queue.unshift(notice); return; }
           const ack = await client.sendMessage(notice.chat, body);
           status.count('notifications');
           journal.write({ event: 'wecom.send', ...meta, request: { chatid: notice.chat, body }, response: ackSummary(ack), durationMs: Date.now() - started });

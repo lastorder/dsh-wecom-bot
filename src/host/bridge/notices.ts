@@ -92,7 +92,7 @@ export const HELP_TEXT = [
   `- **/delete** — 归档当前会话，清空它的记忆：${code('/delete')} 后再发 ${code('/delete confirm')}（群聊里需要管理员）`,
   '- **/cancel** — 停止你的会话正在运行的回合',
   `- **/answer** — 回答 DSH 的提问：${code('/answer 验证码 选项序号或文字')}`,
-  `- **/approve** — 允许本次工具调用：${code('/approve 验证码')}（需开启远程审批）`,
+  `- **/approve** — 允许本次工具调用：${code('/approve 验证码')}（管理员单聊，与 DSH 页面同时可用）`,
   `- **/deny** — 拒绝本次工具调用：${code('/deny 验证码')}`,
   '- **/help** — 显示这份说明',
   '',
@@ -159,6 +159,30 @@ export function unauthorizedText(): string {
   ].join('\n');
 }
 
+/** An administrator's role never silently creates a group membership. */
+export function adminUnassignedText(): string {
+  return [
+    title('ℹ️', '尚未加入分组或选择会话'),
+    '> 管理员权限不会自动把你加入默认分组。',
+    `请先发送 ${code('/new')} 新建会话，或发送 ${code('/sessions')} 查看并选择会话；也可以在插件主页把自己加入指定分组。`,
+  ].join('\n');
+}
+
+export function questionAccessRefusalText(): string {
+  return [
+    title('🔒', '该提问不属于你当前可操作的会话'),
+    '> 分组或会话可能已经变更，请在 DSH 页面处理原会话的提问。',
+  ].join('\n');
+}
+
+/** A concurrent membership edit must not submit the message to the old Session. */
+export function routingChangedText(): string {
+  return [
+    title('↩️', '分组或会话已变更'),
+    '> 本条消息未提交，请重新发送；后续消息会按最新分组与会话设置处理。',
+  ].join('\n');
+}
+
 /** Sent once, when the page authorizes a principal into its first group. */
 export function authorizedNotice(groupName: string): string {
   return [
@@ -166,6 +190,36 @@ export function authorizedNotice(groupName: string): string {
     '',
     `你已经被加入「${inline(groupName, 60)}」，直接发消息即可。`,
     `> 回复 ${code('/help')} 可以获取更多信息。`,
+  ].join('\n');
+}
+
+/** Sent when an operator moves an existing principal to another group. */
+export function groupAssignedNotice(groupName: string): string {
+  return [
+    title('🔀', '你已被调整到新的分组'),
+    '',
+    `你现在属于「${inline(groupName, 60)}」。`,
+    '> 之前分组的会话绑定已解除；若你曾在目标分组拥有仍可用的历史会话，将恢复那个会话，否则下一条消息按目标分组的 Workspace、模型与预设新建会话。',
+    '- **历史记录**：各分组的旧会话分别保留，不会迁移到其它分组。',
+  ].join('\n');
+}
+
+/**
+ * Sent once, when an operator adds a user to the administrator list.
+ *
+ * The notice names what changed and the boundary that surprises people most:
+ * administrator commands still have to come from a private chat.
+ */
+export function adminGrantedNotice(): string {
+  return [
+    title('🔑', '你已被设为管理员'),
+    '',
+    '> 管理员命令现在可以使用；工具调用审批通知也会发到你的单聊。',
+    '管理员权限不会自动把你加入任何分组；未选择会话时，请先新建或选择一个会话。',
+    '',
+    `- ${field('命令', `${code('/new')} 新建会话，${code('/sessions')} 列出会话，${code('/workspaces')} 选择默认 Workspace`)}`,
+    '- **注意**：管理员命令只能在单聊里发送。',
+    `> 回复 ${code('/help')} 查看完整说明。`,
   ].join('\n');
 }
 
@@ -296,6 +350,7 @@ export function turnCompleteNotice(summary: TurnSummary, info: { readonly title:
     summary.durationMs !== undefined ? `用时 ${formatDuration(summary.durationMs)}` : '',
     summary.steps ? `${summary.steps} 步` : '',
   ].filter(Boolean).join(' · ');
+  if (summary.reason === 'error') return sessionErrorNotice(summary.sessionId, info.title, info.workspace, summary.failure);
   const header = summary.reason === 'completed'
     ? `${title('✅', 'DSH 本轮完成')} · ${sessionLabel(info.title)}`
     : `${title('⚠️', `DSH 本轮结束（${inline(summary.reason, 40)}）`)} · ${sessionLabel(info.title)}`;
@@ -310,6 +365,25 @@ export function turnCompleteNotice(summary: TurnSummary, info: { readonly title:
     '',
     quotePointer(summary.sessionId),
   ].join('\n');
+}
+
+export function sessionErrorNotice(sessionId: string, sessionTitle: string | null, workspace?: string, failure?: { readonly code?: string; readonly status?: number }): string {
+  return [
+    `${title('❌', 'DSH 会话因错误终止')} · ${sessionLabel(sessionTitle)}`,
+    '> 本轮已停止，请到 DSH 页面查看错误详情；原始错误内容不会外发。',
+    ...(workspace ? [`- ${field('Workspace', inline(workspace, 120))}`] : []),
+    ...(failure?.code ? [`- ${field('错误代码', inline(failure.code, 64))}`] : []),
+    ...(failure?.status ? [`- ${field('HTTP 状态', String(failure.status))}`] : []),
+    '', quotePointer(sessionId),
+  ].join('\n');
+}
+
+export function interactionIgnoredText(): string {
+  return [title('ℹ️', '该请求已处理或已结束'), '> 本次操作已忽略，不会覆盖先前的回答或审批；如需新操作，请查看最新请求。'].join('\n');
+}
+
+export function interactionSubmittedText(kind: 'question' | 'approval'): string {
+  return [title('📨', kind === 'question' ? '答案已提交' : '审批结果已提交'), '> DSH 页面与企业微信同时可操作，以先处理的结果为准；提交回执不代表本入口一定先完成。'].join('\n');
 }
 
 export function questionNotice(sessionId: string, sessionTitle: string | null, questions: readonly Question[], nonce: string, timeoutMs: number): string {
@@ -328,7 +402,7 @@ export function questionNotice(sessionId: string, sessionTitle: string | null, q
     '',
     blocks.join('\n\n'),
     '',
-    `> ${usage}；${Math.round(timeoutMs / 1000)} 秒内未回答则回到 DSH 页面处理。`,
+    `> ${usage}；DSH 页面也可同时回答，以先处理的结果为准。本验证码最长有效 ${Math.round(timeoutMs / 1000)} 秒，请求结束会提前失效。`,
     quotePointer(sessionId),
   ].join('\n');
 }
@@ -351,7 +425,7 @@ export function approvalNotice(sessionId: string, sessionTitle: string | null, r
   ];
   lines.push('');
   lines.push(nonce
-    ? `回复 /approve ${nonce} 允许本次调用，或 /deny ${nonce} 拒绝；${Math.round((timeoutMs ?? 0) / 1000)} 秒后回到 DSH 页面。`
+    ? `回复 /approve ${nonce} 允许本次调用，或 /deny ${nonce} 拒绝；DSH 页面同时可审批，以先处理的结果为准。验证码最长有效 ${Math.round((timeoutMs ?? 0) / 1000)} 秒，请求结束会提前失效。`
     : '请到 DSH 页面审批。');
   lines.push('', quotePointer(sessionId));
   return lines.join('\n');

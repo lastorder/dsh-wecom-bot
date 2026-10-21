@@ -27,6 +27,8 @@ export interface SessionCatalog {
   readonly archivedCount: number;
   /** A visible Session, or undefined when hidden or unknown. */
   get(sessionId: string): CatalogEntry | undefined;
+  /** A hidden blank Session with its Workspace, for scope-checked use after creation. */
+  getBlank(sessionId: string): CatalogEntry | undefined;
   /** Why a Session is not visible; undefined when it is visible. */
   hiddenReason(sessionId: string): HiddenSelection['reason'] | undefined;
   /** Stored title of any known Session, visible or not. */
@@ -141,39 +143,50 @@ export function buildCatalog(
   const visible = (summary: SessionSummary) => hiddenReason(summary.sessionId) === undefined;
 
   const groups: CatalogGroup[] = [];
+  // Blank Sessions stay out of the sidebar, but their Workspace must survive
+  // filtering: an administrator's freshly created Session is usable only while
+  // its Workspace remains in scope, just like a visible Session.
+  const blankById = new Map<string, CatalogEntry>();
+  function rememberGroup(group: CatalogGroup, blanks: readonly CatalogSession[]): void {
+    if (group.sessions.length) groups.push(group);
+    for (const blank of blanks) blankById.set(blank.sessionId, { ...blank, group });
+  }
   if (registry) {
     const accounted = new Set<string>();
     for (const workspace of registry.list()) {
       const members: CatalogSession[] = [];
+      const blanks: CatalogSession[] = [];
       for (const id of workspace.sessionIds) {
         const summary = byId.get(id);
         if (!summary || accounted.has(id)) continue;
         accounted.add(id);
         if (visible(summary)) members.push(toSession(summary));
+        else if (hiddenReason(id) === 'blank') blanks.push(toSession(summary));
       }
-      if (!members.length) continue;
-      groups.push({
+      rememberGroup({
         key: String(workspace.id), kind: 'workspace',
         title: workspaceDisplayTitle(workspace.title, workspace.path), path: workspace.path,
         sessions: members.sort(byDisplayOrder),
-      });
+      }, blanks);
     }
     const stray = items.filter(item => !accounted.has(item.sessionId) && visible(item)).map(toSession);
-    if (stray.length) groups.push({ key: 'ungrouped', kind: 'ungrouped', title: UNGROUPED_TITLE, sessions: stray.sort(byDisplayOrder) });
+    const strayBlanks = items.filter(item => !accounted.has(item.sessionId) && hiddenReason(item.sessionId) === 'blank').map(toSession);
+    rememberGroup({ key: 'ungrouped', kind: 'ungrouped', title: UNGROUPED_TITLE, sessions: stray.sort(byDisplayOrder) }, strayBlanks);
   } else {
     const directories = new Map<string, CatalogSession[]>();
     for (const item of items) {
-      if (!visible(item)) continue;
+      if (!visible(item) && hiddenReason(item.sessionId) !== 'blank') continue;
       const cwd = item.cwd ?? '';
       const list = directories.get(cwd) ?? [];
       list.push(toSession(item));
       directories.set(cwd, list);
     }
     for (const [cwd, sessions] of directories) {
-      sessions.sort(byDisplayOrder);
-      groups.push(cwd
-        ? { key: `dir:${cwd}`, kind: 'directory', title: basename(cwd) || cwd, path: cwd, sessions }
-        : { key: 'ungrouped', kind: 'ungrouped', title: UNGROUPED_TITLE, sessions });
+      const members = sessions.filter(session => hiddenReason(session.sessionId) !== 'blank').sort(byDisplayOrder);
+      const blanks = sessions.filter(session => hiddenReason(session.sessionId) === 'blank');
+      rememberGroup(cwd
+        ? { key: `dir:${cwd}`, kind: 'directory', title: basename(cwd) || cwd, path: cwd, sessions: members }
+        : { key: 'ungrouped', kind: 'ungrouped', title: UNGROUPED_TITLE, sessions: members }, blanks);
     }
     groups.sort((a, b) => (a.kind === 'ungrouped' ? 1 : 0) - (b.kind === 'ungrouped' ? 1 : 0)
       || (b.sessions[0]?.updatedAt ?? 0) - (a.sessions[0]?.updatedAt ?? 0));
@@ -187,6 +200,7 @@ export function buildCatalog(
     entries,
     archivedCount: items.filter(item => archived.has(item.sessionId)).length,
     get: id => entryById.get(id),
+    getBlank: id => blankById.get(id),
     hiddenReason,
     titleOf: id => sessionTitle(byId.get(id)),
   };

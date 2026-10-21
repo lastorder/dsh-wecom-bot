@@ -17,9 +17,8 @@ import type { WorkspaceService } from './workspaces.js';
 /**
  * The groups table the settings page renders, and the edits it applies.
  *
- * The Host is the only writer of membership while the Bot runs (it records an
- * implicit membership for an administrator who was never added), and the page
- * is the only way to authorize anyone else — assigning a rejected sender to a
+ * Membership is always explicit, including for administrators. The page
+ * authorizes a principal by assigning a rejected sender to a
  * group *is* the authorization. Every change is validated here: a group must
  * exist, a Workspace must resolve, and a model and an agent preset must exist
  * in the DSH catalogs.
@@ -58,6 +57,8 @@ async function memberView(deps: RoutingViewDeps, binding: BindingRecord): Promis
     sessionContext = described.context;
   }
   const seen = deps.observations?.stats(binding.kind, binding.id);
+  const group = deps.store.group(binding.groupId);
+  const sessionSelection = binding.sessionSelection ?? (group ? deps.provisioner.desired(group) : undefined);
   return {
     key,
     kind: binding.kind,
@@ -70,6 +71,7 @@ async function memberView(deps: RoutingViewDeps, binding: BindingRecord): Promis
     sessionState,
     sessionRunning,
     ...(sessionModel ? { sessionModel } : {}),
+    ...(binding.sessionId && sessionSelection ? { sessionSelection } : {}),
     ...(sessionPreset ? { sessionPreset } : {}),
     ...(sessionContext ? { sessionContext } : {}),
     messages: seen?.messages ?? 0,
@@ -155,6 +157,15 @@ export interface StoreOpResult {
   readonly createdGroupId?: string;
   /** Principals `member.add` authorized, so the Bot can greet them. */
   readonly authorized?: readonly { readonly kind: BindingKind; readonly id: string; readonly groupId: string }[];
+  /** Principals moved to another group, so the Bot can tell them where they are now. */
+  readonly assigned?: readonly {
+    readonly kind: BindingKind;
+    readonly id: string;
+    readonly groupId: string;
+    readonly previousGroupId: string;
+  }[];
+  /** Administrators `settings.set` added, so the Bot can tell them what they may do. */
+  readonly promotedAdmins?: readonly string[];
   /** A `settings.set` op wrote the store's settings block. */
   readonly settingsChanged?: boolean;
 }
@@ -217,16 +228,67 @@ export function validateSettingsPatch(patch: StoreSettingsPatch): StoreSettingsP
   return clean as StoreSettingsPatch;
 }
 
-/** Apply settings-page edits; the first failing op aborts the rest. */
+/**
+ * Decide, before a group change is committed, whether that group's remembered
+ * Session may be restored.
+ *
+ * The store restores the candidate as part of the move itself, so an unusable
+ * candidate has to be dropped from the history *first*: validating after the
+ * write leaves it routable while the check awaits, and a failed check would
+ * leave it bound for good. An unreadable Workspace or catalog also refuses the
+ * move instead of silently discarding a Session the operator still owns.
+ */
+async function prepareRestore(
+  deps: RoutingViewDeps, key: string, binding: BindingRecord, groupId: string,
+): Promise<string | undefined> {
+  const memory = binding.sessionsByGroup?.[groupId];
+  if (!memory) return undefined;
+  const group = deps.store.group(groupId);
+  if (!group) return `分组不存在：${groupId}`;
+  deps.catalogs.invalidate?.();
+  let workspacePath: string;
+  try {
+    workspacePath = (await deps.workspaces.describe(group.workspace)).path;
+  } catch (error) {
+    return `无法读取分组「${group.name}」的 Workspace：${error instanceof Error ? error.message : String(error)}`;
+  }
+  if (deps.store.get(key) !== binding || deps.store.group(groupId) !== group) return '成员信息已变化，请刷新后重试。';
+  let state: BindingSessionState | undefined;
+  let sessionPath: string | undefined;
+  try {
+    const described = await deps.provisioner.describe(memory.sessionId);
+    state = described.state;
+    sessionPath = described.workspacePath;
+  } catch {
+    return '暂时无法确认旧会话的状态，请稍后重试。';
+  }
+  if (deps.store.get(key) !== binding || deps.store.group(groupId) !== group) return '成员信息已变化，请刷新后重试。';
+  if (['bound', 'blank'].includes(state) && sessionPath === workspacePath) return undefined;
+  // Unusable in this group: forget the candidate before the move so nothing is bound.
+  await deps.store.forgetSession(key, groupId);
+  if (deps.store.get(key)?.groupId !== binding.groupId) return '成员信息已变化，请刷新后重试。';
+  return undefined;
+}
+
+/** Apply settings-page edits; the first failing op stops the rest. */
 export async function applyStoreOps(deps: RoutingViewDeps, ops: readonly StoreOp[]): Promise<StoreOpResult> {
+  await deps.store.load();
+  const initialBindings = new Map(deps.store.bindings().map(binding => [bindingKey(binding.kind, binding.id), binding]));
+  const initialAdmins = new Set(deps.store.settings().adminUserIds);
   let changed = 0;
   let settingsChanged = false;
   let createdGroupId: string | undefined;
-  const authorized: { kind: BindingKind; id: string; groupId: string }[] = [];
+  let failure: string | undefined;
+  /** Newly authorized principals, keyed by binding key (a later move replaces this). */
+  const authorized = new Map<string, { kind: BindingKind; id: string; groupId: string }>();
+  /** Principals whose group changed, keyed the same way so one batch notifies once. */
+  const assigned = new Map<string, { kind: BindingKind; id: string; groupId: string; previousGroupId: string }>();
+  /** Administrators this batch added; a person already on the list is not promoted again. */
+  const promotedAdmins = new Set<string>();
   // A model edit is only worth accepting against the real catalog; read it
   // once when the page has never asked for it on this process yet.
-  const touchesModel = ops.some(op => op.op === 'group.update'
-    && (op.patch.provider !== undefined || op.patch.model !== undefined));
+  const touchesModel = ops.some(op => op.op === 'member.model' || (op.op === 'group.update'
+    && (op.patch.provider !== undefined || op.patch.model !== undefined)));
   if (touchesModel && !deps.models.snapshot()) {
     try {
       await deps.models.load();
@@ -246,151 +308,225 @@ export async function applyStoreOps(deps: RoutingViewDeps, ops: readonly StoreOp
   }
   const modelChanged = new Set<string>();
   for (const op of ops.slice(0, 200)) {
-    switch (op.op) {
-      case 'group.add': {
-        if (deps.store.groups().length >= MAX_GROUPS) {
-          return { ok: false, error: `最多只能有 ${MAX_GROUPS} 个分组。`, changed };
-        }
-        try {
-          const created = await deps.store.createGroup(op.name);
-          createdGroupId = created.id;
-          changed++;
-        } catch (error) {
-          return { ok: false, error: `无法新增分组：${error instanceof Error ? error.message : String(error)}`, changed };
-        }
-        break;
-      }
-      case 'group.update': {
-        const group = deps.store.group(op.id);
-        if (!group) return { ok: false, error: `分组不存在：${op.id}`, changed };
-        const patch = op.patch;
-        if (patch.workspace !== undefined && patch.workspace.trim()) {
+    try {
+      switch (op.op) {
+        case 'group.add': {
+          if (deps.store.groups().length >= MAX_GROUPS) {
+            failure = `最多只能有 ${MAX_GROUPS} 个分组。`;
+            break;
+          }
           try {
-            await deps.workspaces.resolve(patch.workspace);
-          } catch (error) {
-            return { ok: false, error: error instanceof Error ? error.message : String(error), changed };
-          }
-        }
-        const nextProvider = (patch.provider ?? group.provider).trim();
-        const nextModel = (patch.model ?? group.model).trim();
-        if (Boolean(nextProvider) !== Boolean(nextModel)) {
-          return { ok: false, error: '请同时选择服务商与模型，或都留空以跟随 DSH 默认模型。', changed };
-        }
-        if (nextProvider && nextModel && !deps.models.known({ provider: nextProvider, model: nextModel })) {
-          return { ok: false, error: `DSH 当前没有模型 ${nextProvider}/${nextModel}，请重新选择。`, changed };
-        }
-        const nextPreset = (patch.preset ?? group.preset).trim();
-        // Without a preset service there is nothing to validate against.
-        if (nextPreset && deps.presets && !deps.presets.known(nextPreset)) {
-          return { ok: false, error: `DSH 当前没有 preset ${nextPreset}，请重新选择。`, changed };
-        }
-        const updated = await deps.store.updateGroup(op.id, patch);
-        if (!updated) return { ok: false, error: `分组不存在：${op.id}`, changed };
-        changed++;
-        if (patch.provider !== undefined || patch.model !== undefined || patch.reasoningEffort !== undefined) {
-          modelChanged.add(op.id);
-        }
-        // A group's Workspace defines where its Sessions live, so moving the
-        // group must not leave members pointing at Sessions of the old one.
-        if (updated.workspace !== group.workspace) {
-          for (const member of deps.store.inGroup(op.id)) {
-            if (!member.sessionId) continue;
-            await deps.store.update(bindingKey(member.kind, member.id), { sessionId: '' });
+            const created = await deps.store.createGroup(op.name);
+            createdGroupId = created.id;
             changed++;
+          } catch (error) {
+            failure = `无法新增分组：${error instanceof Error ? error.message : String(error)}`;
           }
+          break;
         }
-        break;
-      }
-      case 'group.delete': {
-        if (op.id === DEFAULT_GROUP_ID) return { ok: false, error: '默认分组不能删除。', changed };
-        const result = await deps.store.removeGroup(op.id);
-        if (!result.ok) return { ok: false, error: `分组不存在：${op.id}`, changed };
-        changed += 1 + result.removed;
-        break;
-      }
-      case 'member.add': {
-        const id = typeof op.id === 'string' ? op.id.trim() : '';
-        if ((op.kind !== 'user' && op.kind !== 'group') || !validBindingId(id)) {
-          return { ok: false, error: '需要有效的企微 userid（个人）或 chatid（群聊）。', changed };
-        }
-        if (!deps.store.group(op.groupId)) return { ok: false, error: `分组不存在：${op.groupId}`, changed };
-        try {
-          await deps.store.create(op.kind, id, { groupId: op.groupId, ...(op.label === undefined ? {} : { label: op.label }) });
-          authorized.push({ kind: op.kind, id, groupId: op.groupId });
+        case 'group.update': {
+          const group = deps.store.group(op.id);
+          if (!group) { failure = `分组不存在：${op.id}`; break; }
+          const patch = op.patch;
+          const fields = new Set(['name', 'workspace', 'provider', 'model', 'reasoningEffort', 'preset']);
+          if (Object.entries(patch).some(([key, value]) => !fields.has(key) || typeof value !== 'string')) {
+            failure = '分组设置只能包含名称、Workspace、模型、effort 与 preset，且必须是文本。';
+            break;
+          }
+          if (patch.workspace !== undefined && patch.workspace.trim()) {
+            try {
+              await deps.workspaces.resolve(patch.workspace);
+            } catch (error) {
+              failure = error instanceof Error ? error.message : String(error);
+              break;
+            }
+          }
+          const nextProvider = (patch.provider ?? group.provider).trim();
+          const nextModel = (patch.model ?? group.model).trim();
+          if (Boolean(nextProvider) !== Boolean(nextModel)) {
+            failure = '请同时选择服务商与模型，或都留空以跟随 DSH 默认模型。';
+            break;
+          }
+          if (nextProvider && nextModel && !deps.models.known({ provider: nextProvider, model: nextModel })) {
+            failure = `DSH 当前没有模型 ${nextProvider}/${nextModel}，请重新选择。`;
+            break;
+          }
+          const nextPreset = (patch.preset ?? group.preset).trim();
+          // Without a preset service there is nothing to validate against.
+          if (nextPreset && deps.presets && !deps.presets.known(nextPreset)) {
+            failure = `DSH 当前没有 preset ${nextPreset}，请重新选择。`;
+            break;
+          }
+          const updated = await deps.store.updateGroup(op.id, patch);
+          if (!updated) { failure = `分组不存在：${op.id}`; break; }
           changed++;
-        } catch (error) {
-          return { ok: false, error: `无法加入分组：${error instanceof Error ? error.message : String(error)}`, changed };
+          if (patch.provider !== undefined || patch.model !== undefined || patch.reasoningEffort !== undefined) {
+            modelChanged.add(op.id);
+          }
+          // A group's Workspace defines where its Sessions live, so moving the
+          // group must not leave members pointing at Sessions of the old one.
+          if (updated.workspace !== group.workspace) {
+            for (const member of deps.store.inGroup(op.id)) {
+              // Replace even an empty row: provisioning may currently be creating
+              // its first Session in the old Workspace and must fail its CAS.
+              await deps.store.update(bindingKey(member.kind, member.id), { sessionId: '' });
+              changed++;
+            }
+          }
+          break;
         }
-        break;
-      }
-      case 'member.update': {
-        const parsed = parseBindingKey(op.key);
-        if (!parsed) return { ok: false, error: `无法识别的成员 id：${op.key}`, changed };
-        const key = bindingKey(parsed.kind, parsed.id);
-        if (!deps.store.get(key)) return { ok: false, error: `成员不存在：${op.key}`, changed };
-        if (op.patch.groupId !== undefined && !deps.store.group(op.patch.groupId)) {
-          return { ok: false, error: `分组不存在：${op.patch.groupId}`, changed };
+        case 'group.delete': {
+          if (op.id === DEFAULT_GROUP_ID) { failure = '默认分组不能删除。'; break; }
+          const result = await deps.store.removeGroup(op.id);
+          if (!result.ok) { failure = `分组不存在：${op.id}`; break; }
+          changed += 1 + result.removed;
+          break;
         }
-        const updated = await deps.store.update(key, op.patch);
-        if (!updated) return { ok: false, error: `成员不存在：${op.key}`, changed };
-        changed++;
-        break;
-      }
-      case 'label.set': {
-        const parsed = parseBindingKey(op.key);
-        if (!parsed) return { ok: false, error: `无法识别的人员 id：${op.key}`, changed };
-        const key = bindingKey(parsed.kind, parsed.id);
-        if (typeof op.label !== 'string') return { ok: false, error: '备注必须是文本。', changed };
-        if (op.label.trim() && !normalizeLabel(op.label)) {
-          return { ok: false, error: '备注只能是单行文本。', changed };
+        case 'member.add': {
+          const id = typeof op.id === 'string' ? op.id.trim() : '';
+          if ((op.kind !== 'user' && op.kind !== 'group') || !validBindingId(id)) {
+            failure = '需要有效的企微 userid（个人）或 chatid（群聊）。';
+            break;
+          }
+          if (!deps.store.group(op.groupId)) { failure = `分组不存在：${op.groupId}`; break; }
+          try {
+            const previous = deps.store.get(bindingKey(op.kind, id));
+            if (previous && previous.groupId !== op.groupId) {
+              const restoreError = await prepareRestore(deps, bindingKey(op.kind, id), previous, op.groupId);
+              if (restoreError) { failure = restoreError; break; }
+            }
+            await deps.store.create(op.kind, id, {
+              groupId: op.groupId, ...(op.label === undefined ? {} : { label: op.label }),
+            });
+            changed++;
+          } catch (error) {
+            failure = `无法加入分组：${error instanceof Error ? error.message : String(error)}`;
+          }
+          break;
         }
-        await deps.store.setLabel(key, op.label);
-        changed++;
-        break;
-      }
-      case 'member.archive': {
-        const parsed = parseBindingKey(op.key);
-        if (!parsed) return { ok: false, error: `无法识别的成员 id：${op.key}`, changed };
-        const key = bindingKey(parsed.kind, parsed.id);
-        const binding = deps.store.get(key);
-        if (!binding) return { ok: false, error: `成员不存在：${op.key}`, changed };
-        if (!binding.sessionId) return { ok: false, error: '这个成员还没有会话可以归档。', changed };
-        if (!deps.ops) return { ok: false, error: '当前 DSH 不支持归档会话。', changed };
-        try {
-          await deps.ops.archive(binding.sessionId);
-        } catch (error) {
-          return { ok: false, error: error instanceof Error ? error.message : String(error), changed };
+        case 'member.update': {
+          const parsed = parseBindingKey(op.key);
+          if (!parsed) { failure = `无法识别的成员 id：${op.key}`; break; }
+          const key = bindingKey(parsed.kind, parsed.id);
+          const existing = deps.store.get(key);
+          if (!existing) { failure = `成员不存在：${op.key}`; break; }
+          if (Object.entries(op.patch).some(([key, value]) => !['groupId', 'sessionId'].includes(key) || typeof value !== 'string')) {
+            failure = '成员设置只能包含文本形式的分组或会话 ID。';
+            break;
+          }
+          if (op.patch.groupId !== undefined && !deps.store.group(op.patch.groupId)) {
+            failure = `分组不存在：${op.patch.groupId}`;
+            break;
+          }
+          if (op.patch.groupId !== undefined && op.patch.groupId !== existing.groupId) {
+            const restoreError = await prepareRestore(deps, key, existing, op.patch.groupId);
+            if (restoreError) { failure = restoreError; break; }
+          }
+          const updated = await deps.store.update(key, op.patch);
+          if (!updated) { failure = `成员不存在：${op.key}`; break; }
+          changed++;
+          break;
         }
-        // Clearing the binding is what makes the next message create a fresh
-        // Session from the group's current Workspace/model/preset.
-        await deps.store.update(key, { sessionId: '' });
-        changed++;
-        break;
-      }
-      case 'member.remove': {
-        const parsed = parseBindingKey(op.key);
-        if (!parsed) return { ok: false, error: `无法识别的成员 id：${op.key}`, changed };
-        const removed = await deps.store.remove(bindingKey(parsed.kind, parsed.id));
-        if (!removed) return { ok: false, error: `成员不存在：${op.key}`, changed };
-        changed++;
-        break;
-      }
-      case 'settings.set': {
-        if (!op.patch || typeof op.patch !== 'object') return { ok: false, error: '设置内容不正确。', changed };
-        const validated = validateSettingsPatch(op.patch);
-        if (typeof validated === 'string') return { ok: false, error: validated, changed };
-        try {
-          await deps.store.setSettings(validated);
-        } catch (error) {
-          return { ok: false, error: `无法保存设置：${error instanceof Error ? error.message : String(error)}`, changed };
+        case 'member.model': {
+          const parsed = parseBindingKey(op.key);
+          if (!parsed) { failure = `无法识别的成员 id：${op.key}`; break; }
+          const key = bindingKey(parsed.kind, parsed.id);
+          const binding = deps.store.get(key);
+          if (!binding || !binding.sessionId || binding.sessionId !== op.sessionId) {
+            failure = '成员的绑定会话已变化，请刷新后重试。'; break;
+          }
+          const raw = op.selection;
+          if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+            || Object.entries(raw).some(([key, value]) => !['provider', 'model', 'reasoningEffort'].includes(key) || typeof value !== 'string')
+            || !raw.provider?.trim() || !raw.model?.trim()) {
+            failure = '请选择有效的服务商、模型与 effort。'; break;
+          }
+          const selection: ModelSelection = {
+            provider: raw.provider.trim(), model: raw.model.trim(),
+            ...(raw.reasoningEffort?.trim() ? { reasoningEffort: raw.reasoningEffort.trim() } : {}),
+          };
+          const catalog = deps.models.snapshot();
+          const choice = catalog?.choices.find(item => item.provider === selection.provider && item.model === selection.model);
+          if (!choice || !deps.models.known(selection)) { failure = 'DSH 当前没有这个模型，请重新选择。'; break; }
+          if (selection.reasoningEffort && !choice.efforts?.some(item => item.id === selection.reasoningEffort)) {
+            failure = '这个模型不支持所选的 effort，请重新选择。'; break;
+          }
+          const described = await deps.provisioner.describe(binding.sessionId);
+          if (!['bound', 'blank'].includes(described.state)) { failure = '绑定的会话已不可用，请先发送消息创建新会话。'; break; }
+          if (deps.store.get(key) !== binding) { failure = '成员的绑定会话已变化，请刷新后重试。'; break; }
+          const selected = await deps.provisioner.applyModel(binding.sessionId, selection);
+          const updated = await deps.store.update(key, { sessionSelection: selected }, binding);
+          if (!updated) { failure = '成员的绑定会话已变化，模型未保存到新绑定，请刷新后重试。'; break; }
+          deps.catalogs.invalidate?.();
+          changed++;
+          break;
         }
-        settingsChanged = true;
-        changed++;
-        break;
+        case 'label.set': {
+          const parsed = parseBindingKey(op.key);
+          if (!parsed) { failure = `无法识别的人员 id：${op.key}`; break; }
+          const key = bindingKey(parsed.kind, parsed.id);
+          if (typeof op.label !== 'string') { failure = '备注必须是文本。'; break; }
+          if (op.label.trim() && !normalizeLabel(op.label)) {
+            failure = '备注只能是单行文本。';
+            break;
+          }
+          await deps.store.setLabel(key, op.label);
+          changed++;
+          break;
+        }
+        case 'member.archive': {
+          const parsed = parseBindingKey(op.key);
+          if (!parsed) { failure = `无法识别的成员 id：${op.key}`; break; }
+          const key = bindingKey(parsed.kind, parsed.id);
+          const binding = deps.store.get(key);
+          if (!binding) { failure = `成员不存在：${op.key}`; break; }
+          if (!binding.sessionId) { failure = '这个成员还没有会话可以归档。'; break; }
+          if (!deps.ops) { failure = '当前 DSH 不支持归档会话。'; break; }
+          try {
+            await deps.ops.archive(binding.sessionId);
+          } catch (error) {
+            failure = error instanceof Error ? error.message : String(error);
+            break;
+          }
+          // Clearing the binding is what makes the next message create a fresh
+          // Session from the group's current Workspace/model/preset.
+          await deps.store.update(key, { sessionId: '' });
+          changed++;
+          break;
+        }
+        case 'member.remove': {
+          const parsed = parseBindingKey(op.key);
+          if (!parsed) { failure = `无法识别的成员 id：${op.key}`; break; }
+          const removed = await deps.store.remove(bindingKey(parsed.kind, parsed.id));
+          if (!removed) { failure = `成员不存在：${op.key}`; break; }
+          changed++;
+          break;
+        }
+        case 'settings.set': {
+          if (!op.patch || typeof op.patch !== 'object') { failure = '设置内容不正确。'; break; }
+          const validated = validateSettingsPatch(op.patch);
+          if (typeof validated === 'string') { failure = validated; break; }
+          try {
+            await deps.store.setSettings(validated);
+          } catch (error) {
+            failure = `无法保存设置：${error instanceof Error ? error.message : String(error)}`;
+            break;
+          }
+          settingsChanged = true;
+          changed++;
+          break;
+        }
+        default:
+          failure = '未知的修改类型。';
+          break;
       }
-      default:
-        return { ok: false, error: '未知的修改类型。', changed };
+    } catch (error) {
+      failure = `无法应用修改：${error instanceof Error ? error.message : String(error)}`;
     }
+    // Earlier ops stay applied even when this one failed; the result reports
+    // both, so the runtime can adopt the settings and notify the people they
+    // authorized before the failure. Only the rest of the batch is skipped.
+    if (failure) break;
   }
   // A group's model applies to every Session it already owns.
   for (const id of modelChanged) {
@@ -400,10 +536,25 @@ export async function applyStoreOps(deps: RoutingViewDeps, ops: readonly StoreOp
       deps.log?.warn(`WeCom could not apply the group model: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  // Notifications describe the final effective assignment, not transient
+  // states within a batch (including a successful prefix of a failed batch).
+  for (const binding of deps.store.bindings()) {
+    const key = bindingKey(binding.kind, binding.id);
+    const previous = initialBindings.get(key);
+    const entry = { kind: binding.kind, id: binding.id, groupId: binding.groupId };
+    if (!previous) authorized.set(key, entry);
+    else if (previous.groupId !== binding.groupId) assigned.set(key, { ...entry, previousGroupId: previous.groupId });
+  }
+  for (const id of deps.store.settings().adminUserIds) if (!initialAdmins.has(id)) promotedAdmins.add(id);
+  const assignedList = [...assigned.values()];
   return {
-    ok: true, changed,
+    ok: failure === undefined,
+    ...(failure ? { error: failure } : {}),
+    changed,
     ...(settingsChanged ? { settingsChanged } : {}),
     ...(createdGroupId ? { createdGroupId } : {}),
-    ...(authorized.length ? { authorized } : {}),
+    ...(authorized.size ? { authorized: [...authorized.values()] } : {}),
+    ...(assignedList.length ? { assigned: assignedList } : {}),
+    ...(promotedAdmins.size ? { promotedAdmins: [...promotedAdmins] } : {}),
   };
 }

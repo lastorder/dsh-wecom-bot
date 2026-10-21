@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   bindingKey, bindingKeyFor, createStore, normalizeLabel, parseBindingKey, validBindingId,
 } from '../dist/host/store.js';
+import { createSessionProvisioner, SessionBindingChangedError } from '../dist/host/sessions.js';
+import { createRouter } from '../dist/host/routing.js';
 
 const directory = async () => await mkdtemp(join(tmpdir(), 'wecom-store-'));
 const fail = () => assert.fail('no error expected');
@@ -308,6 +310,334 @@ test('a move to an unknown group keeps the current membership', async () => {
   assert.equal((await store.create('user', 'bob', { groupId: 'nope' })).groupId, 'default');
 });
 
+for (const kind of ['user', 'group']) {
+  for (const mutation of ['create', 'update']) {
+    test(`${mutation}: moving a ${kind} detaches its Session, preserves its note and survives reload`, async () => {
+      const dir = await directory();
+      const store = createStore({ directory: dir, now: () => 1000, onError: fail });
+      await store.load();
+      const target = await store.createGroup('新分组');
+      const key = bindingKey(kind, 'principal');
+      const original = await store.create(kind, 'principal', { groupId: 'default', label: '保留备注' });
+      await store.update(key, { sessionId: 'old-session' });
+      const same = mutation === 'create'
+        ? await store.create(kind, 'principal', { groupId: 'default' })
+        : await store.update(key, { groupId: 'default' });
+      assert.equal(same.sessionId, 'old-session', 'a same-group write does not detach');
+      const moved = mutation === 'create'
+        ? await store.create(kind, 'principal', { groupId: target.id })
+        : await store.update(key, { groupId: target.id, sessionId: 'old-session' });
+      assert.equal(moved.groupId, target.id);
+      assert.equal(moved.sessionId, '', 'a move wins over a Session id in the same patch');
+      assert.equal(moved.createdAt, original.createdAt);
+      assert.equal(store.label(key), '保留备注');
+      assert.deepEqual(store.forSession('old-session'), []);
+      await store.flush();
+      const reloaded = createStore({ directory: dir, onError: fail });
+      await reloaded.load();
+      assert.equal(reloaded.get(key).groupId, target.id);
+      assert.equal(reloaded.get(key).sessionId, '');
+      assert.equal(reloaded.label(key), '保留备注');
+    });
+  }
+}
+
+test('same-group and unknown-group patches preserve Sessions unless explicitly replaced', async () => {
+  const store = createStore({ directory: await directory(), onError: fail });
+  await store.load();
+  await store.create('user', 'alice', { groupId: 'default' });
+  await store.update('user:alice', { sessionId: 'session-1' });
+  assert.equal((await store.update('user:alice', { groupId: 'default' })).sessionId, 'session-1');
+  assert.equal((await store.update('user:alice', { groupId: 'missing' })).sessionId, 'session-1');
+  assert.equal((await store.update('user:alice', { groupId: 'default', sessionId: ' session-2 ' })).sessionId, 'session-2');
+  await store.flush();
+});
+
+test('expected binding updates refuse stale snapshots, including same-timestamp ABA and reauthorization', async () => {
+  const store = createStore({ directory: await directory(), now: () => 1000, onError: fail });
+  await store.load();
+  const target = await store.createGroup('其他分组');
+  const original = await store.create('user', 'alice', { groupId: 'default' });
+  await store.update('user:alice', { groupId: target.id });
+  await store.update('user:alice', { groupId: 'default' });
+  assert.deepEqual(store.get('user:alice'), original, 'values and timestamps can return to the original snapshot');
+  assert.equal(await store.update('user:alice', { sessionId: 'stale' }, original), undefined);
+  assert.equal(store.get('user:alice').sessionId, '');
+  const beforeRemoval = store.get('user:alice');
+  await store.remove('user:alice');
+  assert.equal(await store.update('user:alice', { sessionId: 'stale' }, beforeRemoval), undefined);
+  await store.create('user', 'alice', { groupId: 'default' });
+  assert.deepEqual(store.get('user:alice'), beforeRemoval);
+  assert.equal(await store.update('user:alice', { sessionId: 'stale' }, beforeRemoval), undefined);
+  const current = store.get('user:alice');
+  const updated = await store.update('user:alice', { sessionId: 'current' }, current);
+  assert.equal(updated.sessionId, 'current', 'the exact current row admits the write');
+  await store.flush();
+});
+
+// Provisioner/router tests live here because there are no separate sessions or
+// routing test files. Deferred seams exercise real store CAS without timers.
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+function testProvisioner(store, hooks = {}) {
+  return createSessionProvisioner({
+    bindings: store,
+    bindingKey: binding => bindingKey(binding.kind, binding.id),
+    sessionController: {
+      create: hooks.create ?? (async () => ({ sessionId: 'created-session' })),
+      async selectModel() { assert.fail('models.select is the provisioner seam'); },
+    },
+    workspaces: {
+      resolve: hooks.resolve ?? (async path => ({ id: 'workspace-id', path: path || '/workspace' })),
+    },
+    catalogs: {
+      load: hooks.load ?? (async () => ({ hiddenReason: () => undefined })),
+    },
+    models: { select: hooks.select ?? (async (_id, selection) => selection) },
+  });
+}
+
+for (const kind of ['user', 'group']) {
+  for (const edit of ['move', 'remove', 'rebind', 'reauthorize']) {
+    test(`Session creation cannot overwrite a ${kind} binding during ${edit}`, async () => {
+      const store = createStore({ directory: await directory(), now: () => 1000, onError: fail });
+      await store.load();
+      const target = await store.createGroup('新分组');
+      const binding = await store.create(kind, 'principal', { groupId: 'default', label: '备注' });
+      const key = bindingKey(kind, 'principal');
+      const entered = deferred();
+      const complete = deferred();
+      const provisioner = testProvisioner(store, {
+        async create() {
+          entered.resolve();
+          await complete.promise;
+          return { sessionId: 'old-group-session' };
+        },
+      });
+      const pending = provisioner.ensure(binding, store.group('default'));
+      const rejected = assert.rejects(pending, SessionBindingChangedError);
+      await entered.promise;
+      if (edit === 'move') await store.update(key, { groupId: target.id });
+      if (edit === 'remove' || edit === 'reauthorize') await store.remove(key);
+      if (edit === 'reauthorize') await store.create(kind, 'principal', { groupId: 'default' });
+      if (edit === 'rebind') await store.update(key, { sessionId: 'operator-session' });
+      const operatorBinding = store.get(key);
+      complete.resolve();
+      await rejected;
+      assert.equal(store.get(key), operatorBinding, 'the in-flight create does not touch the new membership');
+      assert.notEqual(store.get(key)?.sessionId, 'old-group-session');
+      assert.equal(store.label(key), '备注');
+      await store.flush();
+      const reloaded = createStore({ directory: dirname(store.file), onError: fail });
+      await reloaded.load();
+      assert.deepEqual(reloaded.get(key), operatorBinding, 'the operator edit wins durably');
+    });
+  }
+}
+
+test('binding CAS also guards edits between the provisioner check and the store mutation', async () => {
+  const store = createStore({ directory: await directory(), onError: fail });
+  await store.load();
+  const target = await store.createGroup('新分组');
+  const binding = await store.create('user', 'alice', { groupId: 'default' });
+  const provisioner = createSessionProvisioner({
+    bindings: {
+      get: key => store.get(key),
+      async update(key, patch, expected) {
+        await store.update(key, { groupId: target.id });
+        return await store.update(key, patch, expected);
+      },
+    },
+    bindingKey: binding => bindingKey(binding.kind, binding.id),
+    sessionController: { async create() { return { sessionId: 'stale' }; } },
+    workspaces: { async resolve() { return { id: 'w', path: '/workspace' }; } },
+    catalogs: { async load() { return { hiddenReason: () => undefined }; } },
+    models: { async select(_id, selection) { return selection; } },
+  });
+  await assert.rejects(provisioner.ensure(binding, store.group('default')), SessionBindingChangedError);
+  assert.equal(store.get('user:alice').groupId, target.id);
+  assert.equal(store.get('user:alice').sessionId, '');
+  await store.flush();
+});
+
+test('reusing a Session refuses a binding changed during catalog or model awaits', async () => {
+  for (const stage of ['catalog', 'model']) {
+    const store = createStore({ directory: await directory(), onError: fail });
+    await store.load();
+    const target = await store.createGroup('新分组');
+    await store.updateGroup('default', { provider: 'p', model: 'm' });
+    await store.create('user', 'alice', { groupId: 'default' });
+    const binding = await store.update('user:alice', { sessionId: 'existing-session' });
+    const entered = deferred();
+    const complete = deferred();
+    const provisioner = testProvisioner(store, {
+      async load() {
+        if (stage === 'catalog') { entered.resolve(); await complete.promise; }
+        return { hiddenReason: () => undefined };
+      },
+      async select(_id, selection) {
+        if (stage === 'model') { entered.resolve(); await complete.promise; }
+        return selection;
+      },
+    });
+    const pending = provisioner.ensure(binding, store.group('default'));
+    const rejected = assert.rejects(pending, SessionBindingChangedError);
+    await entered.promise;
+    await store.update('user:alice', { groupId: target.id });
+    complete.resolve();
+    await rejected;
+    assert.equal(store.get('user:alice').sessionId, '');
+    await store.flush();
+  }
+});
+
+test('routing refuses an old-group Session after an operator moves or removes its binding', async () => {
+  for (const edit of ['move', 'remove']) {
+    const store = createStore({ directory: await directory(), onError: fail });
+    await store.load();
+    const target = await store.createGroup('新分组');
+    await store.create('user', 'alice', { groupId: 'default' });
+    const entered = deferred();
+    const complete = deferred();
+    const provisioner = testProvisioner(store, {
+      async create() {
+        entered.resolve();
+        await complete.promise;
+        return { sessionId: 'old-group-session' };
+      },
+    });
+    const router = createRouter({ store, provisioner });
+    const pending = router.route({ chat: 'alice', user: 'alice', chatType: 'single' }, 'default');
+    await entered.promise;
+    if (edit === 'move') await store.update('user:alice', { groupId: target.id });
+    else await store.remove('user:alice');
+    complete.resolve();
+    const result = await pending;
+    assert.equal(result.ok, false);
+    assert.equal(result.sessionId, undefined, 'the current message is not submitted to the abandoned Session');
+    assert.match(result.message, /变更|变化/);
+    assert.equal(result.binding, store.get('user:alice'));
+    await store.flush();
+  }
+});
+
+test('routing never creates or restores a missing membership', async () => {
+  const store = createStore({ directory: await directory(), onError: fail });
+  await store.load();
+  const router = createRouter({
+    store,
+    provisioner: testProvisioner(store, { async create() { assert.fail('an absent member cannot create a Session'); } }),
+  });
+  const parts = { chat: 'alice', user: 'alice', chatType: 'single' };
+  assert.equal((await router.route(parts, 'default')).ok, false);
+  assert.equal(store.get('user:alice'), undefined);
+  await store.create('user', 'alice', { groupId: 'default' });
+  await store.remove('user:alice');
+  const result = await router.route(parts, 'default');
+  assert.equal(result.ok, false);
+  assert.equal(result.sessionId, undefined);
+  assert.equal(store.get('user:alice'), undefined, 'routing does not undo the operator removal');
+  await store.flush();
+});
+
+test('routing re-checks the exact provisioned binding before returning a successful route', async () => {
+  const store = createStore({ directory: await directory(), onError: fail });
+  await store.load();
+  await store.create('user', 'alice', { groupId: 'default' });
+  await store.update('user:alice', { sessionId: 'existing-session' });
+  const provisioner = testProvisioner(store);
+  const router = createRouter({
+    store,
+    provisioner: {
+      ...provisioner,
+      async ensure(binding, group) {
+        const resolved = await provisioner.ensure(binding, group);
+        await store.remove('user:alice');
+        return resolved;
+      },
+    },
+  });
+  const result = await router.route({ chat: 'alice', user: 'alice', chatType: 'single' }, 'default');
+  assert.equal(result.ok, false);
+  assert.equal(result.binding, undefined);
+  assert.equal(result.sessionId, undefined);
+  await store.flush();
+});
+
+for (const kind of ['user', 'group']) {
+  test(`the next ${kind} route after a move uses only the new group's creation defaults`, async () => {
+    const store = createStore({ directory: await directory(), onError: fail });
+    await store.load();
+    const target = await store.createGroup('新分组');
+    await store.updateGroup(target.id, { workspace: '/new-workspace', preset: 'new-preset', provider: 'p', model: 'm' });
+    await store.create(kind, 'principal', { groupId: 'default', label: '备注' });
+    const key = bindingKey(kind, 'principal');
+    await store.update(key, { sessionId: 'old-session' });
+    await store.update(key, { groupId: target.id, sessionId: 'old-session' });
+    const calls = [];
+    const provisioner = testProvisioner(store, {
+      async resolve(path) { calls.push(['workspace', path]); return { id: 'new-workspace', path }; },
+      async create(request) { calls.push(['create', request]); return { sessionId: 'new-session' }; },
+      async select(id, selection) { calls.push(['model', id, selection]); return selection; },
+    });
+    const router = createRouter({ store, provisioner });
+    const parts = kind === 'group'
+      ? { chat: 'principal', user: 'sender', chatType: 'group' }
+      : { chat: 'principal', user: 'principal', chatType: 'single' };
+    const result = await router.route(parts, 'default');
+    assert.equal(result.ok, true);
+    assert.equal(result.created, true);
+    assert.equal(result.sessionId, 'new-session');
+    assert.equal(result.group.id, target.id, 'the current membership wins over the caller fallback group');
+    assert.equal(result.binding, store.get(key), 'the bridge receives the exact current snapshot');
+    assert.deepEqual(calls, [
+      ['workspace', '/new-workspace'],
+      ['create', { workspaceId: 'new-workspace', agentPreset: 'new-preset' }],
+      ['model', 'new-session', { provider: 'p', model: 'm' }],
+    ]);
+    assert.equal(store.label(key), '备注');
+    await store.flush();
+  });
+}
+
+test('creation refuses a binding moved while resolving its Workspace or applying its new Session model', async () => {
+  for (const stage of ['workspace', 'model']) {
+    const store = createStore({ directory: await directory(), onError: fail });
+    await store.load();
+    const target = await store.createGroup('新分组');
+    await store.updateGroup('default', { provider: 'p', model: 'm' });
+    const binding = await store.create('user', 'alice', { groupId: 'default' });
+    const entered = deferred();
+    const complete = deferred();
+    let creates = 0;
+    const provisioner = testProvisioner(store, {
+      async resolve(path) {
+        if (stage === 'workspace') { entered.resolve(); await complete.promise; }
+        return { id: 'w', path };
+      },
+      async create() { creates++; return { sessionId: 'new-session' }; },
+      async select(_id, selection) {
+        if (stage === 'model') { entered.resolve(); await complete.promise; }
+        return selection;
+      },
+    });
+    const pending = provisioner.ensure(binding, store.group('default'));
+    const rejected = assert.rejects(pending, SessionBindingChangedError);
+    await entered.promise;
+    await store.update('user:alice', { groupId: target.id });
+    complete.resolve();
+    await rejected;
+    assert.equal(creates, stage === 'workspace' ? 0 : 1);
+    assert.equal(store.get('user:alice').groupId, target.id);
+    assert.equal(store.get('user:alice').sessionId, '');
+    await store.flush();
+  }
+});
+
 test('a fresh store tolerates a missing directory and creates it privately', async () => {
   const dir = await directory();
   await chmod(dir, 0o700);
@@ -333,7 +663,7 @@ test('a fresh store starts from the documented settings defaults', async () => {
     adminUserIds: [],
     adminWorkspaces: [],
     questionTimeoutMs: 60000,
-    remoteApprovals: false,
+    remoteApprovals: true,
     logEnabled: true,
     logRetentionDays: 14,
   });
@@ -396,7 +726,7 @@ test('hand-edited settings are re-typed and clamped, never trusted', async () =>
   assert.deepEqual(settings.adminUserIds, ['root', 'root2']);
   assert.deepEqual(settings.adminWorkspaces, []);
   assert.equal(settings.questionTimeoutMs, 300000, 'clamped to the documented maximum');
-  assert.equal(settings.remoteApprovals, false, 'only a real true is true');
+  assert.equal(settings.remoteApprovals, true, 'legacy approval flags never disable scoped administrator interactions');
   assert.equal(settings.logEnabled, true, 'only a real false turns the journal off');
   assert.equal(settings.logRetentionDays, 1, 'clamped to the documented minimum');
 });
@@ -417,7 +747,7 @@ test('a file without a settings block keeps its groups and gets the defaults', a
     adminUserIds: [],
     adminWorkspaces: [],
     questionTimeoutMs: 60000,
-    remoteApprovals: false,
+    remoteApprovals: true,
     logEnabled: true,
     logRetentionDays: 14,
   });

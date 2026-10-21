@@ -9,6 +9,8 @@ export interface TurnSummary {
   readonly sessionId: string;
   readonly turn?: number;
   readonly reason: string;
+  /** Safe terminal classification only; provider messages/stacks may contain secrets. */
+  readonly failure?: { readonly code?: string; readonly status?: number };
   readonly startedAt?: number;
   readonly endedAt?: number;
   readonly durationMs?: number;
@@ -88,7 +90,12 @@ export function summarizeTurn(session: SessionHandle, end: SessionEvent): TurnSu
     }
   }
   const endedAt = end.time;
+  const failure = end.data?.reason?.kind === 'error' ? end.data.reason.error : undefined;
+  const detail = failure && typeof failure === 'object' ? failure as Record<string, unknown> : undefined;
+  const failureCode = typeof detail?.code === 'string' && /^[a-z][a-z0-9_.\/-]{0,63}$/i.test(detail.code) ? detail.code : undefined;
+  const failureStatus = typeof detail?.status === 'number' && Number.isInteger(detail.status) && detail.status >= 400 && detail.status <= 599 ? detail.status : undefined;
   return {
+    ...(failureCode || failureStatus ? { failure: { ...(failureCode ? { code: failureCode } : {}), ...(failureStatus ? { status: failureStatus } : {}) } } : {}),
     sessionId: session.id,
     ...(turn === undefined ? {} : { turn }),
     reason: end.data?.reason?.kind ?? 'unknown',

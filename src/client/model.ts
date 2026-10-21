@@ -9,8 +9,7 @@ import type {
   StoreSettings, StoreSettingsPatch,
 } from '../shared/protocol.ts';
 import {
-  DEFAULT_LOG_RETENTION_DAYS, DEFAULT_QUESTION_TIMEOUT_MS, DEFAULT_SECRET_REF,
-  MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS, MIN_QUESTION_TIMEOUT_MS,
+  DEFAULT_LOG_RETENTION_DAYS, DEFAULT_SECRET_REF, MAX_LOG_RETENTION_DAYS, MIN_LOG_RETENTION_DAYS,
 } from '../shared/protocol.ts';
 import type { FormOperation, StoredConfig } from './types.ts';
 
@@ -53,7 +52,7 @@ export function changedOperations(draft: StoredConfig, base: StoredConfig): Form
 }
 
 export type FieldErrors = Partial<Record<
-  'botId' | 'secret' | 'wsUrl' | 'questionTimeoutMs' | 'logRetentionDays',
+  'botId' | 'secret' | 'wsUrl' | 'logRetentionDays',
   string
 >>;
 
@@ -66,7 +65,7 @@ export function validateCredentials(draft: { readonly botId: string; readonly se
 }
 
 /**
- * The 高级设置 card's own validation: a safe endpoint and the two ranges, read
+ * The 连接与日志 card's own validation: a safe endpoint and retention range, read
  * from the store's settings block rather than from the Config.
  *
  * The Host refuses the same values out loud (`validateSettingsPatch`), and these
@@ -74,7 +73,7 @@ export function validateCredentials(draft: { readonly botId: string; readonly se
  * without the two ever drifting apart.
  */
 export function validateAdvanced(
-  draft: Pick<StoreSettings, 'wsUrl' | 'questionTimeoutMs' | 'logRetentionDays'>,
+  draft: Pick<StoreSettings, 'wsUrl' | 'logRetentionDays'>,
 ): FieldErrors {
   const errors: FieldErrors = {};
   const wsUrl = draft.wsUrl.trim();
@@ -86,10 +85,6 @@ export function validateAdvanced(
       errors.wsUrl = '不是有效的 URL。';
     }
   }
-  if (!Number.isFinite(draft.questionTimeoutMs)
-    || draft.questionTimeoutMs < MIN_QUESTION_TIMEOUT_MS || draft.questionTimeoutMs > MAX_QUESTION_TIMEOUT_MS) {
-    errors.questionTimeoutMs = `请输入 ${MIN_QUESTION_TIMEOUT_MS / 1000}–${MAX_QUESTION_TIMEOUT_MS / 1000} 秒。`;
-  }
   if (!Number.isInteger(draft.logRetentionDays)
     || draft.logRetentionDays < MIN_LOG_RETENTION_DAYS || draft.logRetentionDays > MAX_LOG_RETENTION_DAYS) {
     errors.logRetentionDays = `请输入 ${MIN_LOG_RETENTION_DAYS}–${MAX_LOG_RETENTION_DAYS} 的整数天数。`;
@@ -97,13 +92,11 @@ export function validateAdvanced(
   return errors;
 }
 
-/** The store's settings block as the 高级设置 card seeds its draft. */
+/** The store's settings block as the 连接与日志 card seeds its draft. */
 export function advancedSlice(settings: StoreSettings | undefined): Pick<
-  StoreSettings, 'remoteApprovals' | 'questionTimeoutMs' | 'wsUrl' | 'logEnabled' | 'logRetentionDays'
+  StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays'
 > {
   return {
-    remoteApprovals: settings?.remoteApprovals ?? false,
-    questionTimeoutMs: settings?.questionTimeoutMs ?? DEFAULT_QUESTION_TIMEOUT_MS,
     wsUrl: settings?.wsUrl ?? '',
     logEnabled: settings?.logEnabled ?? true,
     logRetentionDays: settings?.logRetentionDays ?? DEFAULT_LOG_RETENTION_DAYS,
@@ -117,12 +110,10 @@ export function advancedSlice(settings: StoreSettings | undefined): Pick<
  * cannot write back a stale copy of something another window just changed.
  */
 export function settingsPatch(
-  draft: Pick<StoreSettings, 'remoteApprovals' | 'questionTimeoutMs' | 'wsUrl' | 'logEnabled' | 'logRetentionDays'>,
-  stored: Pick<StoreSettings, 'remoteApprovals' | 'questionTimeoutMs' | 'wsUrl' | 'logEnabled' | 'logRetentionDays'>,
+  draft: Pick<StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays'>,
+  stored: Pick<StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays'>,
 ): StoreSettingsPatch {
   const patch: { -readonly [K in keyof StoreSettingsPatch]: StoreSettingsPatch[K] } = {};
-  if (draft.remoteApprovals !== stored.remoteApprovals) patch.remoteApprovals = draft.remoteApprovals;
-  if (draft.questionTimeoutMs !== stored.questionTimeoutMs) patch.questionTimeoutMs = draft.questionTimeoutMs;
   if (draft.wsUrl.trim() !== stored.wsUrl.trim()) patch.wsUrl = draft.wsUrl.trim();
   if (draft.logEnabled !== stored.logEnabled) patch.logEnabled = draft.logEnabled;
   if (draft.logRetentionDays !== stored.logRetentionDays) patch.logRetentionDays = draft.logRetentionDays;
@@ -311,7 +302,7 @@ export function relativeTime(at: number | undefined, now = Date.now()): string {
  * Write the store's settings block.
  *
  * One op carries a whole patch, because `settings.set` merges field by field on
- * the Host: the ④管理员 card sends the array it just changed, the ⑤高级设置 card
+ * the Host: the ④管理员 card sends the array it just changed, the ⑤连接与日志 card
  * sends the knobs it just moved, and neither has to read the other's fields back
  * first.
  */
@@ -353,6 +344,11 @@ export function setLabel(key: string, label: string): StoreOp {
 
 export function removeMember(key: string): StoreOp {
   return { op: 'member.remove', key };
+}
+
+/** Change only the member's current Session; a stale Session id is refused by the Host. */
+export function setMemberModel(key: string, sessionId: string, selection: ModelSelection): StoreOp {
+  return { op: 'member.model', key, sessionId, selection };
 }
 
 /** Archive one member's Session; the next message creates a fresh one. */

@@ -149,6 +149,7 @@ export const STYLES = /* css */ `
 .wcb-chevron { flex: none; color: var(--wcb-text-3); transition: transform .15s ease; }
 .wcb-group[data-open] .wcb-chevron { transform: rotate(90deg); }
 .wcb-group-icon { flex: none; color: var(--wcb-text-2); }
+.wcb-group-title-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .wcb-group-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 6px; }
 /* The group overview: labelled facts that wrap instead of hiding behind an ellipsis. */
 .wcb-group-summary {
@@ -156,6 +157,24 @@ export const STYLES = /* css */ `
   gap: 2px 10px; color: var(--wcb-text-3); font-size: 12px; text-align: right;
 }
 .wcb-group-summary .wcb-fact-inline { white-space: nowrap; }
+/* A group owns five facts, so its collapsed header is a five-track grid: the
+   label sits above its value and the same track holds the same fact in every
+   group. Values wrap; nothing is hidden behind an ellipsis. */
+.wcb-group[data-facts] .wcb-group-head { align-items: flex-start; }
+.wcb-group[data-facts] .wcb-group-toggle { flex-direction: column; align-items: stretch; gap: 5px; }
+.wcb-group[data-facts] .wcb-group-actions { padding-top: 5px; }
+.wcb-group-facts {
+  display: grid;
+  grid-template-columns: 64px 128px minmax(150px, 1.6fr) 64px minmax(100px, 1fr);
+  gap: 2px 14px;
+  width: 100%; text-align: left;
+}
+.wcb-group-fact { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.wcb-group-fact-label { color: var(--wcb-text-3); font-size: 10.5px; line-height: 1.2; }
+.wcb-group-fact-value { color: var(--wcb-text-2); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
+@media (max-width: 860px) {
+  .wcb-group-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 .wcb-row {
   display: flex; align-items: center; gap: 12px;
   padding: 9px 12px; border-top: .5px solid var(--wcb-line); cursor: pointer;
@@ -276,17 +295,53 @@ export const STYLES = /* css */ `
   border: .5px solid var(--wcb-line-2);
 }
 
-/* One member, one line: badge, name, the Session's facts, its 归档 action. */
-.wcb-member-row {
-  display: flex; align-items: center; gap: 4px 8px; flex-wrap: wrap;
-  padding: 6px 8px; border-radius: 8px;
-}
+/* Native table semantics keep every member's facts aligned under one header.
+   Narrow surfaces scroll the table rather than wrapping unrelated columns.
+   Every column is centred: the row is a set of short facts, not prose. */
+.wcb-members-scroll { overflow-x: auto; border: .5px solid var(--wcb-line); border-radius: 10px; }
+.wcb-members-scroll:focus-visible { outline: 2px solid var(--wcb-brand); outline-offset: 2px; }
+.wcb-members-table { width: 100%; min-width: 860px; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+.wcb-members-table th, .wcb-members-table td { padding: 9px 10px; text-align: center; vertical-align: middle; white-space: nowrap; }
+.wcb-members-table th { color: var(--wcb-text-3); background: var(--wcb-surface-2); font-weight: 500; font-size: 11.5px; }
+.wcb-members-table td { border-top: .5px solid var(--wcb-line); color: var(--wcb-text-2); }
+/* Fixed widths keep a long model name from squeezing every other column. */
+.wcb-members-table th:nth-child(1) { width: 18%; }
+.wcb-members-table th:nth-child(2) { width: 88px; }
+.wcb-members-table th:nth-child(3) { width: 70px; }
+.wcb-members-table th:nth-child(4) { width: 195px; }
+.wcb-members-table th:nth-child(5) { width: 86px; }
+.wcb-members-table th:nth-child(6) { width: 160px; }
+.wcb-members-table th:nth-child(7) { width: 112px; }
 .wcb-member-row:hover { background: var(--wcb-hover); }
-.wcb-member-name {
-  font-weight: 500; white-space: nowrap; overflow: hidden;
-  text-overflow: ellipsis; max-width: 140px;
+.wcb-member-identity { display: flex; align-items: center; justify-content: center; gap: 8px; min-width: 0; }
+.wcb-member-name { color: var(--wcb-text); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+
+/* One convention for every interactive cell: it looks like a control, not like
+   plain text. The Session identity is a pill, the model/effort are selects. */
+.wcb-cell-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 26px; padding: 0 9px 0 10px;
+  border: .5px solid color-mix(in srgb, var(--wcb-brand) 35%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--wcb-brand) 7%, transparent);
+  color: var(--wcb-brand); font: inherit; font-size: 12px; font-weight: 550;
+  cursor: pointer; transition: background .12s ease, border-color .12s ease;
 }
-.wcb-member-facts { display: flex; align-items: center; gap: 4px 12px; flex-wrap: wrap; min-width: 0; flex: 1; }
+.wcb-cell-pill:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--wcb-brand) 15%, transparent);
+  border-color: color-mix(in srgb, var(--wcb-brand) 55%, transparent);
+}
+.wcb-cell-pill:active:not(:disabled) { background: color-mix(in srgb, var(--wcb-brand) 20%, transparent); }
+.wcb-cell-pill:focus-visible { outline: 2px solid var(--wcb-brand); outline-offset: 2px; }
+.wcb-cell-pill:disabled { cursor: default; opacity: .55; }
+.wcb-cell-pill-chevron { display: inline-flex; color: color-mix(in srgb, var(--wcb-brand) 70%, transparent); }
+.wcb-members-table .wcb-cell-select {
+  display: block; width: 100%; max-width: 220px; margin: 0 auto;
+  min-width: 0; height: 28px; font-size: 12px; text-align: center;
+}
+.wcb-members-table .wcb-context-cell { font-variant-numeric: tabular-nums; }
+.wcb-member-error td { white-space: normal; text-align: center !important; }
+.wcb-member-error .wcb-field-error { margin-top: 0; display: inline-block; max-width: 640px; text-align: left; }
 .wcb-fact-inline {
   display: inline-flex; align-items: center; gap: 5px; min-width: 0;
   color: var(--wcb-text-2); font-size: 12px;

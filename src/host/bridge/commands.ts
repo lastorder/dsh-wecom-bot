@@ -9,10 +9,10 @@ import { formatContext, shortId } from './format.js';
 import type { InboundMessage } from './inbound.js';
 import { parseAnswer, type InteractionRegistry } from './interactions.js';
 import {
-  adminOnlyText, adminPrivateOnlyText, code, compactedText, deleteWarningText, deletedText, field,
+  adminOnlyText, adminPrivateOnlyText, adminUnassignedText, code, compactedText, deleteWarningText, deletedText, field,
   groupSessionRefusalText, HELP_TEXT, inline,
   newSessionText, noWorkspaceText, nothingToCompactText, sessionLabel, sessionListText, sessionRef,
-  title, workspaceListText,
+  interactionIgnoredText, interactionSubmittedText, questionAccessRefusalText, title, workspaceListText,
 } from './notices.js';
 import type { AccessPolicy } from './policy.js';
 import { sessionTitleFor } from '../session-title.js';
@@ -61,6 +61,12 @@ export interface AdminWorkspaceStore {
   setAdminWorkspace(user: string, path: string): Promise<void>;
 }
 
+export interface OperationTicket {
+  readonly bridge: number;
+  readonly chat: string;
+  readonly routing: number;
+}
+
 export interface CommandServices {
   readonly policy: AccessPolicy;
   readonly directory: SessionDirectory;
@@ -77,8 +83,8 @@ export interface CommandServices {
   /** Archive `sessionId` and stop pointing any member at it. */
   archiveSession(message: InboundMessage, sessionId: string): Promise<void>;
   /** True once the bridge stopped or was replaced after `ticket` was taken. */
-  stale(ticket: number): boolean;
-  ticket(): number;
+  stale(ticket: OperationTicket): boolean;
+  ticket(message: InboundMessage): OperationTicket;
 }
 
 export interface CommandScope {
@@ -134,7 +140,7 @@ async function workspaceTitle(services: CommandServices, path: string): Promise<
 export async function runCommand(services: CommandServices, scope: CommandScope, command: ParsedCommand): Promise<void> {
   const { message, reply } = scope;
   const { directory, selection, interactions, policy } = services;
-  const ticket = services.ticket();
+  const ticket = services.ticket(message);
   const current = () => !services.stale(ticket);
   const isAdmin = policy.isAdmin(message.user);
   // An administrator command in a group chat is refused whoever sends it: the
@@ -199,7 +205,8 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
         '',
         target.sessionId
           ? bullet('会话', sessionRef(info?.title, target.sessionId))
-          : bullet('会话', '尚未创建（发送任意消息即会自动创建）'),
+          : bullet('会话', isAdmin && !target.binding
+            ? '尚未选择（请先新建或选择会话）' : '尚未创建（发送任意消息即会自动创建）'),
         ...(info?.workspace ? [bullet('Workspace', inline(info.workspace, 120))] : []),
         ...(target.sessionId ? [bullet('preset', info?.preset ? code(inline(info.preset, 60)) : 'DSH 默认')] : []),
         ...(info?.model ? [bullet('模型', code(`${info.model.provider}/${info.model.model}`))] : []),
@@ -341,7 +348,9 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
       if (!current()) return;
       const target = await services.current(message);
       if (!target.sessionId) {
-        await reply(notice('↩️', '已放弃切换', '你还没有专属会话，发送任意消息即可创建。'));
+        await reply(target.binding
+          ? notice('↩️', '已放弃切换', '你还没有专属会话，发送任意消息即可创建。')
+          : adminUnassignedText());
         return;
       }
       const info = await directory.describe(target.sessionId);
@@ -352,7 +361,9 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
 
     case 'compact': {
       const target = await services.current(message);
-      if (!target.sessionId) { await reply(notice('ℹ️', '你还没有专属会话', '发送任意消息即可创建。')); return; }
+      if (!current()) return;
+      if (!target.sessionId) { await reply(isAdmin && !target.binding ? adminUnassignedText()
+        : notice('ℹ️', '你还没有专属会话', '发送任意消息即可创建。')); return; }
       if (!allowed()) { await deny(); return; }
       try {
         const outcome = await services.ops.compact(target.sessionId);
@@ -366,7 +377,9 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
 
     case 'delete': {
       const target = await services.current(message);
-      if (!target.sessionId) { await reply(notice('ℹ️', '你还没有专属会话', '发送任意消息即可创建。')); return; }
+      if (!current()) return;
+      if (!target.sessionId) { await reply(isAdmin && !target.binding ? adminUnassignedText()
+        : notice('ℹ️', '你还没有专属会话', '发送任意消息即可创建。')); return; }
       if (!allowed()) { await deny(); return; }
       const confirmed = (command.args[0] ?? '').toLowerCase() === 'confirm';
       if (!confirmed) {
@@ -377,6 +390,7 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
       }
       try {
         const info = await directory.describe(target.sessionId);
+        if (!current()) return;
         await services.archiveSession(message, target.sessionId);
         if (!current()) return;
         services.journal.write({
@@ -392,7 +406,9 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
 
     case 'cancel': {
       const target = await services.current(message);
-      if (!target.sessionId) { await reply(notice('ℹ️', '你还没有专属会话', '发送任意消息即可创建。')); return; }
+      if (!current()) return;
+      if (!target.sessionId) { await reply(isAdmin && !target.binding ? adminUnassignedText()
+        : notice('ℹ️', '你还没有专属会话', '发送任意消息即可创建。')); return; }
       if (!(await directory.permitted(target.sessionId))) {
         // A bound Session may live outside the administrator scope; cancelling
         // it is still the owner's business, so only a switched-to Session is refused here.
@@ -413,9 +429,19 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
     case 'answer': {
       const state = command.args[0] ? interactions.findQuestion(command.args[0]) : undefined;
       if (!state) {
-        await reply(notice('⚠️', '没有对应的待回答提问', '验证码可能无效或已经过期。'));
+        await reply(command.args[0] && interactions.wasClosed(command.args[0]) ? interactionIgnoredText()
+          : notice('⚠️', '没有对应的待回答提问', '验证码可能无效或已经过期。'));
         return;
       }
+      const target = await services.current(message);
+      const mayAnswer = target.sessionId === state.sessionId
+        || (isAdmin && message.chatType === 'single' && await directory.permitted(state.sessionId));
+      if (!current()) return;
+      if (!mayAnswer) {
+        await reply(questionAccessRefusalText());
+        return;
+      }
+      if (!state.active()) { await reply(interactionIgnoredText()); return; }
       let question = state.questions.length === 1 ? state.questions[0] : undefined;
       let answer = textAfterTokens(command.rest, 1);
       if (question && command.args[1] === question.id && command.args.length > 2) answer = textAfterTokens(command.rest, 2);
@@ -435,10 +461,13 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
       state.answers.set(question.id, parsed.item);
       const remaining = state.questions.filter(q => !state.answers.has(q.id));
       services.journal.write({ event: 'dsh.question.answer', roundId: scope.round.id, sessionId: state.sessionId, questionId: question.id, answer: parsed.item, remaining: remaining.length });
-      if (!remaining.length) state.finish({ answers: state.questions.map(q => state.answers.get(q.id)!) });
-      await reply(remaining.length
-        ? `${title('📝', '已记录')} · 还需回答：${remaining.map(q => inline(q.id, 60)).join('、')}`
-        : title('✅', '答案已提交给 DSH'));
+      if (remaining.length) {
+        await reply(`${title('📝', '已记录')} · 还需回答：${remaining.map(q => inline(q.id, 60)).join('、')}`);
+      } else {
+        const result = await state.submit({ answers: state.questions.map(q => state.answers.get(q.id)!) });
+        await reply(result === 'closed' ? interactionIgnoredText()
+          : result === 'submitted' ? interactionSubmittedText('question') : title('✅', '答案已提交给 DSH'));
+      }
       return;
     }
 
@@ -449,13 +478,20 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
       // the approval must still be visible to this chat and the sender an
       // administrator.
       if (!state || command.args.length !== 1 || !state.privateChats.has(message.chat) || !isAdmin) {
-        await reply(notice('⚠️', '没有可在此单聊审批的请求', '只有管理员可以在单聊里用验证码审批；验证码也可能已经过期。'));
+        await reply(command.args[0] && interactions.wasClosed(command.args[0]) ? interactionIgnoredText()
+          : notice('⚠️', '没有可在此单聊审批的请求', '只有管理员可以在单聊里用验证码审批；验证码也可能已经过期。'));
         return;
       }
+      const permitted = await directory.permitted(state.sessionId);
+      if (!current()) return;
+      if (!permitted) { await reply(questionAccessRefusalText()); return; }
+      if (!state.active()) { await reply(interactionIgnoredText()); return; }
       const outcome = command.name === 'approve' ? 'allowed-once' : 'rejected';
-      services.journal.write({ event: 'dsh.approval.answer', roundId: scope.round.id, sessionId: state.sessionId, toolName: state.toolName, callId: state.callId, outcome });
-      state.finish(outcome);
-      await reply(title(outcome === 'allowed-once' ? '✅' : '🚫', outcome === 'allowed-once' ? '已允许本次工具调用' : '已拒绝本次工具调用'));
+      const result = await state.submit(outcome);
+      services.journal.write({ event: 'dsh.approval.answer', roundId: scope.round.id, sessionId: state.sessionId, toolName: state.toolName, callId: state.callId, outcome, submission: result });
+      await reply(result === 'closed' ? interactionIgnoredText()
+        : result === 'submitted' ? interactionSubmittedText('approval')
+          : title(outcome === 'allowed-once' ? '✅' : '🚫', outcome === 'allowed-once' ? '已允许本次工具调用' : '已拒绝本次工具调用'));
       return;
     }
 

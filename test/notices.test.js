@@ -2,9 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { byteLength, extractSessionPointer, MAX_NOTICE_BYTES, MAX_REPLY_BYTES } from '../dist/host/bridge/format.js';
 import {
-  adminOnlyText, adminPrivateOnlyText, approvalNotice, authorizedNotice, compactedText, deleteWarningText, deletedText,
-  groupSessionRefusalText, HELP_TEXT, newSessionText, nothingToCompactText, promptFailedNotice, questionNotice,
-  quotePointer, reviewNotice, sessionListText, turnCompleteNotice, unauthorizedText, workspaceListText,
+  adminGrantedNotice, adminOnlyText, adminPrivateOnlyText, adminUnassignedText, approvalNotice, authorizedNotice, compactedText,
+  deleteWarningText, deletedText, groupAssignedNotice, groupSessionRefusalText, HELP_TEXT, newSessionText,
+  nothingToCompactText, promptFailedNotice, questionNotice, quotePointer, reviewNotice, sessionListText,
+  questionAccessRefusalText, routingChangedText, turnCompleteNotice, unauthorizedText, workspaceListText,
 } from '../dist/host/bridge/notices.js';
 
 /**
@@ -38,6 +39,11 @@ test('every template fits the reply budget', () => {
     groupSessionRefusalText('compact'),
     unauthorizedText(),
     authorizedNotice('默认分组'),
+    groupAssignedNotice('朋友'),
+    adminGrantedNotice(),
+    adminUnassignedText(),
+    routingChangedText(),
+    questionAccessRefusalText(),
     deleteWarningText('修复登录 Bug', 'session-9f3a1c7b2d4e'),
     deletedText(),
     nothingToCompactText(),
@@ -82,7 +88,10 @@ test('a hint is the only /use occurrence the quote parser can pick up', () => {
   const listing = sessionListText(groups, undefined);
   assert.deepEqual(listing.listing, ['session-9f3a1c7b2d4e', 'session-77aa88bb99cc']);
   assert.equal(extractSessionPointer(listing.text), undefined);
-  for (const text of [HELP_TEXT, adminOnlyText(), adminPrivateOnlyText(), unauthorizedText(), authorizedNotice('默认分组')]) {
+  for (const text of [
+    HELP_TEXT, adminOnlyText(), adminPrivateOnlyText(), unauthorizedText(), authorizedNotice('默认分组'),
+    groupAssignedNotice('朋友'), adminGrantedNotice(), adminUnassignedText(), routingChangedText(), questionAccessRefusalText(),
+  ]) {
     assert.equal(extractSessionPointer(text), undefined);
   }
   // A group refusal names the command in inline code — `/delete`, never `/use`.
@@ -127,6 +136,23 @@ test('a refused sender is told to ask an operator, and an operator greeting name
   assert.match(authorizedNotice('默认分组'), /管理员已授权，可以开始使用了/);
   assert.match(authorizedNotice('默认分组'), /默认分组/);
   assert.match(authorizedNotice('默认分组'), /`\/help`/);
+});
+
+test('a promotion and a group move each say what changed, without a jump hint', () => {
+  const promoted = adminGrantedNotice();
+  assert.match(promoted, /\*\*🔑 你已被设为管理员\*\*/);
+  assert.match(promoted, /审批/);
+  assert.match(promoted, /只能在单聊里发送/);
+  assert.match(promoted, /`\/sessions`/);
+  assert.equal(extractSessionPointer(promoted), undefined);
+
+  const moved = groupAssignedNotice('朋友');
+  assert.match(moved, /\*\*🔀 你已被调整到新的分组\*\*/);
+  assert.match(moved, /朋友/);
+  assert.match(moved, /之前分组的会话绑定已解除/);
+  assert.match(moved, /恢复那个会话/);
+  assert.match(moved, /否则下一条消息.*新建会话/);
+  assert.equal(extractSessionPointer(moved), undefined);
 });
 
 test('/delete warns what it clears and how to confirm', () => {

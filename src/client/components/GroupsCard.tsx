@@ -1,15 +1,17 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
-  Button, IconPlusOutlineRegular, IconRefreshOutlineRegular, IconTrashOutlineRegular, Input, StateDot, Tag,
+  Button, IconChevronRightOutlineRegular, IconPlusOutlineRegular, IconRefreshOutlineRegular, IconTrashOutlineRegular,
+  Input, StateDot, Tag,
 } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { BridgeStateView, GroupMemberView, GroupView, StoreOp, WorkspaceOption } from '../../shared/protocol.ts';
 import { useStoreApply } from '../hooks.ts';
 import {
-  BINDING_KIND_LABEL, SESSION_STATE_LABEL, addGroup, archiveMember, choiceLabel, contextLabel, deleteGroup,
-  displayPath, dshDefaultLabel, effortLabel, effortsFor, groupModelSummary, modelKey, modelLabel, modelName, parseModelKey,
-  presetLabel, presetName, presetSummaryLabel, relativeTime, removeMember, setLabel, updateGroup, updateMember,
+  SESSION_STATE_LABEL, addGroup, archiveMember, choiceLabel, contextLabel, deleteGroup,
+  displayPath, dshDefaultLabel, effortLabel, effortsFor, groupModelSummary, modelKey, modelName, parseModelKey,
+  presetLabel, presetName, presetSummaryLabel, removeMember, setLabel, setMemberModel, updateGroup, updateMember,
 } from '../model.ts';
-import { Card, Collapse, ConfirmDialog, CountTag, Empty, Fact, PersonAvatar, PersonDialog, Select } from './ui.tsx';
+import { Card, Collapse, ConfirmDialog, CountTag, Empty, PersonAvatar, PersonDialog, Select, SessionDialog } from './ui.tsx';
+import type { OpenSession } from '../types.ts';
 
 /**
  * Step 2: user groups. A group owns a Workspace, a model (with its effort) and
@@ -22,14 +24,19 @@ import { Card, Collapse, ConfirmDialog, CountTag, Empty, Fact, PersonAvatar, Per
  * often than they change it. Adding a member is the 「未授权用户」 card's job;
  * a Session is replaced by archiving it, which the next message turns into a
  * fresh one from the group's defaults.
+ *
+ * Every interactive cell looks like a control: the Session state is a pill that
+ * opens an identity dialog (name, id, and the actual 「在 DSH 中打开」 button),
+ * and model/effort are always-rendered selects so one click opens the list.
  */
-export function GroupsCard({ state, error, disabled, refreshing, onRefresh, onChanged }: {
+export function GroupsCard({ state, error, disabled, refreshing, onRefresh, onChanged, onOpenSession }: {
   state: BridgeStateView | undefined;
   error?: string;
   disabled: boolean;
   refreshing: boolean;
   onRefresh(): void;
   onChanged(): void;
+  onOpenSession?: OpenSession;
 }) {
   const { busy, error: applyError, apply } = useStoreApply(onChanged);
   const [freshId, setFreshId] = useState<string>();
@@ -60,7 +67,7 @@ export function GroupsCard({ state, error, disabled, refreshing, onRefresh, onCh
         <span className="wcb-grow wcb-hint">
           没有分组的用户无法与机器人对话；他们发消息后会出现在「未授权用户」卡片里，加入分组即完成授权。
         </span>
-        <Button variant="ghost" size="sm" icon={<IconRefreshOutlineRegular />} disabled={refreshing} onClick={onRefresh}>
+        <Button variant="outline" size="sm" icon={<IconRefreshOutlineRegular />} disabled={refreshing} onClick={onRefresh}>
           {refreshing ? '刷新中' : '刷新'}
         </Button>
         <Button variant="outline" size="sm" icon={<IconPlusOutlineRegular />} disabled={disabled || busy === 'group:new'} onClick={() => { void add(); }}>
@@ -86,6 +93,8 @@ export function GroupsCard({ state, error, disabled, refreshing, onRefresh, onCh
               startEditing={group.id === freshId}
               disabled={disabled || busy.startsWith(`group:${group.id}`)}
               onApply={apply}
+              onChanged={onChanged}
+              onOpenSession={onOpenSession}
             />
           ))}
         </div>
@@ -130,12 +139,14 @@ function patchOf(group: GroupView, draft: GroupDraft): Parameters<typeof updateG
   return patch;
 }
 
-function GroupPanel({ group, state, startEditing, disabled, onApply }: {
+function GroupPanel({ group, state, startEditing, disabled, onApply, onChanged, onOpenSession }: {
   group: GroupView;
   state: BridgeStateView | undefined;
   startEditing: boolean;
   disabled: boolean;
   onApply(key: string, ops: StoreOp[]): Promise<unknown>;
+  onChanged(): void;
+  onOpenSession?: OpenSession;
 }) {
   const [open, setOpen] = useState(startEditing);
   const [editing, setEditing] = useState(startEditing);
@@ -147,21 +158,21 @@ function GroupPanel({ group, state, startEditing, disabled, onApply }: {
   const key = `group:${group.id}`;
   // The collapsed row is the group's whole overview, so every fact it owns is
   // named there — including the effort and the preset, which are easy to get
-  // wrong (and invisible without opening the form).
+  // wrong (and invisible without opening the form). They are passed as a grid
+  // of labelled facts, not a sentence: the same column in the next group always
+  // holds the same fact.
   const effort = group.reasoningEffort
     ? (effortLabel(catalog, {
       provider: group.effectiveProvider, model: group.effectiveModel, reasoningEffort: group.reasoningEffort,
     }) || group.reasoningEffort)
     : '默认';
-  const summary = (
-    <>
-      <span className="wcb-fact-inline">{group.memberCount} 位成员</span>
-      <span className="wcb-fact-inline"><span className="wcb-fact-key">Workspace</span>{group.workspaceTitle}</span>
-      <span className="wcb-fact-inline"><span className="wcb-fact-key">模型</span>{groupModelSummary(catalog, group)}</span>
-      <span className="wcb-fact-inline"><span className="wcb-fact-key">effort</span>{effort}</span>
-      <span className="wcb-fact-inline"><span className="wcb-fact-key">preset</span>{presetSummaryLabel(presets, group.preset)}</span>
-    </>
-  );
+  const facts = [
+    { key: 'members', label: '成员', value: `${group.memberCount} 位` },
+    { key: 'workspace', label: 'Workspace', value: group.workspaceTitle, title: group.workspacePath },
+    { key: 'model', label: '模型', value: groupModelSummary(catalog, group) },
+    { key: 'effort', label: 'effort', value: effort },
+    { key: 'preset', label: 'preset', value: presetSummaryLabel(presets, group.preset) },
+  ];
 
   // Leaving the form (a save, a delete elsewhere) re-seeds the draft from truth.
   useEffect(() => { if (!editing) setDraft(draftOf(group)); }, [group, editing]);
@@ -187,7 +198,7 @@ function GroupPanel({ group, state, startEditing, disabled, onApply }: {
       open={open}
       onToggle={() => setOpen(value => !value)}
       title={<>{group.name}{group.isDefault && <Tag tone="quiet">默认</Tag>}</>}
-      summary={summary}
+      facts={facts}
       actions={<>
         {editing ? (
           <>
@@ -199,7 +210,7 @@ function GroupPanel({ group, state, startEditing, disabled, onApply }: {
             </Button>
           </>
         ) : (
-          <Button variant="ghost" size="sm" disabled={disabled} aria-label={`编辑 ${group.name}`} onClick={startEdit}>
+          <Button variant="outline" size="sm" disabled={disabled} aria-label={`编辑 ${group.name}`} onClick={startEdit}>
             编辑
           </Button>
         )}
@@ -207,14 +218,14 @@ function GroupPanel({ group, state, startEditing, disabled, onApply }: {
           <>
             <Button variant="ghost" size="sm" disabled={disabled} onClick={() => setConfirming(false)}>取消</Button>
             <Button
-              variant="ghost" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled}
+              variant="outline" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled}
               onClick={() => { void onApply(key, [deleteGroup(group.id)]); }}
             >
               确认删除
             </Button>
           </>
         ) : (
-          <Button variant="ghost" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled} onClick={() => setConfirming(true)}>
+          <Button variant="outline" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled} onClick={() => setConfirming(true)}>
             删除分组
           </Button>
         ))}
@@ -314,147 +325,239 @@ function GroupPanel({ group, state, startEditing, disabled, onApply }: {
       {group.workspaceError && <div className="wcb-hint wcb-inline-error">{group.workspaceError}</div>}
       {editing && (
         <div className="wcb-hint">
-          更换 Workspace 后，本组成员的会话会在下一条消息时重新创建。模型与 effort 在下一条消息时安装到已有会话；
+          更换 Workspace 后，本组成员的会话会在下一条消息时重新创建。模型与 effort 是本组默认值，不覆盖成员为当前会话单独选择的模型；
           preset 只影响此后新建的会话（DSH 不允许改写已经开始的会话）。
         </div>
       )}
 
-      <div className="wcb-members">
-        {group.members.length === 0
-          ? <Empty>这个分组还没有成员。让对方先给机器人发一条消息，然后在「未授权用户」里把 TA 加入本组。</Empty>
-          : group.members.map(member => (
-            <MemberRow
-              key={member.key}
-              member={member}
-              group={group}
-              groups={state?.routing?.groups ?? []}
-              state={state}
-              disabled={disabled}
-              onApply={onApply}
-            />
-          ))}
-      </div>
+      {group.members.length === 0 ? (
+        <Empty>这个分组还没有成员。让对方先给机器人发一条消息，然后在「未授权用户」里把 TA 加入本组。</Empty>
+      ) : (
+        <div className="wcb-members-scroll" tabIndex={0} role="region" aria-label={`${group.name} 成员表格，可横向滚动`}>
+          <table className="wcb-members-table" aria-label={`${group.name} 的成员`}>
+            <thead><tr>{['成员', '会话', 'preset', '模型', 'effort', '上下文', '操作'].map(label => <th key={label} scope="col">{label}</th>)}</tr></thead>
+            <tbody>
+              {group.members.map(member => (
+                <MemberRow
+                  key={`${member.key}:${member.sessionId}`}
+                  member={member}
+                  group={group}
+                  groups={state?.routing?.groups ?? []}
+                  state={state}
+                  disabled={disabled}
+                  onChanged={onChanged}
+                  onOpenSession={onOpenSession}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </Collapse>
   );
 }
 
-/**
- * One member, on one line: the badge opens the person's dialog, the name and
- * the Session's five facts are read-only, and 归档会话 is the single action.
- */
-function MemberRow({ member, group, groups, state, disabled, onApply }: {
+/** One semantic table row; edits affect only this member's current Session. */
+function MemberRow({ member, group, groups, state, disabled, onChanged, onOpenSession }: {
   member: GroupMemberView;
   group: GroupView;
   groups: readonly GroupView[];
   state: BridgeStateView | undefined;
   disabled: boolean;
-  onApply(key: string, ops: StoreOp[]): Promise<unknown>;
+  onChanged(): void;
+  onOpenSession?: OpenSession;
 }) {
   const [details, setDetails] = useState(false);
   const [archiving, setArchiving] = useState(false);
+  const [sessionOpen, setSessionOpen] = useState(false);
+  const [navigationError, setNavigationError] = useState<string>();
+  const pending = useRef(false);
+  const write = useStoreApply(onChanged);
+  const blocked = disabled || Boolean(write.busy);
   const catalog = state?.models;
-  const presets = state?.presets;
-  const others = groups.filter(item => item.id !== group.id);
-  const effort = effortLabel(catalog, member.sessionModel);
+  const selection = member.sessionSelection ?? member.sessionModel;
+  const efforts = effortsFor(catalog, selection?.provider ?? '', selection?.model ?? '');
+  const usable = Boolean(member.sessionId) && (member.sessionState === 'bound' || member.sessionState === 'blank');
   const name = member.displayName;
-  const title = member.sessionId ? member.sessionTitle ?? '未命名会话' : '待创建';
+  const sessionTitle = member.sessionTitle || '未命名会话';
+  const sessionInfo = `会话：${sessionTitle}\nSession ID：${member.sessionId}`;
+  const error = write.error ?? navigationError;
+
+  // Each row owns its busy/error state. The ref also rejects a second action
+  // before React commits the busy state from the first one.
+  const apply = async (_key: string, ops: StoreOp[]): Promise<unknown> => {
+    if (disabled || pending.current) return undefined;
+    pending.current = true;
+    setNavigationError(undefined);
+    try { return await write.apply(member.key, ops); }
+    finally { pending.current = false; }
+  };
+
+  // Navigation is the only thing that leaves the page, and only from the
+  // dialog: the compact state in the table opens the identity first.
+  const openSession = async (): Promise<void> => {
+    setNavigationError(undefined);
+    try {
+      if (!onOpenSession) throw new Error('DSH 会话导航暂不可用，请刷新页面后重试。');
+      await onOpenSession(member.sessionId);
+      setSessionOpen(false);
+    } catch (cause) {
+      setNavigationError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const showSession = (): void => {
+    setNavigationError(undefined);
+    setSessionOpen(true);
+  };
+
+  const closeSession = (): void => {
+    if (pending.current) return;
+    setSessionOpen(false);
+    setNavigationError(undefined);
+  };
+
+  const changeModel = async (value: string): Promise<void> => {
+    const next = parseModelKey(value);
+    if (!usable || !next.provider || !next.model) return;
+    if (next.provider === selection?.provider && next.model === selection?.model) return;
+    // A different model starts at its own default effort, never the previous
+    // model's effort. A subsequent effort choice can pick an offered value.
+    await apply(member.key, [setMemberModel(member.key, member.sessionId, next)]);
+  };
+
+  const changeEffort = async (value: string): Promise<void> => {
+    if (!usable || !selection || (value && !efforts.some(item => item.id === value))) return;
+    if (value === (selection.reasoningEffort ?? '')) return;
+    const next = { provider: selection.provider, model: selection.model, ...(value ? { reasoningEffort: value } : {}) };
+    await apply(member.key, [setMemberModel(member.key, member.sessionId, next)]);
+  };
 
   return (
-    <div className="wcb-member-row">
-      <PersonAvatar kind={member.kind} label={`${name} 的详情`} disabled={disabled} onClick={() => setDetails(true)} />
-      <span className="wcb-member-name" title={name}>{name}</span>
-      {member.admin && <Tag tone="success">管理员</Tag>}
-
-      <span className="wcb-member-facts">
-        <span className="wcb-fact-inline">
-          {member.sessionId && <StateDot state={member.sessionRunning ? 'ongoing' : 'done'} size={8} />}
-          <span className="wcb-fact-strong">{title}</span>
-          {member.sessionId && (
-            <Tag tone={member.sessionState === 'bound' || member.sessionState === 'blank' ? 'quiet' : 'warning'}>
-              {SESSION_STATE_LABEL[member.sessionState]}
-            </Tag>
-          )}
-        </span>
-        <span className="wcb-fact-inline"><span className="wcb-fact-key">preset</span>{presetLabel(presets, member.sessionPreset)}</span>
-        <span className="wcb-fact-inline"><span className="wcb-fact-key">模型</span>{member.sessionModel ? modelName(catalog, member.sessionModel) : '—'}</span>
-        <span className="wcb-fact-inline"><span className="wcb-fact-key">effort</span>{effort || '—'}</span>
-        <span className="wcb-fact-inline"><span className="wcb-fact-key">上下文</span>{contextLabel(member.sessionContext) || '—'}</span>
-      </span>
-
-      <span className="wcb-member-actions">
-        {member.sessionId && (
-          <Button
-            variant="ghost" size="sm" disabled={disabled} aria-label={`归档 ${name} 的会话`}
-            onClick={() => setArchiving(true)}
+    <>
+      <tr className="wcb-member-row" aria-busy={Boolean(write.busy)}>
+        <td>
+          <div className="wcb-member-identity">
+            <PersonAvatar kind={member.kind} label={`${name} 的详情`} disabled={blocked} onClick={() => setDetails(true)} />
+            <span className="wcb-member-name" title={name}>{name}</span>
+            {member.admin && <Tag tone="success">管理员</Tag>}
+          </div>
+          <PersonDialog
+            open={details}
+            onClose={() => { if (!pending.current) setDetails(false); }}
+            title={name}
+            id={member.id}
+            label={member.label}
+            noteLabel={`${member.id} 的备注`}
+            disabled={blocked}
+            onNote={next => { void apply(member.key, [setLabel(member.key, next)]); }}
+            footer={<RemoveMember member={member} disabled={blocked} onApply={apply} />}
           >
-            归档会话
-          </Button>
-        )}
-      </span>
-
-      <PersonDialog
-        open={details}
-        onClose={() => setDetails(false)}
-        title={name}
-        typeLabel={BINDING_KIND_LABEL[member.kind]}
-        id={member.id}
-        label={member.label}
-        noteLabel={`${member.id} 的备注`}
-        disabled={disabled}
-        onNote={next => { void onApply(member.key, [setLabel(member.key, next)]); }}
-        footer={<RemoveMember member={member} disabled={disabled} onApply={onApply} />}
-      >
-        <div className="wcb-dialog-section wcb-person-facts">
-          <Fact name="所属分组">{group.name}</Fact>
-          <Fact name="会话">
-            {member.sessionId
-              ? <>{member.sessionTitle ?? '未命名会话'} <span className="wcb-mono">{member.sessionId.slice(-8)}</span></>
-              : '尚未创建'}
-          </Fact>
-          <Fact name="preset">{presetLabel(presets, member.sessionPreset)}</Fact>
-          <Fact name="模型">{member.sessionModel ? modelLabel(catalog, member.sessionModel) : '—'}</Fact>
-          <Fact name="effort">{effort || '—'}</Fact>
-          <Fact name="上下文">{contextLabel(member.sessionContext) || '—'}</Fact>
-          <Fact name="消息">{member.messages ? `${member.messages} 条 · ${relativeTime(member.lastSeenAt)}` : '尚未收到消息'}</Fact>
-        </div>
-
-        {others.length > 0 && (
-          <label className="wcb-binding-field">
-            <span className="wcb-binding-label">移动到分组</span>
+            <label className="wcb-binding-field">
+              <span className="wcb-binding-label">所属分组</span>
+              <Select
+                value={group.id} disabled={blocked} aria-label={`${member.id} 的所属分组`}
+                onChange={event => {
+                  const groupId = event.target.value;
+                  if (!groupId || groupId === group.id) return;
+                  void apply(member.key, [updateMember(member.key, { groupId })]);
+                }}
+              >
+                {groups.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+              </Select>
+              <span className="wcb-hint">切换后解除当前绑定，恢复目标分组原有的可用会话；没有可恢复会话时，下一条消息按目标组配置创建。</span>
+            </label>
+            {write.error && <div className="wcb-field-error" role="alert">{write.error}</div>}
+          </PersonDialog>
+        </td>
+        <td>
+          {usable ? (
+            <>
+              <button type="button" className="wcb-cell-pill" title={sessionInfo}
+                aria-label={`查看 ${name} 的会话详情`}
+                onClick={showSession}>
+                <StateDot state={member.sessionRunning ? 'ongoing' : 'idle'} size={8} />
+                {member.sessionState === 'blank' ? '待使用' : '已绑定'}
+                <span className="wcb-cell-pill-chevron" aria-hidden="true"><IconChevronRightOutlineRegular size={11} /></span>
+              </button>
+              <SessionDialog
+                open={sessionOpen}
+                onClose={closeSession}
+                name={name}
+                title={sessionTitle}
+                id={member.sessionId}
+                running={member.sessionRunning}
+                blank={member.sessionState === 'blank'}
+                disabled={Boolean(write.busy)}
+                error={navigationError}
+                onOpen={() => { void openSession(); }}
+              />
+            </>
+          ) : <span className="wcb-muted" title={member.sessionId ? sessionInfo : undefined}>{SESSION_STATE_LABEL[member.sessionState]}</span>}
+        </td>
+        <td>{member.sessionPreset ? presetLabel(state?.presets, member.sessionPreset) : '—'}</td>
+        <td>
+          {usable ? (
+            // Always a select: one click opens the list. The previous
+            // click-to-swap-a-button behaviour needed a second click, because
+            // an autofocused select does not open its popup by itself.
             <Select
-              value=""
-              disabled={disabled}
-              aria-label={`把 ${member.id} 移动到分组`}
-              onChange={event => {
-                if (!event.target.value) return;
-                void onApply(member.key, [updateMember(member.key, { groupId: event.target.value })]);
-              }}
+              className="wcb-cell-select"
+              value={modelKey(selection?.provider ?? '', selection?.model ?? '')}
+              disabled={blocked || !catalog?.choices.length}
+              aria-label={`${member.id} 当前会话的模型`}
+              title="只修改当前会话；新会话仍使用分组默认模型"
+              onChange={event => { void changeModel(event.target.value); }}
             >
-              <option value="">保持在「{group.name}」</option>
-              {others.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+              {!selection && <option value="" disabled>请选择模型</option>}
+              {selection && !catalog?.choices.some(item => item.provider === selection.provider && item.model === selection.model)
+                && <option value={modelKey(selection.provider, selection.model)}>{modelName(catalog, selection)}（当前）</option>}
+              {(catalog?.choices ?? []).map(choice => (
+                <option
+                  key={modelKey(choice.provider, choice.model)} value={modelKey(choice.provider, choice.model)}
+                  title={`${choice.providerName} / ${choiceLabel(choice)}`}
+                >
+                  {choice.name}
+                </option>
+              ))}
             </Select>
-          </label>
-        )}
-      </PersonDialog>
-
-      <ConfirmDialog
-        open={archiving}
-        title={`归档「${name}」的会话？`}
-        confirmLabel="确认归档"
-        disabled={disabled}
-        onCancel={() => setArchiving(false)}
-        onConfirm={() => {
-          void Promise.resolve(onApply(member.key, [archiveMember(member.key)])).then(result => {
-            if (result) setArchiving(false);
-          });
-        }}
-      >
-        <p>
-          归档后这个会话不再被继续，它的历史不会再进入任何请求；下一条消息会按分组当前的 Workspace、模型与 preset
-          新建一个会话。DSH 的会话文件仍保留在磁盘上，需要时可到 DSH 页面查看。
-        </p>
-      </ConfirmDialog>
-    </div>
+          ) : <span className="wcb-muted">—</span>}
+        </td>
+        <td>
+          {usable && selection ? (
+            <Select
+              className="wcb-cell-select"
+              value={selection.reasoningEffort ?? ''}
+              disabled={blocked || !efforts.length}
+              aria-label={`${member.id} 当前会话的 effort`}
+              title={efforts.length ? '只修改当前会话的思考强度' : '当前模型没有可选的思考强度'}
+              onChange={event => { void changeEffort(event.target.value); }}
+            >
+              <option value="">默认</option>
+              {efforts.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </Select>
+          ) : <span className="wcb-muted">—</span>}
+        </td>
+        <td className="wcb-context-cell">{contextLabel(member.sessionContext) || '—'}</td>
+        <td>
+          {member.sessionId && (
+            <Button
+              variant="outline" size="sm" icon={<IconTrashOutlineRegular />} disabled={blocked}
+              aria-label={`归档 ${name} 的会话`} onClick={() => setArchiving(true)}
+            >
+              归档会话
+            </Button>
+          )}
+          <ConfirmDialog open={archiving} title={`归档「${name}」的会话？`} confirmLabel="确认归档"
+            busy={Boolean(write.busy)} disabled={disabled} onCancel={() => { if (!pending.current) setArchiving(false); }}
+            onConfirm={() => { void apply(member.key, [archiveMember(member.key)]).then(result => { if (result) setArchiving(false); }); }}>
+            <p>归档后这个会话不再被继续，它的历史不会再进入任何请求；下一条消息会按分组当前的 Workspace、模型与 preset 新建一个会话。DSH 的会话文件仍保留在磁盘上，需要时可到 DSH 页面查看。</p>
+            {write.error && <div className="wcb-field-error" role="alert">{write.error}</div>}
+          </ConfirmDialog>
+        </td>
+      </tr>
+      {error && !details && !archiving && !sessionOpen && <tr className="wcb-member-error"><td colSpan={7}><div className="wcb-field-error" role="alert">{error}</div></td></tr>}
+    </>
   );
 }
 
@@ -469,14 +572,14 @@ function RemoveMember({ member, disabled, onApply }: {
     <>
       <Button variant="ghost" size="sm" disabled={disabled} onClick={() => setConfirming(false)}>取消</Button>
       <Button
-        variant="ghost" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled}
+        variant="outline" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled}
         onClick={() => { void onApply(member.key, [removeMember(member.key)]); }}
       >
         确认移出「{member.displayName}」
       </Button>
     </>
   ) : (
-    <Button variant="ghost" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled} onClick={() => setConfirming(true)}>
+    <Button variant="outline" size="sm" icon={<IconTrashOutlineRegular />} disabled={disabled} onClick={() => setConfirming(true)}>
       移出分组
     </Button>
   );

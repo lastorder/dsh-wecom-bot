@@ -17,7 +17,7 @@
 import { CONFIG_NAMESPACE, PACKAGE_NAME } from '../shared/protocol.ts';
 import { SettingsPage } from './components/SettingsPage.tsx';
 import { insertStyles } from './styles.ts';
-import type { ClientContext, ClientRemote, ConfigForms, SlotProps, SlotRegistry } from './types.ts';
+import type { ClientContext, ClientRemote, ConfigForms, SessionNavigation, SlotProps, SlotRegistry } from './types.ts';
 
 export const inject = ['slots', 'configForms', 'remote', 'remote.credentials'];
 
@@ -26,10 +26,19 @@ export function apply(ctx: ClientContext): void {
   const forms = ctx.get('configForms') as ConfigForms | undefined;
   const remote = ctx.get('remote') as ClientRemote | undefined;
   if (!slots || !forms) return;
+  // Resolve at the click, not during apply: the navigation service can be
+  // restored independently while the plugin settings page remains mounted.
+  const openSession = (sessionId: string): void => {
+    const navigation = ctx.get('uiWorkspace') as SessionNavigation | undefined;
+    if (!navigation || typeof navigation.openSession !== 'function') {
+      throw new Error('DSH 会话导航暂不可用，请刷新页面后重试。');
+    }
+    navigation.openSession(sessionId);
+  };
   ctx.effect(() => insertStyles(), 'wecom-bot: styles');
   // The bundle homepage (not a plugin row) hosts the whole configuration.
   ctx.effect(() => forms.whileServed([CONFIG_NAMESPACE], () => slots.inject('plugins.bundle.config', () => slots.register(
     { name: 'plugins.bundle.config', key: PACKAGE_NAME },
-    ({ view }: SlotProps) => (view === 'page' ? <SettingsPage scope={forms.get(CONFIG_NAMESPACE)} remote={remote} /> : null),
+    ({ view }: SlotProps) => (view === 'page' ? <SettingsPage scope={forms.get(CONFIG_NAMESPACE)} remote={remote} onOpenSession={openSession} /> : null),
   ))), 'wecom-bot: plugin homepage');
 }

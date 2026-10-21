@@ -1,5 +1,6 @@
 import { randomInt } from 'node:crypto';
 import type { ApprovalOutcome, Question, QuestionAnswer, QuestionAnswerItem } from '../dsh.js';
+import type { InteractionDelivery, InteractionSubmission } from '../interaction-transport.js';
 
 /**
  * Pending structured questions and tool approvals answered from WeCom.
@@ -20,7 +21,12 @@ export function verificationCode(length = 6): string {
   return code;
 }
 
-export interface PendingQuestion {
+export interface PendingState<T> {
+  active(): boolean;
+  submit(value: T): Promise<InteractionSubmission>;
+}
+
+export interface PendingQuestion extends PendingState<QuestionAnswer> {
   readonly sessionId: string;
   readonly questions: readonly Question[];
   readonly nonce: string;
@@ -28,7 +34,7 @@ export interface PendingQuestion {
   finish(value: QuestionAnswer | null): void;
 }
 
-export interface PendingApproval {
+export interface PendingApproval extends PendingState<ApprovalOutcome> {
   readonly sessionId: string;
   readonly toolName: string;
   readonly callId?: string;
@@ -47,74 +53,106 @@ export interface InteractionRegistry {
   readonly questions: ReadonlyMap<string, PendingQuestion>;
   readonly approvals: ReadonlyMap<string, PendingApproval>;
   /** Undefined when this Session already has a pending question. */
-  waitQuestion(sessionId: string, questions: readonly Question[], timeoutMs: number, signal?: AbortSignal): Wait<QuestionAnswer> | undefined;
+  waitQuestion(sessionId: string, questions: readonly Question[], timeoutMs: number, signal?: AbortSignal, delivery?: InteractionDelivery): Wait<QuestionAnswer> | undefined;
   /** Undefined when this Session already has a pending approval. */
   waitApproval(
     sessionId: string,
     request: { readonly toolName: string; readonly callId?: string; readonly privateChats: readonly string[] },
     timeoutMs: number,
     signal?: AbortSignal,
+    delivery?: InteractionDelivery,
   ): Wait<ApprovalOutcome> | undefined;
   findQuestion(nonce: string): PendingQuestion | undefined;
   findApproval(nonce: string): PendingApproval | undefined;
+  hasQuestion(sessionId: string): boolean;
+  isPending(nonce: string): boolean;
+  /** Bounded, expiring tombstones distinguish a late attempt from an unknown nonce. */
+  wasClosed(nonce: string): boolean;
   cancelAll(): void;
 }
 
 export function createInteractionRegistry(): InteractionRegistry {
   const questions = new Map<string, PendingQuestion>();
   const approvals = new Map<string, PendingApproval>();
+  const terminal = new Map<string, number>();
+  const normalized = (nonce: string) => nonce.trim().toLowerCase();
+  const prune = (): void => {
+    const cutoff = Date.now() - 15 * 60_000;
+    for (const [nonce, time] of terminal) if (time < cutoff) terminal.delete(nonce);
+    while (terminal.size > 1000) terminal.delete(terminal.keys().next().value!);
+  };
+  const fresh = (): string => {
+    prune();
+    let nonce: string;
+    do { nonce = verificationCode(); } while (terminal.has(nonce)
+      || [...questions.values(), ...approvals.values()].some(state => state.nonce === nonce));
+    return nonce;
+  };
 
-  function open<T, State extends { finish(value: T | null): void }>(
-    map: Map<string, State>, sessionId: string, timeoutMs: number, signal: AbortSignal | undefined,
-    makeState: (finish: (value: T | null) => void) => State,
+  function open<T, State extends PendingState<T> & { finish(value: T | null): void }>(
+    map: Map<string, State>, key: string, nonce: string, timeoutMs: number, signal: AbortSignal | undefined,
+    makeState: (finish: (value: T | null) => void, active: () => boolean, submit: (value: T) => Promise<InteractionSubmission>) => State,
+    delivery?: InteractionDelivery,
   ): Promise<T | null> {
     return new Promise<T | null>(resolve => {
       let done = false;
+      let submitting = false;
       const finish = (value: T | null): void => {
         if (done) return;
         done = true;
         clearTimeout(timer);
         signal?.removeEventListener('abort', abort);
-        if (map.get(sessionId) === state) map.delete(sessionId);
+        if (map.get(key) === state) map.delete(key);
+        terminal.set(nonce, Date.now());
+        prune();
         resolve(value);
+      };
+      const active = (): boolean => !done && !submitting;
+      const submit = async (value: T): Promise<InteractionSubmission> => {
+        if (!active()) return 'closed';
+        submitting = true;
+        if (!delivery) { finish(value); return 'accepted'; }
+        const result = await delivery.submit(value);
+        if (done) return 'closed';
+        finish(result === 'closed' ? null : value);
+        return result;
       };
       const abort = (): void => finish(null);
       const timer = setTimeout(abort, timeoutMs);
-      const state = makeState(finish);
-      map.set(sessionId, state);
+      const state = makeState(finish, active, submit);
+      map.set(key, state);
       signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) abort();
     });
   }
 
+  const findQuestion = (nonce: string) => [...questions.values()].find(state => state.nonce === normalized(nonce));
+  const findApproval = (nonce: string) => [...approvals.values()].find(state => state.nonce === normalized(nonce));
   return {
-    questions,
-    approvals,
-    waitQuestion(sessionId, list, timeoutMs, signal) {
-      if (questions.has(sessionId) || signal?.aborted) return undefined;
-      const nonce = verificationCode();
-      const result = open<QuestionAnswer, PendingQuestion>(questions, sessionId, timeoutMs, signal,
-        finish => ({ sessionId, questions: list, nonce, answers: new Map(), finish }));
+    questions, approvals,
+    waitQuestion(sessionId, list, timeoutMs, signal, delivery) {
+      const key = delivery?.id ?? sessionId;
+      if (questions.has(key) || signal?.aborted) return undefined;
+      const nonce = fresh();
+      const result = open<QuestionAnswer, PendingQuestion>(questions, key, nonce, timeoutMs, signal,
+        (finish, active, submit) => ({ sessionId, questions: list, nonce, answers: new Map(), finish, active, submit }), delivery);
       return { nonce, result };
     },
-    waitApproval(sessionId, request, timeoutMs, signal) {
-      if (approvals.has(sessionId) || signal?.aborted) return undefined;
-      const nonce = verificationCode();
-      const result = open<ApprovalOutcome, PendingApproval>(approvals, sessionId, timeoutMs, signal,
-        finish => ({
-          sessionId, toolName: request.toolName, nonce, privateChats: new Set(request.privateChats), finish,
+    waitApproval(sessionId, request, timeoutMs, signal, delivery) {
+      const key = delivery?.id ?? sessionId;
+      if (approvals.has(key) || signal?.aborted) return undefined;
+      const nonce = fresh();
+      const result = open<ApprovalOutcome, PendingApproval>(approvals, key, nonce, timeoutMs, signal,
+        (finish, active, submit) => ({
+          sessionId, toolName: request.toolName, nonce, privateChats: new Set(request.privateChats), finish, active, submit,
           ...(request.callId ? { callId: request.callId } : {}),
-        }));
+        }), delivery);
       return { nonce, result };
     },
-    findQuestion(nonce) {
-      const code = nonce.trim().toLowerCase();
-      return code ? [...questions.values()].find(state => state.nonce === code) : undefined;
-    },
-    findApproval(nonce) {
-      const code = nonce.trim().toLowerCase();
-      return code ? [...approvals.values()].find(state => state.nonce === code) : undefined;
-    },
+    findQuestion, findApproval,
+    hasQuestion: sessionId => [...questions.values()].some(state => state.sessionId === sessionId),
+    isPending: nonce => Boolean(findQuestion(nonce)?.active() || findApproval(nonce)?.active()),
+    wasClosed(nonce) { prune(); return terminal.has(normalized(nonce)); },
     cancelAll() {
       for (const state of [...questions.values()]) state.finish(null);
       for (const state of [...approvals.values()]) state.finish(null);

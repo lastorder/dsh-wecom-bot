@@ -1,8 +1,9 @@
 /** Small layout pieces shared by the page sections. */
+import { useState } from 'react';
 import type { ReactNode, SelectHTMLAttributes } from 'react';
 import {
   Button, IconChevronRightOutlineRegular, IconEditOutlineRegular, IconUserOutlineRegular, IconUsersOutlineRegular,
-  Input, Modal, Tag,
+  Input, Modal, StateDot, Tag, writeClipboard,
 } from '@deepseek-ai/dsh-client-ui-primitives';
 import type { BindingKind } from '../../shared/protocol.ts';
 
@@ -45,23 +46,52 @@ export function CardHead({ step, title, description, aside }: {
  * A collapsible section: only its header row is visible until the user opens
  * it. Used for every group card and for the administrator Workspace scope, so
  * the page stays short by default.
+ *
+ * A section that owns several facts passes them as `facts` instead of a
+ * sentence-like `summary`: the facts become a fixed five-track grid with the
+ * label above the value, so the Workspace, model, effort and preset of one
+ * group line up with the same facts of the next one.
  */
-export function Collapse({ open, onToggle, title, summary, actions, children, className }: {
+export interface CollapseFact {
+  key: string;
+  label: ReactNode;
+  value: ReactNode;
+  title?: string;
+}
+
+export function Collapse({ open, onToggle, title, summary, facts, actions, children, className }: {
   open: boolean;
   onToggle(): void;
   title: ReactNode;
   summary?: ReactNode;
+  facts?: readonly CollapseFact[];
   actions?: ReactNode;
   children?: ReactNode;
   className?: string;
 }) {
+  const hasFacts = Boolean(facts?.length);
+  // The facts are the *collapsed* overview; an open group has its form, which
+  // names the same values, so it does not repeat the grid above it.
+  const showFacts = hasFacts && !open;
   return (
-    <div className={['wcb-group', className].filter(Boolean).join(' ')} data-open={open ? '' : undefined}>
+    <div className={['wcb-group', className].filter(Boolean).join(' ')} data-open={open ? '' : undefined} data-facts={showFacts ? '' : undefined}>
       <div className="wcb-group-head">
         <button type="button" className="wcb-group-toggle" aria-expanded={open} onClick={onToggle}>
-          <span className="wcb-chevron"><IconChevronRightOutlineRegular size={14} /></span>
-          <span className="wcb-group-title">{title}</span>
+          <span className="wcb-group-title-line">
+            <span className="wcb-chevron"><IconChevronRightOutlineRegular size={14} /></span>
+            <span className="wcb-group-title">{title}</span>
+          </span>
           {summary && <span className="wcb-group-summary">{summary}</span>}
+          {showFacts && (
+            <span className="wcb-group-facts">
+              {facts!.map(fact => (
+                <span className="wcb-group-fact" key={fact.key}>
+                  <span className="wcb-group-fact-label">{fact.label}</span>
+                  <span className="wcb-group-fact-value" title={fact.title}>{fact.value}</span>
+                </span>
+              ))}
+            </span>
+          )}
         </button>
         {actions && <span className="wcb-group-actions">{actions}</span>}
       </div>
@@ -194,7 +224,7 @@ export function PersonDialog({ open, onClose, title, typeLabel, id, label, noteL
   onClose(): void;
   /** What the dialog is about (the name the row showed). */
   title: ReactNode;
-  typeLabel: string;
+  typeLabel?: string;
   id: string;
   label: string;
   noteLabel: string;
@@ -210,7 +240,7 @@ export function PersonDialog({ open, onClose, title, typeLabel, id, label, noteL
       className="wcb-modal" contentClassName="wcb-modal-content"
     >
       <div className="wcb-person-facts">
-        <Fact name="类型">{typeLabel}</Fact>
+        {typeLabel && <Fact name="类型">{typeLabel}</Fact>}
         <Fact name="企微 ID" mono>{id}</Fact>
         <div className="wcb-fact">
           <span className="wcb-fact-key">备注</span>
@@ -237,11 +267,63 @@ export function PersonDialog({ open, onClose, title, typeLabel, id, label, noteL
 }
 
 /**
+ * The bound Session's identity, shown before any navigation.
+ *
+ * The member table only has room for a compact state, and clicking that state
+ * should never jump the page by surprise: the name and the Session ID are read
+ * here, and 「在 DSH 中打开」 is the only control that leaves the page.
+ */
+export function SessionDialog({ open, onClose, name, title, id, running, blank, disabled, error, onOpen }: {
+  open: boolean;
+  onClose(): void;
+  /** The member's display name, so the dialog says whose Session it is. */
+  name: string;
+  title: string;
+  id: string;
+  running: boolean;
+  /** A created Session whose first turn has not started yet. */
+  blank?: boolean;
+  disabled?: boolean;
+  error?: string;
+  onOpen(): void;
+}) {
+  const [copied, setCopied] = useState(false);
+  const copy = async (): Promise<void> => {
+    if (!await writeClipboard(id)) return;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  return (
+    <Modal
+      open={open} onClose={onClose} title={`${name} 的会话`} closeLabel="关闭"
+      className="wcb-modal" contentClassName="wcb-modal-content"
+    >
+      <div className="wcb-person-facts">
+        <Fact name="会话名称">{title}</Fact>
+        <Fact name="Session ID" mono>{id}</Fact>
+        <Fact name="状态">
+          <span className="wcb-running">
+            <StateDot state={running ? 'ongoing' : 'idle'} size={8} />
+            {blank ? '待使用（还没有开始）' : running ? '运行中' : '空闲'}
+          </span>
+        </Fact>
+      </div>
+      <div className="wcb-hint">这里只展示会话身份，不会切换页面；点「在 DSH 中打开」才会跳转到这个会话。打开不会改变绑定，也不会新建会话。</div>
+      {error && <div className="wcb-field-error" role="alert">{error}</div>}
+      <div className="wcb-dialog-actions">
+        <Button variant="outline" size="sm" onClick={() => { void copy(); }}>{copied ? '已复制' : '复制 Session ID'}</Button>
+        <Button variant="ghost" size="sm" onClick={onClose}>关闭</Button>
+        <Button variant="primary" size="sm" disabled={disabled} onClick={onOpen}>在 DSH 中打开</Button>
+      </div>
+    </Modal>
+  );
+}
+
+/**
  * One card's save row: its own fields, its own button. There is no page-wide
  * 保存配置 any more — a section is saved where it is edited, and a successful
  * write needs no lasting banner (the form simply stops being dirty).
- */
-export function SaveBar({ dirty, saving, saved, error, disabled, onSave, onDiscard }: {
+ */export function SaveBar({ dirty, saving, saved, error, disabled, onSave, onDiscard }: {
   dirty: boolean;
   saving: boolean;
   saved: boolean;

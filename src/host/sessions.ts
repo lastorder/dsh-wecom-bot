@@ -5,6 +5,7 @@ import type { CatalogService, SessionCatalog } from './catalog.js';
 import type { SessionController } from './dsh.js';
 import type { ModelService } from './models.js';
 import { sessionTitleFor, type SessionTitler } from './session-title.js';
+import type { PluginStore } from './store.js';
 import type { WorkspaceService } from './workspaces.js';
 
 /**
@@ -41,9 +42,19 @@ export interface SessionDescription {
 
 export interface Provisioned {
   readonly sessionId: string;
+  /** Exact store row this Session was resolved for; callers can re-check it. */
+  readonly binding: BindingRecord;
   /** True when this call created the Session. */
   readonly created: boolean;
   readonly model?: ModelSelection;
+}
+
+/** Provisioning must not resurrect or route a membership edited mid-flight. */
+export class SessionBindingChangedError extends Error {
+  constructor() {
+    super('membership changed while resolving its Session');
+    this.name = 'SessionBindingChangedError';
+  }
 }
 
 export interface SessionProvisioner {
@@ -61,7 +72,7 @@ export interface SessionProvisionerOptions {
   readonly models: ModelService;
   readonly workspaces: WorkspaceService;
   readonly catalogs: CatalogService;
-  readonly bindings: { update(key: string, patch: { sessionId?: string }): Promise<unknown> };
+  readonly bindings: Pick<PluginStore, 'get' | 'update'>;
   readonly bindingKey: (binding: BindingRecord) => string;
   /** Names a Session this provisioner creates; optional and best-effort. */
   readonly titles?: SessionTitler;
@@ -135,16 +146,25 @@ export function createSessionProvisioner(options: SessionProvisionerOptions): Se
   return {
     desired: desiredSelection,
     async ensure(binding, group) {
+      const key = options.bindingKey(binding);
+      const assertCurrent = (expected: BindingRecord) => {
+        if (options.bindings.get(key) !== expected) throw new SessionBindingChangedError();
+      };
+      assertCurrent(binding);
+      if (binding.groupId !== group.id) throw new SessionBindingChangedError();
       const selection = desiredSelection(group);
       if (binding.sessionId) {
         const state = await classify(binding.sessionId);
+        assertCurrent(binding);
         if (state === 'bound' || state === 'blank') {
           // An explicit model change takes effect with the next message.
-          const model = selection ? await install(binding.sessionId, selection, false).catch(error => {
+          const currentSelection = binding.sessionSelection ?? selection;
+          const model = currentSelection ? await install(binding.sessionId, currentSelection, false).catch(error => {
             log.warn(`WeCom could not select the Session model: ${error instanceof Error ? error.message : String(error)}`);
             return undefined;
           }) : undefined;
-          return { sessionId: binding.sessionId, created: false, ...(model ? { model } : {}) };
+          assertCurrent(binding);
+          return { sessionId: binding.sessionId, binding, created: false, ...(model ? { model } : {}) };
         }
         journal.write({
           event: 'binding.session.replaced', level: 'warn',
@@ -152,12 +172,18 @@ export function createSessionProvisioner(options: SessionProvisionerOptions): Se
         });
       }
       const workspace = await options.workspaces.resolve(group.workspace);
+      assertCurrent(binding);
       const preset = group.preset.trim();
       const created = await options.sessionController.create({
         ...(workspace.id ? { workspaceId: workspace.id } : { cwd: workspace.path }),
         ...(preset ? { agentPreset: preset } : {}),
       });
-      await options.bindings.update(options.bindingKey(binding), { sessionId: created.sessionId });
+      // The operator may have moved, removed or rebound this member while DSH
+      // was creating the Session. The store checks this at the mutation itself,
+      // after its own awaits; a pre-write get() check alone is not sufficient.
+      const updated = await options.bindings.update(key, { sessionId: created.sessionId }, binding);
+      if (!updated) throw new SessionBindingChangedError();
+      assertCurrent(updated);
       // The Session is named after the principal that owns it — a userid for a
       // private chat, a chatid for a group — so the DSH sidebar says which WeCom
       // conversation it belongs to.
@@ -175,7 +201,8 @@ export function createSessionProvisioner(options: SessionProvisionerOptions): Se
           log.warn(`WeCom could not select the Session model: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
-      return { sessionId: created.sessionId, created: true, ...(model ? { model } : {}) };
+      assertCurrent(updated);
+      return { sessionId: created.sessionId, binding: updated, created: true, ...(model ? { model } : {}) };
     },
     async applyModel(sessionId, selection) {
       return await install(sessionId, selection, true) ?? selection;
@@ -183,11 +210,12 @@ export function createSessionProvisioner(options: SessionProvisionerOptions): Se
     async describe(sessionId) {
       try {
         const catalog = await options.catalogs.load();
-        const entry = catalog.get(sessionId) ?? (await freshCatalog(sessionId)).get(sessionId);
+        const fresh = catalog.get(sessionId) || catalog.getBlank?.(sessionId) ? catalog : await freshCatalog(sessionId);
+        const entry = fresh.get(sessionId) ?? fresh.getBlank?.(sessionId);
         if (entry) {
           return {
             title: entry.title,
-            state: 'bound',
+            state: fresh.hiddenReason(sessionId) === 'blank' ? 'blank' : 'bound',
             workspace: entry.group.title,
             workspacePath: entry.group.path ?? '',
             running: entry.running,

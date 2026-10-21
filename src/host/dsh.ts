@@ -64,6 +64,7 @@ export interface QuestionRequest {
   readonly agent?: { readonly id: string };
   readonly questions: readonly Question[];
   readonly signal?: AbortSignal;
+  readonly wait?: { readonly callId: string; readonly timed?: boolean };
 }
 
 export type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable';
@@ -262,6 +263,7 @@ export interface DshEvents {
   on(event: 'session/event', listener: (session: SessionHandle, event: SessionEvent) => void): Disposer | void;
   on(event: 'user-questions/request', listener: (request: QuestionRequest, next: () => Promise<QuestionAnswer>) => Promise<QuestionAnswer>): Disposer | void;
   on(event: 'approval/request', listener: (request: ApprovalRequest, next: () => Promise<ApprovalOutcome>) => Promise<ApprovalOutcome>): Disposer | void;
+  on(event: 'api-session/error', listener: (sessionId: string, message: string) => void): Disposer | void;
   on(event: 'app-boot/config-reload', listener: () => void): Disposer | void;
   on(event: 'credentials/reference-updated', listener: (ref: string) => void): Disposer | void;
 }
@@ -273,10 +275,28 @@ export interface FetchRoute {
   readonly fetch: (request: Request) => Promise<Response>;
 }
 
+/** Public in-process transport contracts discovered through Cordis Inspect. */
+export interface InteractionPeer {
+  readonly signal: AbortSignal;
+  dispose(): Promise<void>;
+}
+
+export interface HostConnection {
+  readonly fetch: { register(route: FetchRoute): () => Promise<void> };
+  createPeer?(options: { readonly principal: { readonly kind: 'owner' }; readonly interactions: 'answer' }): InteractionPeer;
+  createSharedFetchHandler?(channel: '/api'): { fetch(request: Request, peer: InteractionPeer): Promise<Response> };
+}
+
+export interface InteractionGateway {
+  readonly wireStream: {
+    open(endpoint: string, payload: unknown, uplink: AsyncIterable<unknown>, peer: InteractionPeer, signal: AbortSignal): Promise<AsyncIterable<unknown>>;
+  };
+}
+
 export interface HostContext extends DshEvents {
   readonly sessionController: SessionController;
   readonly credentials: { resolve(ref: string): Promise<{ readonly value: string } | undefined> };
-  readonly connection: { readonly fetch: { register(route: FetchRoute): () => Promise<void> } };
+  readonly connection: HostConnection;
   /** Cordis service lookup without an inject declaration (optional services). */
   get?(name: string): unknown;
   logger?(namespace: string): Logger;

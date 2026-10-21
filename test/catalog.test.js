@@ -70,6 +70,39 @@ test('without a Workspace registry the catalog groups by working directory', () 
   assert.deepEqual(catalog.groups.map(g => [g.kind, g.title]), [['directory', 'new'], ['directory', 'old'], ['ungrouped', '未分组']]);
 });
 
+test('blank Sessions retain Workspace metadata without appearing in the visible catalog', () => {
+  const catalog = buildCatalog([
+    row('blank', 1, { blank: true, cwd: '/different/cwd', ...titled('New Session') }),
+    row('archived', 2, { blank: true }),
+    row('subagent', 3, { blank: true, origin: 'subagent' }),
+    row('loose', 4, { blank: true, cwd: '/unregistered' }),
+  ], {
+    list: () => [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['blank', 'archived', 'subagent'] }],
+    archivedSessionIds: ['archived'],
+    pinnedSessionIds: [],
+  });
+  assert.deepEqual(catalog.groups, [], 'a Workspace containing only blank Sessions stays hidden');
+  assert.deepEqual(catalog.entries, []);
+  assert.equal(catalog.get('blank'), undefined);
+  assert.equal(catalog.getBlank('blank').group.path, '/w/alpha', 'the registry, not cwd, owns Workspace membership');
+  assert.equal(catalog.getBlank('blank').group.title, 'Alpha');
+  assert.equal(catalog.getBlank('blank').title, 'New Session');
+  assert.equal(catalog.getBlank('loose').group.path, undefined, 'an unregistered Session stays ungrouped when a registry exists');
+  assert.equal(catalog.getBlank('archived'), undefined, 'archival takes precedence over blank');
+  assert.equal(catalog.getBlank('subagent'), undefined, 'a blank subagent is never operable');
+  assert.equal(catalog.getBlank('missing'), undefined);
+  assert.equal(catalogView(catalog, ['blank']).total, 0);
+  assert.equal(catalogView(catalog, ['blank']).hiddenSelections[0].reason, 'blank');
+});
+
+test('without a registry blank Sessions retain their cwd but remain hidden', () => {
+  const catalog = buildCatalog([row('blank', 1, { blank: true, cwd: '/w/alpha' })], undefined);
+  assert.deepEqual(catalog.groups, []);
+  assert.deepEqual(catalog.entries, []);
+  assert.equal(catalog.getBlank('blank').group.path, '/w/alpha');
+  assert.equal(catalog.getBlank('blank').group.kind, 'directory');
+});
+
 test('catalog service caches for its TTL, shares in-flight reads and supports forced refresh', async () => {
   let calls = 0;
   let clock = 0;

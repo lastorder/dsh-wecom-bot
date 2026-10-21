@@ -118,12 +118,11 @@ export function createSessionDirectory(catalogs: CatalogService, options: Sessio
     async permitted(sessionId) {
       try {
         const catalog = await lookup(sessionId);
-        const entry = catalog.get(sessionId);
-        if (entry) return options.allow(entry);
-        // A Session created a moment ago is `blank` until its first turn: the
-        // catalog hides it from the sidebar, but the administrator who just
-        // created it (or the member it belongs to) must be able to use it.
-        return catalog.hiddenReason(sessionId) === 'blank';
+        // A newly created Session is hidden until its first turn, not exempt
+        // from scope checks. Its retained Workspace lets the same live policy
+        // govern both visible and blank Sessions after a scope edit.
+        const entry = catalog.get(sessionId) ?? catalog.getBlank(sessionId);
+        return entry ? options.allow(entry) : false;
       } catch {
         return false;
       }
@@ -131,7 +130,7 @@ export function createSessionDirectory(catalogs: CatalogService, options: Sessio
     async describe(sessionId) {
       try {
         const catalog = await catalogs.load();
-        const entry = catalog.get(sessionId);
+        const entry = catalog.get(sessionId) ?? catalog.getBlank(sessionId);
         if (!entry) return { title: catalog.titleOf(sessionId) };
         return {
           title: entry.title,

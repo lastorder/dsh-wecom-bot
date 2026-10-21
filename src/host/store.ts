@@ -4,7 +4,8 @@ import {
   DEFAULT_GROUP_ID, DEFAULT_GROUP_NAME, DEFAULT_LOG_RETENTION_DAYS, DEFAULT_QUESTION_TIMEOUT_MS,
   MAX_BINDINGS, MAX_GROUPS, MAX_LABEL_CHARS, MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS,
   MIN_LOG_RETENTION_DAYS, MIN_QUESTION_TIMEOUT_MS, STORE_FILE, STORE_VERSION,
-  type BindingKind, type BindingRecord, type GroupRecord, type StoreSettings, type StoreSettingsPatch,
+  type BindingKind, type BindingRecord, type GroupRecord, type GroupSessionMemory, type ModelSelection,
+  type StoreSettings, type StoreSettingsPatch,
 } from '../shared/protocol.js';
 import { uniqueIds } from './config.js';
 
@@ -57,6 +58,8 @@ export interface GroupPatch {
 export interface BindingPatch {
   readonly groupId?: string;
   readonly sessionId?: string;
+  /** Model override is tied to the current Session and cleared on replacement. */
+  readonly sessionSelection?: ModelSelection;
 }
 
 export interface PluginStore {
@@ -81,7 +84,13 @@ export interface PluginStore {
   removeGroup(id: string): Promise<{ readonly ok: boolean; readonly removed: number }>;
   /** Authorize a principal (or re-assign an existing one) into a group. */
   create(kind: BindingKind, id: string, options: { readonly groupId: string; readonly label?: string }): Promise<BindingRecord>;
-  update(key: string, patch: BindingPatch): Promise<BindingRecord | undefined>;
+  /**
+   * Patch a member; changing its group always detaches its Session.
+   * `expected`, when supplied, must be the exact current row returned by this
+   * store. A replaced or removed row refuses the write (undefined), including
+   * remove/re-authorize and move-away/move-back races with identical timestamps.
+   */
+  update(key: string, patch: BindingPatch, expected?: BindingRecord): Promise<BindingRecord | undefined>;
   remove(key: string): Promise<boolean>;
   /** The operator note for one principal, whether or not it is a member. */
   label(key: string): string;
@@ -91,6 +100,8 @@ export interface PluginStore {
   adminWorkspace(user: string): string;
   /** Point one administrator's commands at one Workspace ('' clears it). */
   setAdminWorkspace(user: string, path: string): Promise<void>;
+  /** Drop one principal's remembered Session for one group (a stale candidate). */
+  forgetSession(key: string, groupId: string): Promise<void>;
   /** Every member currently pointing at one Session. */
   forSession(sessionId: string): readonly BindingRecord[];
   /** True when no new member may be created. */
@@ -177,7 +188,7 @@ export function defaultStoreSettings(): StoreSettings {
     adminUserIds: [],
     adminWorkspaces: [],
     questionTimeoutMs: DEFAULT_QUESTION_TIMEOUT_MS,
-    remoteApprovals: false,
+    remoteApprovals: true,
     logEnabled: true,
     logRetentionDays: DEFAULT_LOG_RETENTION_DAYS,
   };
@@ -201,7 +212,8 @@ export function normalizeStoreSettings(value: unknown): StoreSettings {
     questionTimeoutMs: bounded(
       record.questionTimeoutMs, MIN_QUESTION_TIMEOUT_MS, MAX_QUESTION_TIMEOUT_MS, DEFAULT_QUESTION_TIMEOUT_MS,
     ),
-    remoteApprovals: record.remoteApprovals === true,
+    // Kept on disk for compatibility only; approval is always available to scoped admins.
+    remoteApprovals: true,
     logEnabled: record.logEnabled !== false,
     logRetentionDays: bounded(
       record.logRetentionDays, MIN_LOG_RETENTION_DAYS, MAX_LOG_RETENTION_DAYS, DEFAULT_LOG_RETENTION_DAYS,
@@ -242,17 +254,41 @@ function normalizeGroup(value: unknown): GroupRecord | undefined {
   };
 }
 
+function normalizeSelection(value: unknown): ModelSelection | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const provider = text(record.provider).slice(0, 512);
+  const model = text(record.model).slice(0, 512);
+  const reasoningEffort = text(record.reasoningEffort).slice(0, 128);
+  return provider && model ? { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) } : undefined;
+}
+
 /** One stored member row, or undefined when the entry is unusable. */
 function normalizeBinding(value: unknown): BindingRecord | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const record = value as Record<string, unknown>;
   const kind = record.kind === 'group' ? 'group' : record.kind === 'user' ? 'user' : undefined;
   if (!kind || !validBindingId(record.id)) return undefined;
+  const sessionId = text(record.sessionId);
+  const sessionSelection = sessionId ? normalizeSelection(record.sessionSelection) : undefined;
+  const memories: [string, GroupSessionMemory][] = [];
+  if (record.sessionsByGroup && typeof record.sessionsByGroup === 'object' && !Array.isArray(record.sessionsByGroup)) {
+    for (const [groupId, entry] of Object.entries(record.sessionsByGroup).slice(0, MAX_GROUPS)) {
+      if (!groupId || groupId.length > 64 || !entry || typeof entry !== 'object') continue;
+      const memory = entry as Record<string, unknown>;
+      const rememberedId = text(memory.sessionId);
+      if (!rememberedId || rememberedId.length > 512 || typeof memory.workspace !== 'string') continue;
+      const selection = normalizeSelection(memory.selection);
+      memories.push([groupId, { sessionId: rememberedId, workspace: text(memory.workspace), ...(selection ? { selection } : {}) }]);
+    }
+  }
   return {
     kind,
     id: (record.id as string).trim(),
     groupId: text(record.groupId) || DEFAULT_GROUP_ID,
-    sessionId: text(record.sessionId),
+    sessionId,
+    ...(sessionSelection ? { sessionSelection } : {}),
+    ...(memories.length ? { sessionsByGroup: Object.fromEntries(memories) } : {}),
     createdAt: stamp(record.createdAt),
     updatedAt: stamp(record.updatedAt),
   };
@@ -352,7 +388,14 @@ export function createStore(options: PluginStoreOptions): PluginStore {
     }
     // A member must never reference a group that is not there.
     for (const [key, record] of bindings) {
-      if (!groups.has(record.groupId)) bindings.set(key, { ...record, groupId: DEFAULT_GROUP_ID });
+      const { sessionsByGroup, ...base } = record;
+      const memories = Object.entries(sessionsByGroup ?? {}).filter(([id, memory]) =>
+        id !== record.groupId && groups.has(id) && groups.get(id)!.workspace === memory.workspace);
+      bindings.set(key, {
+        ...base,
+        ...(!groups.has(record.groupId) ? { groupId: DEFAULT_GROUP_ID } : {}),
+        ...(memories.length ? { sessionsByGroup: Object.fromEntries(memories) } : {}),
+      });
     }
   }
 
@@ -399,6 +442,50 @@ export function createStore(options: PluginStoreOptions): PluginStore {
     else labels.delete(key);
     await persist();
     return note;
+  }
+
+  /** Replace the row even on A→B→A: stale asynchronous work must fail its CAS. */
+  function patchBinding(existing: BindingRecord, groupId: string, patch: BindingPatch): BindingRecord {
+    const { sessionSelection: _selection, sessionsByGroup: _history, ...base } = existing;
+    const memories: Record<string, GroupSessionMemory> = { ...existing.sessionsByGroup };
+    let sessionId = existing.sessionId;
+    let selection = existing.sessionSelection;
+    if (groupId !== existing.groupId) {
+      if (existing.sessionId) {
+        memories[existing.groupId] = {
+          sessionId: existing.sessionId, workspace: groups.get(existing.groupId)?.workspace ?? '',
+          ...(existing.sessionSelection ? { selection: existing.sessionSelection } : {}),
+        };
+      }
+      const memory = Object.hasOwn(memories, groupId) ? memories[groupId] : undefined;
+      const reusable = memory && memory.workspace === groups.get(groupId)?.workspace;
+      sessionId = reusable ? memory.sessionId : '';
+      selection = reusable ? memory.selection : undefined;
+      delete memories[groupId];
+    } else if (patch.sessionId !== undefined) {
+      sessionId = patch.sessionId.trim();
+      if (sessionId !== existing.sessionId || !sessionId) selection = undefined;
+      delete memories[groupId];
+    }
+    if (groupId === existing.groupId && sessionId && patch.sessionSelection) {
+      selection = normalizeSelection(patch.sessionSelection);
+    }
+    return {
+      ...base, groupId, sessionId,
+      ...(selection ? { sessionSelection: selection } : {}),
+      ...(Object.keys(memories).length ? { sessionsByGroup: memories } : {}),
+      updatedAt: now(),
+    };
+  }
+
+  function forgetGroupHistory(groupId: string): void {
+    for (const [key, binding] of bindings) {
+      if (!binding.sessionsByGroup || !Object.hasOwn(binding.sessionsByGroup, groupId)) continue;
+      const { sessionsByGroup, ...base } = binding;
+      const remaining = { ...sessionsByGroup };
+      delete remaining[groupId];
+      bindings.set(key, { ...base, ...(Object.keys(remaining).length ? { sessionsByGroup: remaining } : {}) });
+    }
   }
 
   return {
@@ -449,6 +536,7 @@ export function createStore(options: PluginStoreOptions): PluginStore {
         ...(patch.preset !== undefined ? { preset: patch.preset.trim() } : {}),
         updatedAt: now(),
       };
+      if (next.workspace !== existing.workspace) forgetGroupHistory(id);
       return putGroup(next);
     },
     async removeGroup(id) {
@@ -461,6 +549,7 @@ export function createStore(options: PluginStoreOptions): PluginStore {
         removed++;
       }
       groups.delete(id);
+      forgetGroupHistory(id);
       await persist();
       return { ok: true, removed };
     },
@@ -468,14 +557,15 @@ export function createStore(options: PluginStoreOptions): PluginStore {
       await loadOnce();
       const cleanId = id.trim();
       const key = bindingKey(kind, cleanId);
+      const label = normalizeLabel(createOptions.label);
+      // A note typed while authorizing is the person's note from now on. Read
+      // the membership after this await so a concurrent edit is not overwritten
+      // with a snapshot from before the note was persisted.
+      if (label) await writeLabel(key, label);
       const groupId = groups.has(createOptions.groupId) ? createOptions.groupId : DEFAULT_GROUP_ID;
       const existing = bindings.get(key);
-      const label = normalizeLabel(createOptions.label);
-      // A note typed while authorizing is the person's note from now on.
-      if (label) await writeLabel(key, label);
       if (existing) {
-        // Authorizing an already-known principal just moves it.
-        return putBinding({ ...existing, groupId, updatedAt: now() });
+        return putBinding(patchBinding(existing, groupId, {}));
       }
       if (bindings.size >= max) {
         if (!dropped) {
@@ -487,18 +577,14 @@ export function createStore(options: PluginStoreOptions): PluginStore {
       const at = now();
       return putBinding({ kind, id: cleanId, groupId, sessionId: '', createdAt: at, updatedAt: at });
     },
-    async update(key, patch) {
+    async update(key, patch, expected) {
       await loadOnce();
       const existing = bindings.get(key);
-      if (!existing) return undefined;
+      if (!existing || (expected !== undefined && existing !== expected)) return undefined;
       const groupId = patch.groupId !== undefined && groups.has(patch.groupId) ? patch.groupId : existing.groupId;
-      const next: BindingRecord = {
-        ...existing,
-        groupId,
-        ...(patch.sessionId !== undefined ? { sessionId: patch.sessionId.trim() } : {}),
-        updatedAt: now(),
-      };
-      return putBinding(next);
+      // A group move ignores caller-supplied Session ids; only its own remembered
+      // Session is a candidate. The routing layer checks existence before use.
+      return putBinding(patchBinding(existing, groupId, patch));
     },
     async remove(key) {
       await loadOnce();
@@ -510,6 +596,16 @@ export function createStore(options: PluginStoreOptions): PluginStore {
     async setLabel(key, value) {
       await loadOnce();
       return await writeLabel(key, value);
+    },
+    async forgetSession(key, groupId) {
+      await loadOnce();
+      const binding = bindings.get(key);
+      if (!binding?.sessionsByGroup || !Object.hasOwn(binding.sessionsByGroup, groupId)) return;
+      const { sessionsByGroup, ...base } = binding;
+      const remaining = { ...sessionsByGroup };
+      delete remaining[groupId];
+      bindings.set(key, { ...base, ...(Object.keys(remaining).length ? { sessionsByGroup: remaining } : {}) });
+      await persist();
     },
     adminWorkspace: user => adminWorkspaces.get(user) ?? '',
     async setAdminWorkspace(user, path) {

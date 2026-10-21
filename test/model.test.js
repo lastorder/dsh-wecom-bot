@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   advancedSlice, changedOperations, choiceLabel, contextLabel, displayPath, dshDefaultLabel, effortLabel,
   effortsFor, formatTokens, groupModelSummary, modelKey, modelLabel, modelName, parseModelKey, personKey,
-  presetLabel, presetName, presetSummaryLabel, relativeTime, scopeIncludes, setLabel, setSettings, settingsPatch,
+  presetLabel, presetName, presetSummaryLabel, relativeTime, scopeIncludes, setLabel, setMemberModel, setSettings, settingsPatch,
   storedFrom, toggle, toggleScope, updateMember, validateAdvanced, validateCredentials,
 } from '../src/client/model.ts';
 
@@ -38,22 +38,13 @@ test('each Config card validates only its own fields', () => {
   assert.deepEqual(validateCredentials({ botId: 'bot', secret: '' }, true), {}, 'a stored Secret may be kept');
 });
 
-test('the 高级设置 fields are validated against the store bounds the Host enforces', () => {
+test('the 连接与日志 fields are validated against the store bounds the Host enforces', () => {
   const advanced = { wsUrl: '', questionTimeoutMs: 60000, logRetentionDays: 14 };
   assert.deepEqual(validateAdvanced(advanced), {});
   assert.deepEqual(validateAdvanced({ ...advanced, wsUrl: 'wss://openws.example' }), {});
   assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, wsUrl: 'ws://x' })), ['wsUrl']);
   assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, wsUrl: 'wss://u:p@x' })), ['wsUrl'], 'credentials in the URL are refused');
   assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, wsUrl: 'notaurl' })), ['wsUrl']);
-
-  // 1–300 seconds, both bounds included and both sides refused.
-  assert.deepEqual(validateAdvanced({ ...advanced, questionTimeoutMs: 1000 }), {});
-  assert.deepEqual(validateAdvanced({ ...advanced, questionTimeoutMs: 300000 }), {});
-  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: 999 })), ['questionTimeoutMs']);
-  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: 300001 })), ['questionTimeoutMs']);
-  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: 0 })), ['questionTimeoutMs']);
-  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: Number.NaN })), ['questionTimeoutMs']);
-  assert.equal(validateAdvanced({ ...advanced, questionTimeoutMs: 0 }).questionTimeoutMs, '请输入 1–300 秒。');
 
   // 1–365 whole days.
   assert.deepEqual(validateAdvanced({ ...advanced, logRetentionDays: 1 }), {});
@@ -63,11 +54,8 @@ test('the 高级设置 fields are validated against the store bounds the Host en
   assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, logRetentionDays: 1.5 })), ['logRetentionDays'], 'a fraction of a day is not a day');
   assert.equal(validateAdvanced({ ...advanced, logRetentionDays: 0.5 }).logRetentionDays, '请输入 1–365 的整数天数。');
 
-  // Both ranges are reported at once, so one 保存 press names every problem.
-  assert.deepEqual(
-    Object.keys(validateAdvanced({ ...advanced, questionTimeoutMs: 0, logRetentionDays: 0.5 })).sort(),
-    ['logRetentionDays', 'questionTimeoutMs'],
-  );
+  assert.equal('questionTimeoutMs' in validateAdvanced({ ...advanced, questionTimeoutMs: 0 }), false, 'legacy timeout is no longer a UI field');
+
 });
 
 test('a settings patch carries only the fields the operator moved', () => {
@@ -76,24 +64,23 @@ test('a settings patch carries only the fields the operator moved', () => {
     questionTimeoutMs: 60000, remoteApprovals: false, logEnabled: true, logRetentionDays: 14,
   });
   assert.deepEqual(stored, {
-    remoteApprovals: false, questionTimeoutMs: 60000, wsUrl: 'wss://openws.example', logEnabled: true, logRetentionDays: 14,
+    wsUrl: 'wss://openws.example', logEnabled: true, logRetentionDays: 14,
   });
   assert.deepEqual(settingsPatch(stored, stored), {}, 'an untouched card produces no write at all');
-  assert.deepEqual(settingsPatch({ ...stored, questionTimeoutMs: 30000 }, stored), { questionTimeoutMs: 30000 });
-  assert.deepEqual(settingsPatch({ ...stored, remoteApprovals: true, logRetentionDays: 30 }, stored),
-    { remoteApprovals: true, logRetentionDays: 30 });
+  assert.deepEqual(settingsPatch({ ...stored, questionTimeoutMs: 30000, remoteApprovals: false }, stored), {}, 'legacy fields are never written by the UI');
+  assert.deepEqual(settingsPatch({ ...stored, logRetentionDays: 30 }, stored), { logRetentionDays: 30 });
   // The endpoint is written trimmed, and only when it really moved.
   assert.deepEqual(settingsPatch({ ...stored, wsUrl: ' wss://other.example ' }, stored), { wsUrl: 'wss://other.example' });
   assert.deepEqual(settingsPatch({ ...stored, wsUrl: '  wss://openws.example  ' }, stored), {});
 
   // A deployment that has not answered the state route yet still has a draft.
   assert.deepEqual(advancedSlice(undefined), {
-    remoteApprovals: false, questionTimeoutMs: 60000, wsUrl: '', logEnabled: true, logRetentionDays: 14,
+    wsUrl: '', logEnabled: true, logRetentionDays: 14,
   });
 
   // One op carries the whole patch, and it is the store op the page posts.
-  assert.deepEqual(setSettings({ questionTimeoutMs: 30000 }), {
-    op: 'settings.set', patch: { questionTimeoutMs: 30000 },
+  assert.deepEqual(setSettings({ logRetentionDays: 30 }), {
+    op: 'settings.set', patch: { logRetentionDays: 30 },
   });
   assert.deepEqual(setSettings({ adminUserIds: ['root'] }), {
     op: 'settings.set', patch: { adminUserIds: ['root'] },
@@ -144,6 +131,9 @@ test('a group summary names the model it runs, and a member falls back to its We
   assert.equal(groupModelSummary(null, { ...GROUP, effectiveProvider: '', effectiveModel: '' }), 'DSH 默认');
   assert.equal(personKey('user', 'alice'), 'user:alice');
   assert.deepEqual(setLabel('user:alice', '爱丽丝'), { op: 'label.set', key: 'user:alice', label: '爱丽丝' });
+  assert.deepEqual(setMemberModel('user:alice', 'session-1', { provider: 'p', model: 'r', reasoningEffort: 'low' }), {
+    op: 'member.model', key: 'user:alice', sessionId: 'session-1', selection: { provider: 'p', model: 'r', reasoningEffort: 'low' },
+  });
   assert.deepEqual(updateMember('user:alice', { groupId: 'g1' }), {
     op: 'member.update', key: 'user:alice', patch: { groupId: 'g1' },
   });

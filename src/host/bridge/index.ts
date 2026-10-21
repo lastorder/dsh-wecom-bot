@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { WSClient, WsFrame } from '@wecom/aibot-node-sdk';
-import { DEFAULT_GROUP_ID } from '../../shared/protocol.js';
+
 import { createCatalogService, type CatalogService } from '../catalog.js';
 import type { BridgeSettings } from '../config.js';
 import { bindingKey, bindingKeyFor } from '../store.js';
@@ -13,6 +13,7 @@ import { createObservationStore, type ObservationStore } from '../observation.js
 import { createRoundTracker, type Round, type RoundTracker } from '../rounds.js';
 import { createStatusTracker, type StatusTracker } from '../status.js';
 import type { TurnSummary } from '../turns.js';
+import type { InteractionDelivery } from '../interaction-transport.js';
 import type { Router } from '../routing.js';
 import type { SessionOperations } from '../session-ops.js';
 import type { WorkspaceService } from '../workspaces.js';
@@ -22,8 +23,8 @@ import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, extractSess
 import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.js';
 import { createInteractionRegistry } from './interactions.js';
 import {
-  approvalNotice, code, promptFailedNotice, questionNotice, reviewNotice, sessionLabel, title, turnCompleteNotice,
-  unauthorizedText,
+  adminUnassignedText, approvalNotice, code, promptFailedNotice, questionNotice, reviewNotice, routingChangedText,
+  sessionErrorNotice, sessionLabel, title, turnCompleteNotice, unauthorizedText,
 } from './notices.js';
 import { ackSummary, createOutbox, type NoticeKind } from './outbox.js';
 import { createAccessPolicy } from './policy.js';
@@ -61,6 +62,10 @@ export interface BridgeDeps {
   readonly workspaces: WorkspaceService;
   /** Removes secrets from SDK-provided text before it is shown or logged. */
   readonly scrub?: (text: string) => string;
+  /** Runtime consumes Gateway events; do not claim the native Host waterfall. */
+  readonly brokeredInteractions?: boolean;
+  /** A deployment without the shared broker can notify, but must not claim dual-channel decisions. */
+  readonly notificationOnly?: boolean;
 }
 
 export interface Bridge {
@@ -70,8 +75,9 @@ export interface Bridge {
   whenIdle(): Promise<void>;
   /** Notify WeCom about a finished turn; resolves to the notified conversations. */
   onTurnEnd(session: SessionHandle, end: SessionEvent, summary: () => TurnSummary): Promise<readonly string[]>;
-  onQuestion(request: QuestionRequest, next: () => Promise<QuestionAnswer>): Promise<QuestionAnswer>;
-  onApproval(request: ApprovalRequest, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome>;
+  onQuestion(request: QuestionRequest, next: () => Promise<QuestionAnswer>, delivery?: InteractionDelivery): Promise<QuestionAnswer>;
+  onApproval(request: ApprovalRequest, next: () => Promise<ApprovalOutcome>, delivery?: InteractionDelivery): Promise<ApprovalOutcome>;
+  onSessionError(sessionId: string): Promise<readonly string[]>;
   readonly directory: SessionDirectory;
   readonly observations: ObservationStore;
   readonly rounds: RoundTracker;
@@ -85,6 +91,8 @@ export interface Bridge {
    * bridge is reserved for the connection identity (Bot ID, Secret, endpoint).
    */
   updateSettings(settings: BridgeSettings): void;
+  /** Drop administrator switches when a chat is assigned, moved or removed. */
+  resetRouting(chat: string): void;
 }
 
 export function createBridge(deps: BridgeDeps): Bridge {
@@ -112,20 +120,29 @@ export function createBridge(deps: BridgeDeps): Bridge {
   });
   const selection = createSelectionStore();
   const interactions = createInteractionRegistry();
-  const outbox = createOutbox({ client, journal, log, status });
+  const outbox = createOutbox({ client, journal, log, status, allow: async notice => {
+    if (!notice.sessionId) return notice.kind !== 'admin' || policy.isAdmin(notice.chat);
+    const admin = policy.isAdmin(notice.chat);
+    if (notice.interactionNonce && !interactions.isPending(notice.interactionNonce)) return false;
+    // Approval recipients are scoped administrators only, never a bound member.
+    const scopedAdmin = admin && await directory.permitted(notice.sessionId);
+    if (notice.kind === 'approval' || notice.kind === 'approval-request') return scopedAdmin;
+    return router.forSession(notice.sessionId).some(binding => binding.id === notice.chat) || scopedAdmin;
+  } });
   const replay = createReplayGuard();
   const lifetime = new AbortController();
   let closed = false;
   let started = false;
   let displaced = false;
   let generation = 0;
+  const routingGenerations = new Map<string, number>();
 
   const stale = (ticket: number) => closed || ticket !== generation;
   const parts = (message: InboundMessage) => ({ chat: message.chat, user: message.user, chatType: message.chatType });
 
   /** The Session a sender talks to right now, without creating anything. */
   async function currentTarget(message: InboundMessage): Promise<TargetInfo> {
-    if (policy.isAdmin(message.user)) {
+    if (message.chatType === 'single' && policy.isAdmin(message.user)) {
       const choice = selection.get(message.chat, message.user);
       if (choice) {
         if (await directory.permitted(choice)) return { sessionId: choice, switched: true };
@@ -146,11 +163,16 @@ export function createBridge(deps: BridgeDeps): Bridge {
 
   /** The Session a prompt must go to; creates the binding's Session when needed. */
   async function routeTarget(message: InboundMessage): Promise<
-    { readonly ok: true; readonly sessionId: string } | { readonly ok: false; readonly message: string }
+    { readonly ok: true; readonly sessionId: string; valid(): boolean } | { readonly ok: false; readonly message: string }
   > {
     const switched = await currentTarget(message);
-    if (switched.switched && switched.sessionId) return { ok: true, sessionId: switched.sessionId };
-    const routed = await router.route(parts(message), switched.binding?.groupId ?? DEFAULT_GROUP_ID);
+    if (switched.switched && switched.sessionId) {
+      const sessionId = switched.sessionId;
+      return { ok: true, sessionId, valid: () => policy.isAdmin(message.user)
+        && selection.get(message.chat, message.user) === sessionId };
+    }
+    if (!switched.binding) return { ok: false, message: adminUnassignedText() };
+    const routed = await router.route(parts(message), switched.binding.groupId);
     if (!routed.ok || !routed.sessionId) {
       return { ok: false, message: routed.message ?? '无法为你创建专属会话，请稍后重试。' };
     }
@@ -160,7 +182,10 @@ export function createBridge(deps: BridgeDeps): Bridge {
         sessionId: routed.sessionId, binding: routed.binding ? bindingKey(routed.binding.kind, routed.binding.id) : undefined,
       });
     }
-    return { ok: true, sessionId: routed.sessionId };
+    const binding = routed.binding;
+    return { ok: true, sessionId: routed.sessionId,
+      valid: () => Boolean(binding && router.store.get(bindingKey(binding.kind, binding.id)) === binding),
+    };
   }
 
   /**
@@ -172,11 +197,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
   async function recipients(sessionId: string, reason: NoticeKind): Promise<string[]> {
     const chats = new Set<string>();
     for (const binding of router.forSession(sessionId)) chats.add(binding.id);
-    if (settings.adminUserIds.length) {
-      const info = await directory.describe(sessionId);
-      if (info.workspacePath && policy.adminWorkspaceAllowed(info.workspacePath)) {
-        for (const admin of settings.adminUserIds) chats.add(admin);
-      }
+    if (settings.adminUserIds.length && await directory.permitted(sessionId)) {
+      for (const admin of settings.adminUserIds) chats.add(admin);
     }
     const unique = [...chats];
     if (!unique.length) {
@@ -188,8 +210,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
     return unique;
   }
 
-  function notify(chats: readonly string[], text: string, kind: NoticeKind, sessionId?: string): void {
-    for (const chat of chats) outbox.enqueue({ chat, text, kind, ...(sessionId ? { sessionId } : {}) });
+  function notify(chats: readonly string[], text: string, kind: NoticeKind, sessionId?: string, interactionNonce?: string): void {
+    for (const chat of chats) outbox.enqueue({ chat, text, kind, ...(sessionId ? { sessionId } : {}), ...(interactionNonce ? { interactionNonce } : {}) });
   }
 
   async function reply(message: InboundMessage, round: Round, text: string): Promise<void> {
@@ -210,7 +232,11 @@ export function createBridge(deps: BridgeDeps): Bridge {
   }
 
   const commandServices: CommandServices = {
-    policy, directory, selection, interactions, journal,
+    // A getter, not the object: `updateSettings` replaces `policy`, and a
+    // command must see the administrator list the operator just saved. Holding
+    // the original object here made a promotion wait for a plugin restart.
+    get policy() { return policy; },
+    directory, selection, interactions, journal,
     sessionController: ctx.sessionController,
     ops: deps.ops,
     workspaces: deps.workspaces,
@@ -227,8 +253,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
         });
       }
     },
-    stale,
-    ticket: () => generation,
+    stale: ticket => stale(ticket.bridge) || (routingGenerations.get(ticket.chat) ?? 0) !== ticket.routing,
+    ticket: message => ({ bridge: generation, chat: message.chat, routing: routingGenerations.get(message.chat) ?? 0 }),
   };
 
   async function submitPrompt(message: InboundMessage, round: Round, content: string): Promise<void> {
@@ -241,7 +267,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       return;
     }
     const sessionId = target.sessionId;
-    if (interactions.questions.has(sessionId)) {
+    if (interactions.hasQuestion(sessionId)) {
       await reply(message, round, [
         title('⏸', '该会话正在等待回答提问'),
         '',
@@ -260,6 +286,11 @@ export function createBridge(deps: BridgeDeps): Bridge {
       '> 本轮完成后我会在这里通知你；发送 /cancel 可以停止本轮。',
     ].join('\n'));
     if (stale(ticket) || lifetime.signal.aborted || !policy.evaluate(parts(message)).accepted) {
+      rounds.complete(round, 'interrupted');
+      return;
+    }
+    if (!target.valid()) {
+      await reply(message, round, routingChangedText());
       rounds.complete(round, 'interrupted');
       return;
     }
@@ -296,7 +327,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
     if (!message.quotedText) return;
     const hint = extractSessionPointer(message.quotedText);
     if (!hint) return;
-    if (!policy.isAdmin(message.user)) {
+    if (message.chatType !== 'single' || !policy.isAdmin(message.user)) {
       journal.write({
         event: 'wecom.quote', roundId: round.id, chatId: message.chat, userId: message.user,
         hint, outcome: 'not-admin',
@@ -400,17 +431,9 @@ export function createBridge(deps: BridgeDeps): Bridge {
       rounds.complete(round, 'rejected', { response: { reason: decision.reason } });
       return;
     }
+    // Only an explicit page assignment creates membership. Administrative
+    // commands and plain messages must never implicitly add anyone to a group.
     const ticket = generation;
-    try {
-      // Members were created by the page (or implicitly for an administrator);
-      // this only records the implicit ones before routing.
-      await router.ensure(parts(message), decision.groupId);
-    } catch (error) {
-      journal.write({ event: 'binding.error', level: 'warn', chatId: message.chat, userId: message.user, error });
-      await reply(message, round, `${title('⚠️', '成员数量已达上限')}\n\n请在 DSH 插件的配置页清理后再试。`);
-      rounds.complete(round, 'blocked', { response: { reason: 'binding-limit' } });
-      return;
-    }
     if (stale(ticket)) return;
     if (message.msgtype !== 'text') {
       await reply(message, round, `${title('⚠️', '目前只支持文本消息')}\n\n图片、语音、文件暂时无法提交给 DSH。`);
@@ -440,25 +463,41 @@ export function createBridge(deps: BridgeDeps): Bridge {
     await submitPrompt(message, round, content);
   }
 
+  const notifiedEnds = new WeakSet<object>();
   async function onTurnEnd(session: SessionHandle, end: SessionEvent, summary: () => TurnSummary): Promise<readonly string[]> {
-    if (closed) return [];
+    if (closed || notifiedEnds.has(end)) return [];
+    notifiedEnds.add(end);
     const reason = end.data?.reason?.kind ?? 'unknown';
-    // Interrupted or failed turns matter only to someone waiting on them.
-    if (reason !== 'completed' && !rounds.hasPending(session.id)) return [];
-    const chats = await recipients(session.id, 'turn-complete');
+    // A GUI-origin error matters to scoped operators too, with no Bot round.
+    if (reason !== 'completed' && reason !== 'error' && !rounds.hasPending(session.id)) return [];
+    const kind = reason === 'error' ? 'session-error' : 'turn-complete';
+    const chats = await recipients(session.id, kind);
     if (closed || !chats.length) return [];
     const info = await directory.describe(session.id);
     if (closed) return [];
-    notify(chats, turnCompleteNotice(summary(), info), 'turn-complete', session.id);
+    const turn = summary();
+    const safe = turn.failure?.code ? { ...turn, failure: { ...turn.failure, code: scrub(turn.failure.code) } } : turn;
+    notify(chats, turnCompleteNotice(safe, info), kind, session.id);
     return chats;
   }
 
-  async function onQuestion(request: QuestionRequest, next: () => Promise<QuestionAnswer>): Promise<QuestionAnswer> {
-    const sessionId = request.agent?.id;
-    if (closed || !sessionId || !request.questions?.length) return next();
-    const chats = await recipients(sessionId, 'question');
-    if (closed || !chats.length) return next();
+  async function onSessionError(sessionId: string): Promise<readonly string[]> {
+    if (closed) return [];
+    const chats = await recipients(sessionId, 'session-error');
     const info = await directory.describe(sessionId);
+    if (closed) return [];
+    notify(chats, sessionErrorNotice(sessionId, info.title, info.workspace), 'session-error', sessionId);
+    return chats;
+  }
+
+  async function onQuestion(request: QuestionRequest, next: () => Promise<QuestionAnswer>, delivery?: InteractionDelivery): Promise<QuestionAnswer> {
+    const sessionId = request.agent?.id;
+    const ticket = generation;
+    if (closed || !sessionId || !request.questions?.length || request.signal?.aborted) return next();
+    const chats = await recipients(sessionId, 'question');
+    if (stale(ticket) || request.signal?.aborted || !chats.length) return next();
+    const info = await directory.describe(sessionId);
+    if (stale(ticket) || request.signal?.aborted) return next();
     // A text reply cannot represent a plan review or content it never showed:
     // WeCom must not claim these, not even with a free-text answer.
     if (request.questions.some(q => q.intent?.kind === 'plan-review' || Boolean(q.detail))) {
@@ -466,42 +505,49 @@ export function createBridge(deps: BridgeDeps): Bridge {
       notify(chats, reviewNotice(sessionId, info.title), 'review', sessionId);
       return next();
     }
-    const wait = interactions.waitQuestion(sessionId, request.questions, settings.questionTimeoutMs, request.signal);
+    if (deps.notificationOnly) {
+      notify(chats, reviewNotice(sessionId, info.title), 'review', sessionId);
+      return next();
+    }
+    const wait = interactions.waitQuestion(sessionId, request.questions, settings.questionTimeoutMs, request.signal, delivery);
     if (!wait) return next();
     journal.write({ event: 'dsh.question', sessionId, nonce: wait.nonce, questions: request.questions, chats, timeoutMs: settings.questionTimeoutMs });
-    notify(chats, questionNotice(sessionId, info.title, request.questions, wait.nonce, settings.questionTimeoutMs), 'question', sessionId);
+    notify(chats, questionNotice(sessionId, info.title, request.questions, wait.nonce, settings.questionTimeoutMs), 'question', sessionId, wait.nonce);
     const answer = await wait.result;
     journal.write({ event: 'dsh.question.result', sessionId, nonce: wait.nonce, outcome: answer ? 'answered' : 'fallback', ...(answer ? { answer } : {}) });
     return answer ?? next();
   }
 
-  async function onApproval(request: ApprovalRequest, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> {
+  async function onApproval(request: ApprovalRequest, next: () => Promise<ApprovalOutcome>, delivery?: InteractionDelivery): Promise<ApprovalOutcome> {
     const sessionId = request.agent?.id;
     if (closed || !sessionId) return next();
     // A tool call belongs to whoever operates the deployment, not to the person
     // whose message triggered it: every administrator is told, no group member
     // (and no non-administrator private chat) ever is.
-    const admins = [...settings.adminUserIds];
+    const ticket = generation;
+    const info = await directory.describe(sessionId);
+    const permitted = await directory.permitted(sessionId);
+    if (stale(ticket) || request.signal?.aborted) return next();
+    const admins = permitted ? [...settings.adminUserIds] : [];
     if (!admins.length) {
       journal.write({ event: 'dsh.approval', sessionId, toolName: request.toolName, remote: false, chats: [] });
       return next();
     }
-    const info = await directory.describe(sessionId);
     const meta = { sessionId, toolName: request.toolName, ...(request.callId ? { callId: request.callId } : {}) };
-    if (!settings.remoteApprovals) {
+    if (deps.notificationOnly) {
       journal.write({ event: 'dsh.approval', ...meta, remote: false, chats: admins });
       notify(admins, approvalNotice(sessionId, info.title, request), 'approval', sessionId);
       return next();
     }
     const wait = interactions.waitApproval(sessionId, {
       toolName: request.toolName, privateChats: admins, ...(request.callId ? { callId: request.callId } : {}),
-    }, settings.questionTimeoutMs, request.signal);
+    }, settings.questionTimeoutMs, request.signal, delivery);
     if (!wait) {
       notify(admins, approvalNotice(sessionId, info.title, request), 'approval', sessionId);
       return next();
     }
     journal.write({ event: 'dsh.approval', ...meta, remote: true, nonce: wait.nonce, chats: admins, timeoutMs: settings.questionTimeoutMs });
-    notify(admins, approvalNotice(sessionId, info.title, request, wait.nonce, settings.questionTimeoutMs), 'approval-request', sessionId);
+    notify(admins, approvalNotice(sessionId, info.title, request, wait.nonce, settings.questionTimeoutMs), 'approval-request', sessionId, wait.nonce);
     const outcome = await wait.result;
     journal.write({ event: 'dsh.approval.result', ...meta, nonce: wait.nonce, outcome: outcome ?? 'fallback' });
     return outcome ?? next();
@@ -543,8 +589,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
         journal.write({ event: 'bridge.error', level: 'error', stage: 'message', error });
       });
     });
-    const offQuestion = ctx.on('user-questions/request', onQuestion);
-    const offApproval = ctx.on('approval/request', onApproval);
+    const offQuestion = deps.brokeredInteractions ? undefined : ctx.on('user-questions/request', onQuestion);
+    const offApproval = deps.brokeredInteractions ? undefined : ctx.on('approval/request', onApproval);
     const stop = (): void => {
       if (closed) return;
       closed = true;
@@ -568,10 +614,27 @@ export function createBridge(deps: BridgeDeps): Bridge {
   }
 
   return {
-    start, handleFrame, whenIdle, onTurnEnd, onQuestion, onApproval, directory, observations, rounds,
+    start, handleFrame, whenIdle, onTurnEnd, onQuestion, onApproval, onSessionError, directory, observations, rounds,
     updateSettings(next) {
+      const adminsChanged = JSON.stringify(settings.adminUserIds) !== JSON.stringify(next.adminUserIds);
+      const scopeChanged = JSON.stringify(settings.adminWorkspaces) !== JSON.stringify(next.adminWorkspaces);
+      if (adminsChanged || scopeChanged) {
+        // Invalidate operations still awaiting a catalog read or passive ACK;
+        // do not interrupt turns DSH has already accepted or drop the socket.
+        generation++;
+        for (const id of settings.adminUserIds) if (!next.adminUserIds.includes(id)) selection.clearChat(id);
+      }
+      if (adminsChanged || scopeChanged) {
+        // An old nonce must not survive an approval-policy change. Questions
+        // keep their original deadline; a new wait reads the new timeout.
+        for (const pending of interactions.approvals.values()) pending.finish(null);
+      }
       settings = next;
       policy = policyFor();
+    },
+    resetRouting(chat) {
+      routingGenerations.set(chat, (routingGenerations.get(chat) ?? 0) + 1);
+      selection.clearChat(chat);
     },
     notify(chat, text, kind) {
       if (closed) return;

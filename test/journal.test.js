@@ -55,6 +55,24 @@ test('journal appends one JSON object per line to a private daily file and prune
   assert.equal(journal.info().file, file);
 });
 
+test('a retention edit takes effect on the next write, not the next day', async () => {
+  const directory = join(await mkdtemp(join(tmpdir(), 'wecom-journal-')), 'logs');
+  const now = new Date(2026, 9, 16, 12, 0, 0);
+  let keepDays = 14;
+  const journal = createJournal({ directory, enabled: () => true, retentionDays: () => keepDays, now: () => now });
+  journal.write({ event: 'plugin.start' });
+  await journal.flush();
+  await writeFile(join(directory, '2026-10-10.jsonl'), '{}\n');
+  await writeFile(join(directory, '2026-10-15.jsonl'), '{}\n');
+
+  // What ⑤连接与日志 does while the plugin keeps running: the same journal now
+  // keeps one day. Waiting for tomorrow (or a restart) would leave 14-day files.
+  keepDays = 1;
+  journal.write({ event: 'settings.set' });
+  await journal.close();
+  assert.deepEqual((await readdir(directory)).sort(), ['2026-10-16.jsonl']);
+});
+
 test('a disabled journal writes nothing', async () => {
   const directory = join(await mkdtemp(join(tmpdir(), 'wecom-journal-')), 'logs');
   const journal = createJournal({ directory, enabled: () => false, retentionDays: () => 14 });

@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 import { useBridgeState, useFormSnapshot } from '../hooks.ts';
 import { storedFrom } from '../model.ts';
-import type { ClientRemote, ConfigFormScope, FormSnapshot } from '../types.ts';
+import type { ClientRemote, ConfigFormScope, FormSnapshot, OpenSession } from '../types.ts';
 import { AdminCard } from './AdminCard.tsx';
 import { AdvancedCard } from './AdvancedCard.tsx';
 import { CredentialsCard } from './CredentialsCard.tsx';
@@ -14,12 +14,12 @@ import { StatusHeader } from './StatusHeader.tsx';
  *
  * One card still writes the plugin Config: 连接 saves the Bot ID (and writes the
  * Secret to the credential store). Groups, members, notes and the settings the
- * 管理员 / 高级设置 cards edit all land in the plugin's own store through
+ * 管理员 / 连接与日志 cards edit all land in the plugin's own store through
  * `POST /api/wecom-bot/store`, applied live — groups and members immediately as
  * 编辑 is confirmed, the settings on every 保存 or click. There is no page-wide
  * 保存配置 — nothing waits at the bottom of the page.
  */
-export function SettingsPage({ scope, remote }: { scope: ConfigFormScope; remote?: ClientRemote }) {
+export function SettingsPage({ scope, remote, onOpenSession }: { scope: ConfigFormScope; remote?: ClientRemote; onOpenSession?: OpenSession }) {
   const snapshot = useFormSnapshot(scope);
   if (snapshot.status !== 'ready') {
     return (
@@ -28,10 +28,10 @@ export function SettingsPage({ scope, remote }: { scope: ConfigFormScope; remote
       </div>
     );
   }
-  return <SettingsEditor snapshot={snapshot} scope={scope} remote={remote} />;
+  return <SettingsEditor snapshot={snapshot} scope={scope} remote={remote} onOpenSession={onOpenSession} />;
 }
 
-function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; scope: ConfigFormScope; remote?: ClientRemote }) {
+function SettingsEditor({ snapshot, scope, remote, onOpenSession }: { snapshot: FormSnapshot; scope: ConfigFormScope; remote?: ClientRemote; onOpenSession?: OpenSession }) {
   // The revision identifies the stored value; the snapshot object may be recreated.
   const base = useMemo(() => storedFrom(snapshot.value), [snapshot.revision]);
   const bridge = useBridgeState();
@@ -55,6 +55,7 @@ function SettingsEditor({ snapshot, scope, remote }: { snapshot: FormSnapshot; s
         refreshing={bridge.refreshing}
         onRefresh={() => bridge.refresh(true)}
         onChanged={onChanged}
+        onOpenSession={onOpenSession}
       />
       <RejectedCard state={state} disabled={!writable} onChanged={onChanged} />
       <AdminCard state={state} disabled={!writable} onChanged={onChanged} />
