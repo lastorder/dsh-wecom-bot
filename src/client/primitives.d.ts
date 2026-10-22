@@ -2,6 +2,8 @@
  * Types for the DSH Web shell's shared UI primitives. The shell provides
  * this module to every client plugin at runtime (it is never bundled);
  * only the components and props this page uses are declared here.
+ * Icons are read through `components/icons.tsx`, which tolerates a missing
+ * export, so a renamed icon degrades to nothing instead of crashing the slot.
  */
 declare module '@deepseek-ai/dsh-client-ui-primitives' {
   import type {
@@ -19,6 +21,7 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   export interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
     icon?: ReactNode;
   }
+  /** `className` lands on the wrapper span; the rest on the `<input>`. */
   export const Input: ForwardRefExoticComponent<InputProps & RefAttributes<HTMLInputElement>>;
 
   export function Switch(props: {
@@ -57,27 +60,6 @@ declare module '@deepseek-ai/dsh-client-ui-primitives' {
   export function Modal(props: ModalProps): ReactElement | null;
 
   export interface IconProps { size?: number; className?: string }
-  export function IconSearchOutlineRegular(props: IconProps): ReactElement;
-  export function IconRefreshOutlineRegular(props: IconProps): ReactElement;
-  export function IconChevronRightOutlineRegular(props: IconProps): ReactElement;
-  export function IconFolderCloseRegular(props: IconProps): ReactElement;
-  export function IconPinFillRegular(props: IconProps): ReactElement;
-  export function IconUserOutlineRegular(props: IconProps): ReactElement;
-  export function IconUsersOutlineRegular(props: IconProps): ReactElement;
-  export function IconEditOutlineRegular(props: IconProps): ReactElement;
-  export function IconAgentPresetOutlineRegular(props: IconProps): ReactElement;
-  export function IconContextInjectionOutlineRegular(props: IconProps): ReactElement;
-  export function IconShieldOutlineRegular(props: IconProps): ReactElement;
-  export function IconWarningTriangleOutlineRegular(props: IconProps): ReactElement;
-  export function IconCheckCircleOutlineRegular(props: IconProps): ReactElement;
-  export function IconCopyOutlineRegular(props: IconProps): ReactElement;
-  export function IconTrashOutlineRegular(props: IconProps): ReactElement;
-  export function IconChevronDownOutlineRegular(props: IconProps): ReactElement;
-  export function IconLoadingOutlineRegular(props: IconProps): ReactElement;
-  export function IconPlusOutlineRegular(props: IconProps): ReactElement;
-  export function IconCloseOutlineRegular(props: IconProps): ReactElement;
-  export function IconSettingsOutlineRegular(props: IconProps): ReactElement;
-  export function IconDataOutlineRegular(props: IconProps): ReactElement;
 
   export function writeClipboard(text: string): Promise<boolean>;
 }

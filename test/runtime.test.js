@@ -142,7 +142,7 @@ test('runtime connects with the resolved Secret, never logs it, and serves the f
   assert.deepEqual(state.models.choices.map(choice => choice.model), ['deepseek-chat', 'deepseek-reasoner']);
   assert.deepEqual(state.admins, [{ id: 'root', label: '', displayName: 'root' }]);
   assert.deepEqual(state.workspaces.map(workspace => workspace.title).sort(), ['Alpha', '企业微信'].sort());
-  assert.deepEqual(state.notices, ['已配置管理员但未限定 Workspace：管理员会收到所有 Workspace 的会话通知。']);
+  assert.deepEqual(state.notices, [], 'an unscoped administrator is the documented default, not a problem');
   await runtime.stop();
 }));
 
@@ -304,7 +304,7 @@ test('a refused sender shows up in the state view until the page authorizes it',
   const before = await runtime.state();
   assert.deepEqual(before.rejected.map(row => [row.key, row.text]), [['user:mallory', '我是新来的']]);
   assert.deepEqual(before.routing.groups[0].members, []);
-  assert.deepEqual(before.notices, ['还没有任何成员：给机器人发消息的人会出现在「未授权用户」里，把它加入分组即可授权。']);
+  assert.deepEqual(before.notices, [], 'an empty group set is said by the page itself, not as a warning');
 
   await runtime.applyOps([{ op: 'member.add', groupId: 'default', kind: 'user', id: 'mallory', label: '市场部小李' }]);
   const after = await runtime.state();

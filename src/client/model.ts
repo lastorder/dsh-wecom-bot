@@ -13,7 +13,7 @@ import {
 } from '../shared/protocol.ts';
 import type { FormOperation, StoredConfig } from './types.ts';
 
-/** The 连接 card's fallback: the Config holds the Bot ID and the Secret reference. */
+/** The 连接 section's fallback: the Config holds the Bot ID and the Secret reference. */
 export const DEFAULTS: StoredConfig = {
   botId: '',
   secretEnv: DEFAULT_SECRET_REF,
@@ -56,7 +56,7 @@ export type FieldErrors = Partial<Record<
   string
 >>;
 
-/** The 连接 card's own validation: both credentials, nothing else. */
+/** The 连接 editor's own validation: both credentials, nothing else. */
 export function validateCredentials(draft: { readonly botId: string; readonly secret: string }, secretConfigured: boolean): FieldErrors {
   const errors: FieldErrors = {};
   if (!draft.botId.trim()) errors.botId = '请填写企业微信 Bot ID。';
@@ -65,7 +65,7 @@ export function validateCredentials(draft: { readonly botId: string; readonly se
 }
 
 /**
- * The 连接与日志 card's own validation: a safe endpoint and retention range, read
+ * The 高级设置 section's own validation: a safe endpoint and retention range, read
  * from the store's settings block rather than from the Config.
  *
  * The Host refuses the same values out loud (`validateSettingsPatch`), and these
@@ -92,7 +92,7 @@ export function validateAdvanced(
   return errors;
 }
 
-/** The store's settings block as the 连接与日志 card seeds its draft. */
+/** The store's settings block as the 高级设置 section seeds its draft. */
 export function advancedSlice(settings: StoreSettings | undefined): Pick<
   StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays'
 > {
@@ -196,12 +196,12 @@ export function effortLabel(
   return choice?.efforts?.find(item => item.id === effort)?.name ?? effort;
 }
 
-/** Names of the presets DSH ships without publishing one. */
+/** Names DSH's own preset picker gives the presets it ships without a published name. */
 const BUILT_IN_PRESET_NAME: Record<string, string> = {
-  standard: '标准',
-  ptc: 'PTC',
-  minimal: '极简',
-  cordis: 'Cordis',
+  standard: '标准模式',
+  ptc: 'PTC 模式',
+  minimal: '极简模式',
+  cordis: '创造模式',
 };
 
 export function presetName(preset: AgentPresetOption): string {
@@ -230,6 +230,13 @@ export function presetSummaryLabel(presets: PresetCatalogView | null | undefined
   return fallback ? `${presetName(fallback)}（DSH 默认）` : 'DSH 默认';
 }
 
+/** How full a context window is, for the member table's meter: amber from 70%, red from 90%. */
+export function contextLevel(context: ContextUsage | undefined): 'ok' | 'warn' | 'high' | undefined {
+  if (!context?.window) return undefined;
+  const ratio = context.used / context.window;
+  return ratio >= 0.9 ? 'high' : ratio >= 0.7 ? 'warn' : 'ok';
+}
+
 /** Compact token count: 812, 12.3k, 200k, 1.2M. */
 export function formatTokens(value: number): string {
   if (value < 1000) return String(Math.round(value));
@@ -254,7 +261,7 @@ export function dshDefaultLabel(catalog: ModelCatalogView | null | undefined): s
 
 /* ------------------------- groups and members ------------------------- */
 
-export const BINDING_KIND_LABEL: Record<BindingKind, string> = { user: '个人', group: '群聊' };
+export const BINDING_KIND_LABEL: Record<BindingKind, string> = { user: '个人（单聊）', group: '群聊' };
 
 export const SESSION_STATE_LABEL: Record<GroupMemberView['sessionState'], string> = {
   bound: '已绑定',
@@ -264,6 +271,47 @@ export const SESSION_STATE_LABEL: Record<GroupMemberView['sessionState'], string
   archived: '会话已归档',
   unusable: '会话不可用',
 };
+
+/** A usable Session's live state, as the member table's pill names it. */
+export function sessionActivity(member: Pick<GroupMemberView, 'sessionState' | 'sessionRunning'>): string {
+  if (member.sessionRunning) return '运行中';
+  return member.sessionState === 'blank' ? '待使用' : '空闲';
+}
+
+export interface GroupFact {
+  readonly key: string;
+  readonly label: string;
+  readonly value: string;
+  readonly title?: string;
+}
+
+/**
+ * The facts a group owns, in the order its overview names them. A model or
+ * preset the group leaves to DSH is marked so with the name it resolves to,
+ * and an unset effort reads 默认 instead of vanishing.
+ */
+export function groupFacts(
+  group: GroupView,
+  catalog: ModelCatalogView | null | undefined,
+  presets: PresetCatalogView | null | undefined,
+): GroupFact[] {
+  const effort = group.reasoningEffort
+    ? (effortLabel(catalog, {
+      provider: group.effectiveProvider, model: group.effectiveModel, reasoningEffort: group.reasoningEffort,
+    }) || group.reasoningEffort)
+    : '默认';
+  return [
+    { key: 'workspace', label: '工作区', value: group.workspaceTitle, title: group.workspacePath },
+    { key: 'model', label: '模型', value: groupModelSummary(catalog, group) },
+    { key: 'effort', label: '推理等级', value: effort },
+    { key: 'preset', label: 'Agent 预设', value: presetSummaryLabel(presets, group.preset) },
+  ];
+}
+
+/** The administrator notification scope in a few words; `[]` is every Workspace. */
+export function scopeSummary(stored: readonly string[], total: number): string {
+  return stored.length === 0 ? '全部工作区' : `${stored.length} / ${Math.max(total, stored.length)} 个工作区`;
+}
 
 /** `user:<userid>` / `group:<chatid>`: the key a note is stored under. */
 export function personKey(kind: BindingKind, id: string): string {
@@ -302,8 +350,8 @@ export function relativeTime(at: number | undefined, now = Date.now()): string {
  * Write the store's settings block.
  *
  * One op carries a whole patch, because `settings.set` merges field by field on
- * the Host: the ④管理员 card sends the array it just changed, the ⑤连接与日志 card
- * sends the knobs it just moved, and neither has to read the other's fields back
+ * the Host: 管理员 sends the array it just changed, 高级设置 sends the knobs it
+ * just moved, and neither has to read the other's fields back
  * first.
  */
 export function setSettings(patch: StoreSettingsPatch): StoreOp {

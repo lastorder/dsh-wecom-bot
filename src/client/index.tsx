@@ -8,7 +8,8 @@
  *
  * Module map (src/client):
  *   index.tsx        registration on the `plugins.bundle.config` slot
- *   components/      page sections (status, access banner, pickers, advanced)
+ *   components/      one file per section (连接, 待授权, 用户分组 + 成员表, 管理员,
+ *                    高级设置), ui.tsx building blocks, icons.tsx DSH icons by name
  *   hooks.ts         Config form, credential and state-route bindings
  *   model.ts         pure draft/diff/validation/filter helpers
  *   api.ts           state route and credential Remote helpers

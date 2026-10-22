@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   advancedSlice, changedOperations, choiceLabel, contextLabel, displayPath, dshDefaultLabel, effortLabel,
   effortsFor, formatTokens, groupModelSummary, modelKey, modelLabel, modelName, parseModelKey, personKey,
-  presetLabel, presetName, presetSummaryLabel, relativeTime, scopeIncludes, setLabel, setMemberModel, setSettings, settingsPatch,
+  contextLevel, groupFacts, presetLabel, presetName, presetSummaryLabel, relativeTime, scopeSummary, sessionActivity, scopeIncludes, setLabel, setMemberModel, setSettings, settingsPatch,
   storedFrom, toggle, toggleScope, updateMember, validateAdvanced, validateCredentials,
 } from '../src/client/model.ts';
 
@@ -149,19 +149,19 @@ const PRESETS = {
 };
 
 test('presets are named by their published name, the shipped one, or the id', () => {
-  assert.equal(presetName(PRESETS.presets[0]), '标准', 'a shipped preset has no name of its own');
+  assert.equal(presetName(PRESETS.presets[0]), '标准模式', 'a shipped preset is named the way DSH names it');
   assert.equal(presetName(PRESETS.presets[1]), 'PTC 模式');
   assert.equal(presetName(PRESETS.presets[2]), 'custom', 'an unknown id names itself');
   assert.equal(presetLabel(PRESETS, 'ptc'), 'PTC 模式');
   assert.equal(presetLabel(PRESETS, 'gone'), 'gone');
-  assert.equal(presetLabel(PRESETS, ''), '跟随 DSH 默认（标准）');
+  assert.equal(presetLabel(PRESETS, ''), '跟随 DSH 默认（标准模式）');
   assert.equal(presetLabel(null, ''), '跟随 DSH 默认');
   assert.equal(presetLabel({ presets: [], fetchedAt: 1 }, ''), '跟随 DSH 默认');
 });
 
 test('a summary names the preset a group actually runs, marking the DSH default', () => {
   assert.equal(presetSummaryLabel(PRESETS, 'ptc'), 'PTC 模式');
-  assert.equal(presetSummaryLabel(PRESETS, ''), '标准（DSH 默认）', 'the fallback is named, not spelled out');
+  assert.equal(presetSummaryLabel(PRESETS, ''), '标准模式（DSH 默认）', 'the fallback is named, not spelled out');
   assert.equal(presetSummaryLabel(PRESETS, 'gone'), 'gone');
   assert.equal(presetSummaryLabel(null, ''), 'DSH 默认');
   assert.equal(presetSummaryLabel({ presets: [], fetchedAt: 1 }, ''), 'DSH 默认');
@@ -200,4 +200,21 @@ test('list helpers toggle and shorten paths and times', () => {
   assert.equal(displayPath('/srv/app'), '/srv/app');
   assert.equal(relativeTime(Date.now() - 10), '刚刚');
   assert.equal(relativeTime(undefined), '');
+});
+
+test('a group overview names its four facts, and the table its live state', () => {
+  const facts = groupFacts({ ...GROUP, reasoningEffort: 'low', effectiveReasoningEffort: 'low', preset: '' }, CATALOG, PRESETS);
+  assert.deepEqual(facts.map(fact => [fact.label, fact.value]), [
+    ['工作区', '企业微信'], ['模型', 'Reasoner'], ['推理等级', '低'], ['Agent 预设', '标准模式（DSH 默认）'],
+  ]);
+  assert.equal(groupFacts(GROUP, CATALOG, PRESETS)[2].value, '默认', 'an unset effort reads 默认 instead of vanishing');
+  assert.equal(sessionActivity({ sessionState: 'bound', sessionRunning: true }), '运行中');
+  assert.equal(sessionActivity({ sessionState: 'bound', sessionRunning: false }), '空闲');
+  assert.equal(sessionActivity({ sessionState: 'blank', sessionRunning: false }), '待使用');
+  assert.equal(contextLevel({ used: 10, window: 100 }), 'ok');
+  assert.equal(contextLevel({ used: 70, window: 100 }), 'warn');
+  assert.equal(contextLevel({ used: 95, window: 100 }), 'high');
+  assert.equal(contextLevel({ used: 95 }), undefined);
+  assert.equal(scopeSummary([], 3), '全部工作区');
+  assert.equal(scopeSummary(['/a'], 3), '1 / 3 个工作区');
 });

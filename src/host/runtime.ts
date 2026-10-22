@@ -172,7 +172,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       // Surface the SDK's terminal conditions on the settings page.
       if (/^Authentication failed/.test(text)) status.set('error', `认证失败：${text.replace(/^Authentication failed:\s*/, '').slice(0, 160)}`);
       else if (/^Max auth failure attempts/.test(text)) status.set('error', '多次认证失败，已停止重试；请检查 Bot ID 与 Secret');
-      else if (/^Max reconnect attempts/.test(text)) status.set('offline', '多次重连失败，已停止重连；在「① 连接」里重新保存一次即可再连');
+      else if (/^Max reconnect attempts/.test(text)) status.set('offline', '多次重连失败，已停止重连；在插件页的「连接」里重新保存一次即可再连');
     };
     return { debug() {}, info: forward('info'), warn: forward('warn'), error: forward('error') };
   }
@@ -464,12 +464,8 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       }
       const defaultGroup = routing?.groups.find(group => group.isDefault);
       if (defaultGroup?.workspaceError) notices.push(`默认分组的 Workspace 不可用：${defaultGroup.workspaceError}`);
-      if (settings.adminUserIds.length && !settings.adminWorkspaces.length) {
-        notices.push('已配置管理员但未限定 Workspace：管理员会收到所有 Workspace 的会话通知。');
-      }
-      if (routing && !routing.total) {
-        notices.push('还没有任何成员：给机器人发消息的人会出现在「未授权用户」里，把它加入分组即可授权。');
-      }
+      // Default states (every Workspace in scope, no member yet) are not
+      // problems: the page's own sections say them where they apply.
       if (routing?.full) notices.push('成员数量已达上限，新成员不会被记录；请在下方清理。');
       return {
         version: STORE_VERSION,
