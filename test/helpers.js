@@ -228,7 +228,7 @@ export function fakeHost({
         const row = rows.find(item => item.sessionId === request.sessionId);
         if (row) {
           row.projections ??= { values: {} };
-          row.projections.values.modelSelection = { lastUsed: null, next: selected };
+          row.projections.values.modelSelection = { lastUsed: null, pending: selected };
         }
         return { selected };
       },

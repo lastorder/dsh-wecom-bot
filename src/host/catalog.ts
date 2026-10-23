@@ -49,10 +49,16 @@ export function sessionTitle(summary: SessionSummary | undefined): string | null
   return typeof title === 'string' && title.trim() ? title.trim() : null;
 }
 
-/** Model of the Session's latest request, from the `modelSelection` projection. */
+/**
+ * The model the Session runs now, from the `modelSelection` projection.
+ *
+ * A model chosen but not yet used is `pending` (older builds: `next`) and wins
+ * over `lastUsed`: it is what the next request will run, and it is what the
+ * DSH GUI shows right after a switch.
+ */
 export function sessionModel(summary: SessionSummary | undefined): ModelSelection | undefined {
   const value = summary?.projections?.values?.modelSelection as
-    | { readonly lastUsed?: unknown; readonly next?: unknown }
+    | { readonly lastUsed?: unknown; readonly pending?: unknown; readonly next?: unknown }
     | undefined;
   const pick = (raw: unknown): ModelSelection | undefined => {
     if (!raw || typeof raw !== 'object') return undefined;
@@ -63,7 +69,7 @@ export function sessionModel(summary: SessionSummary | undefined): ModelSelectio
     const reasoningEffort = typeof record.reasoningEffort === 'string' ? record.reasoningEffort.trim() : '';
     return { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) };
   };
-  return pick(value?.lastUsed) ?? pick(value?.next);
+  return pick(value?.pending) ?? pick(value?.next) ?? pick(value?.lastUsed);
 }
 
 /** Agent preset the Session runs, from the `agentPreset` projection. */

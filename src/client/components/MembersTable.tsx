@@ -67,7 +67,9 @@ function MemberRow({ member, group, groups, state, disabled, onChanged, onOpenSe
   const write = useStoreApply(onChanged);
   const blocked = disabled || Boolean(write.busy);
   const catalog = state?.models;
-  const selection = member.sessionSelection ?? member.sessionModel;
+  // The live Session model wins: the Session may have been switched in DSH
+  // itself, which the stored selection (set from this page) never hears about.
+  const selection = member.sessionModel ?? member.sessionSelection;
   const efforts = effortsFor(catalog, selection?.provider ?? '', selection?.model ?? '');
   const usable = Boolean(member.sessionId) && (member.sessionState === 'bound' || member.sessionState === 'blank');
   const name = member.displayName;

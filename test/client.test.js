@@ -147,7 +147,7 @@ function mount({ stored = {}, secretConfigured = true, state = STATE, postError,
         // page polls, rather than the write's own answer.
         for (const op of ops) {
           if (op.op === 'settings.set') current = { ...current, settings: { ...current.settings, ...op.patch } };
-          if (op.op === 'member.model') current = { ...current, routing: { ...current.routing, groups: current.routing.groups.map(group => ({ ...group, members: group.members.map(member => member.key === op.key ? { ...member, sessionSelection: op.selection } : member) })) } };
+          if (op.op === 'member.model') current = { ...current, routing: { ...current.routing, groups: current.routing.groups.map(group => ({ ...group, members: group.members.map(member => member.key === op.key ? { ...member, sessionSelection: op.selection, sessionModel: op.selection } : member) })) } };
         }
         body = { ok: true, routing: current.routing, settings: current.settings, ...(added ? { createdGroupId: 'g-new' } : {}) };
       }

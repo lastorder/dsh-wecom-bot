@@ -65,6 +65,20 @@ test('a Session row carries the preset it runs and how full its context is', () 
   assert.equal(catalog.get('s5').preset, undefined, 'a null preset is the default, not a name');
 });
 
+test('a Session row shows the model it runs now: a pending switch wins over the last used one', () => {
+  const a = { provider: 'p', model: 'old' };
+  const b = { provider: 'p', model: 'new', reasoningEffort: 'high' };
+  const items = [
+    row('s1', 1, { projections: { values: { title: 'A', modelSelection: { lastUsed: a, pending: b } } } }),
+    row('s2', 2, { projections: { values: { title: 'B', modelSelection: { lastUsed: b, pending: null } } } }),
+    row('s3', 3, { projections: { values: { title: 'C', modelSelection: { lastUsed: null, next: b } } } }),
+  ];
+  const catalog = buildCatalog(items, undefined, 1);
+  assert.deepEqual(catalog.get('s1').model, b);
+  assert.deepEqual(catalog.get('s2').model, b);
+  assert.deepEqual(catalog.get('s3').model, b);
+});
+
 test('without a Workspace registry the catalog groups by working directory', () => {
   const catalog = buildCatalog([row('x', 1, { cwd: '/p/old' }), row('y', 9, { cwd: '/p/new' }), row('z', 5)], undefined);
   assert.deepEqual(catalog.groups.map(g => [g.kind, g.title]), [['directory', 'new'], ['directory', 'old'], ['ungrouped', '未分组']]);
