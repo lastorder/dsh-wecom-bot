@@ -1,19 +1,20 @@
 import { useEffect, useState } from 'react';
 import { Button, Input, Tag } from '@deepseek-ai/dsh-client-ui-primitives';
-import type { BridgeStateView, GroupView, StoreOp, WorkspaceOption } from '../../shared/protocol.ts';
+import type { BridgeStateView, GroupView, PermissionMode, StoreOp, WorkspaceOption } from '../../shared/protocol.ts';
 import { useStoreApply } from '../hooks.ts';
 import {
   addGroup, choiceLabel, deleteGroup, displayPath, dshDefaultLabel, effortsFor, groupFacts, modelKey,
-  parseModelKey, presetLabel, presetName, updateGroup,
+  parseModelKey, PERMISSION_HINT, presetLabel, presetName, updateGroup,
 } from '../model.ts';
 import type { OpenSession } from '../types.ts';
 import { IconChevronRight, IconPlus, IconRefresh, IconTrash } from './icons.tsx';
 import { MembersTable } from './MembersTable.tsx';
-import { ConfirmDialog, Editor, Facts, Field, FormFooter, Notice, Section, Select } from './ui.tsx';
+import { ConfirmDialog, Editor, Facts, Field, FormFooter, Notice, PermissionSelect, Section, Select } from './ui.tsx';
 
 /**
- * 用户分组. A group owns a Workspace, a model (with its reasoning effort) and an
- * Agent preset; its members are the WeCom users and group chats that may talk
+ * 用户分组. A group owns a Workspace, a model (with its reasoning effort), an
+ * Agent preset and the Workspace access its Sessions run with (read-only unless
+ * granted; Full access needs the same acknowledgement DSH asks for); its members are the WeCom users and group chats that may talk
  * to the Bot, each with its own Session. The built-in 「默认分组」 cannot be
  * deleted.
  *
@@ -51,7 +52,7 @@ export function GroupsSection({ state, error, disabled, refreshing, onRefresh, o
       id="groups"
       title="用户分组"
       count={view ? `${view.groups.length} 个分组 · ${view.total} 位成员` : undefined}
-      description="分组决定成员使用的工作区、模型与 Agent 预设；每位成员（单聊的人或一个群聊）各有自己的会话。"
+      description="分组决定成员使用的工作区、模型、Agent 预设与工作区权限；每位成员（单聊的人或一个群聊）各有自己的会话。"
       actions={<>
         <Button variant="ghost" size="sm" icon={<IconRefresh size={14} />} disabled={refreshing} title="重新读取会话状态" onClick={onRefresh}>
           {refreshing ? '刷新中' : '刷新'}
@@ -95,12 +96,14 @@ interface GroupDraft {
   model: string;
   effort: string;
   preset: string;
+  permission: PermissionMode;
 }
 
 function draftOf(group: GroupView): GroupDraft {
   return {
     name: group.name, workspace: group.workspace, provider: group.provider,
     model: group.model, effort: group.reasoningEffort ?? '', preset: group.preset,
+    permission: group.permission,
   };
 }
 
@@ -108,6 +111,7 @@ function draftOf(group: GroupView): GroupDraft {
 function patchOf(group: GroupView, draft: GroupDraft): Parameters<typeof updateGroup>[1] {
   const patch: {
     name?: string; workspace?: string; provider?: string; model?: string; reasoningEffort?: string; preset?: string;
+    permission?: PermissionMode;
   } = {};
   const name = draft.name.trim();
   if (name && name !== group.name) patch.name = name;
@@ -121,6 +125,7 @@ function patchOf(group: GroupView, draft: GroupDraft): Parameters<typeof updateG
     patch.reasoningEffort = draft.effort;
   }
   if (draft.preset !== group.preset) patch.preset = draft.preset;
+  if (draft.permission !== group.permission) patch.permission = draft.permission;
   return patch;
 }
 
@@ -240,6 +245,18 @@ function GroupCard({ group, state, startEditing, startOpen, disabled, onApply, o
                   <option key={preset.id} value={preset.id}>{presetName(preset)}{preset.broken ? '（加载失败）' : ''}</option>
                 ))}
               </Select>
+            </Field>
+            <Field
+              label="工作区权限"
+              hint={draft.permission !== group.permission
+                ? `保存后立即应用到本组已有的会话，包括单独改过权限的成员；新会话也按此创建。${PERMISSION_HINT[draft.permission]}`
+                : PERMISSION_HINT[group.permission]}
+            >
+              <PermissionSelect
+                value={draft.permission} catalog={state?.permissions} scope="本组的所有会话" disabled={disabled}
+                label={`${group.name} 的工作区权限`}
+                onChange={permission => update({ permission })}
+              />
             </Field>
           </div>
           <FormFooter start={!group.isDefault && (

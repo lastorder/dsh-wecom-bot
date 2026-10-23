@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  addGroup, addMember, archiveMember, deleteGroup, removeMember, setLabel, setMemberModel, setSettings, updateGroup, updateMember,
+  addGroup, addMember, archiveMember, deleteGroup, removeMember, setLabel, setMemberModel, setMemberPermission, setSettings, updateGroup, updateMember,
 } from '../src/client/model.ts';
 import { isStoreOp } from '../dist/host/routes.js';
 
@@ -18,6 +18,7 @@ const SAMPLE_OPS = [
   updateGroup('default', { workspace: '/srv/app' }),
   updateGroup('default', { provider: 'p', model: 'm', reasoningEffort: 'high' }),
   updateGroup('default', { preset: 'ptc' }),
+  updateGroup('default', { permission: 'danger-full-access' }),
   deleteGroup('g1'),
   addMember('default', 'user', 'alice'),
   addMember('default', 'group', 'chat-1', '研发群'),
@@ -26,6 +27,7 @@ const SAMPLE_OPS = [
   removeMember('user:alice'),
   archiveMember('user:alice'),
   setMemberModel('user:alice', 's1', { provider: 'p', model: 'm' }),
+  setMemberPermission('user:alice', 's1', 'workspace-write'),
   setLabel('user:alice', '爱丽丝'),
   setLabel('user:alice', ''),
   setSettings({ adminUserIds: ['alice'] }),
@@ -43,7 +45,7 @@ test('every op variant is represented, so a new one cannot slip through', () => 
   const covered = new Set(SAMPLE_OPS.map(op => op.op));
   assert.deepEqual([...covered].sort(), [
     'group.add', 'group.delete', 'group.update', 'label.set', 'member.add', 'member.archive',
-    'member.model', 'member.remove', 'member.update', 'settings.set',
+    'member.model', 'member.permission', 'member.remove', 'member.update', 'settings.set',
   ]);
 });
 
@@ -55,6 +57,7 @@ test('junk is rejected before it reaches the store', () => {
     { op: 'member.add', groupId: 'default', kind: 'nonsense', id: 'x' },
     { op: 'member.add', kind: 'user', id: 'x' },
     { op: 'member.update', key: 'user:alice' },
+    { op: 'member.permission', key: 'user:alice', sessionId: 's1' }, { op: 'member.permission', key: 'user:alice', permission: 'read-only' },
     { op: 'member.remove' }, { op: 'member.archive' }, { op: 'member.archive', key: 7 },
     { op: 'label.set', key: 'user:alice' }, { op: 'label.set', label: 'x' },
     { op: 'label.set', key: 'user:alice', label: 42 },

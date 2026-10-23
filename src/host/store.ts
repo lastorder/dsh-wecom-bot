@@ -1,10 +1,11 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
-  DEFAULT_GROUP_ID, DEFAULT_GROUP_NAME, DEFAULT_LOG_RETENTION_DAYS, DEFAULT_QUESTION_TIMEOUT_MS,
+  DEFAULT_GROUP_ID, DEFAULT_GROUP_NAME, DEFAULT_LOG_RETENTION_DAYS, DEFAULT_PERMISSION_MODE,
+  DEFAULT_QUESTION_TIMEOUT_MS, isPermissionMode,
   MAX_BINDINGS, MAX_GROUPS, MAX_LABEL_CHARS, MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS,
   MIN_LOG_RETENTION_DAYS, MIN_QUESTION_TIMEOUT_MS, STORE_FILE, STORE_VERSION,
-  type BindingKind, type BindingRecord, type GroupRecord, type GroupSessionMemory, type ModelSelection,
+  type BindingKind, type BindingRecord, type GroupRecord, type GroupSessionMemory, type ModelSelection, type PermissionMode,
   type StoreSettings, type StoreSettingsPatch,
 } from '../shared/protocol.js';
 import { uniqueIds } from './config.js';
@@ -18,7 +19,8 @@ import { uniqueIds } from './config.js';
  *
  *   - the settings block: administrators, the notification scope, the WebSocket
  *     endpoint, the question timeout, remote approvals and the journal;
- *   - the user groups (each owning a Workspace, a model and an agent preset);
+ *   - the user groups (each owning a Workspace, a model, an agent preset and its
+ *     Workspace access — read-only unless the operator grants more);
  *   - the members assigned to them — one row authorizes one WeCom principal, by
  *     userid for a private chat or by chatid for a group, and records the DSH
  *     Session that principal talks to;
@@ -53,6 +55,7 @@ export interface GroupPatch {
   readonly model?: string;
   readonly reasoningEffort?: string;
   readonly preset?: string;
+  readonly permission?: PermissionMode;
 }
 
 export interface BindingPatch {
@@ -249,6 +252,8 @@ function normalizeGroup(value: unknown): GroupRecord | undefined {
     model: text(record.model),
     reasoningEffort: text(record.reasoningEffort),
     preset: text(record.preset),
+    // A missing or unknown value is the safe one, never "whatever DSH defaults to".
+    permission: isPermissionMode(record.permission) ? record.permission : DEFAULT_PERMISSION_MODE,
     createdAt: stamp(record.createdAt),
     updatedAt: stamp(record.updatedAt),
   };
@@ -317,7 +322,8 @@ export function createStore(options: PluginStoreOptions): PluginStore {
     const at = now();
     const created: GroupRecord = {
       id: DEFAULT_GROUP_ID, name: DEFAULT_GROUP_NAME, workspace: '',
-      provider: '', model: '', reasoningEffort: '', preset: '', createdAt: at, updatedAt: at,
+      provider: '', model: '', reasoningEffort: '', preset: '', permission: DEFAULT_PERMISSION_MODE,
+      createdAt: at, updatedAt: at,
     };
     groups.set(DEFAULT_GROUP_ID, created);
     return created;
@@ -518,7 +524,7 @@ export function createStore(options: PluginStoreOptions): PluginStore {
       const id = `g${at.toString(36)}${Math.random().toString(36).slice(2, 6)}`;
       return putGroup({
         id, name: label, workspace: '', provider: '', model: '', reasoningEffort: '', preset: '',
-        createdAt: at, updatedAt: at,
+        permission: DEFAULT_PERMISSION_MODE, createdAt: at, updatedAt: at,
       });
     },
     async updateGroup(id, patch) {
@@ -534,6 +540,7 @@ export function createStore(options: PluginStoreOptions): PluginStore {
         ...(patch.model !== undefined ? { model: patch.model.trim() } : {}),
         ...(patch.reasoningEffort !== undefined ? { reasoningEffort: patch.reasoningEffort.trim() } : {}),
         ...(patch.preset !== undefined ? { preset: patch.preset.trim() } : {}),
+        ...(patch.permission !== undefined && isPermissionMode(patch.permission) ? { permission: patch.permission } : {}),
         updatedAt: now(),
       };
       if (next.workspace !== existing.workspace) forgetGroupHistory(id);

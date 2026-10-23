@@ -116,7 +116,7 @@ test('model helpers round-trip the provider/model key and label the default', ()
 
 const GROUP = {
   id: 'g1', name: '朋友', isDefault: false, workspace: '', workspaceTitle: '企业微信',
-  workspacePath: '/home/.dsh/wecom-bot/workspace', provider: 'p', model: 'r',
+  workspacePath: '/home/.dsh/wecom-bot/workspace', provider: 'p', model: 'r', permission: 'read-only',
   effectiveProvider: 'p', effectiveModel: 'r', members: [], memberCount: 0, messages: 0,
 };
 const MEMBER = {
@@ -202,11 +202,13 @@ test('list helpers toggle and shorten paths and times', () => {
   assert.equal(relativeTime(undefined), '');
 });
 
-test('a group overview names its four facts, and the table its live state', () => {
+test('a group overview names its five facts, and the table its live state', () => {
   const facts = groupFacts({ ...GROUP, reasoningEffort: 'low', effectiveReasoningEffort: 'low', preset: '' }, CATALOG, PRESETS);
   assert.deepEqual(facts.map(fact => [fact.label, fact.value]), [
     ['工作区', '企业微信'], ['模型', 'Reasoner'], ['推理等级', '低'], ['Agent 预设', '标准模式（DSH 默认）'],
+    ['工作区权限', '仅可查看'],
   ]);
+  assert.equal(groupFacts({ ...GROUP, permission: 'danger-full-access' }, CATALOG, PRESETS)[4].value, '完全权限');
   assert.equal(groupFacts(GROUP, CATALOG, PRESETS)[2].value, '默认', 'an unset effort reads 默认 instead of vanishing');
   assert.equal(sessionActivity({ sessionState: 'bound', sessionRunning: true }), '运行中');
   assert.equal(sessionActivity({ sessionState: 'bound', sessionRunning: false }), '空闲');

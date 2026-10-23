@@ -128,10 +128,13 @@ export function fakeWorkspaceRegistry(workspaces = [], archived = [], pinned = [
  * only `agentPresets.serviceFor(agent, 'compaction')` / `agent.ctx.get(...)`
  * reach it; `'host'` keeps the older host-plane layout, and `'none'` mounts no
  * backend at all. `sessionTitle: false` omits DSH's title service.
+ * `permissionPresets: false` omits DSH's permission-preset service; `permissionError`
+ * makes its `set` throw. Every `set(session, name)` lands in `ctx.permissionSets`
+ * and, like DSH's `permissions` projection, in the Session row.
  */
 export function fakeHost({
   sessions, workspaces, archived = [], pinned = [], defaultModel, compactResult, compactError,
-  compactScope = 'preset', sessionTitle = true,
+  compactScope = 'preset', sessionTitle = true, permissionPresets = true, permissionError,
 } = {}) {
   const handlers = new Map();
   const prompts = [];
@@ -164,6 +167,19 @@ export function fakeHost({
       return compacted;
     },
   };
+  const permissionSets = [];
+  const permissionService = {
+    catalog: () => ({ options: [{ value: 'read-only' }, { value: 'workspace-write' }, { value: 'danger-full-access' }] }),
+    set(session, name) {
+      if (permissionError) throw permissionError;
+      permissionSets.push({ sessionId: session.id, name });
+      const row = rows.find(item => item.sessionId === session.id);
+      if (row) {
+        row.projections ??= { values: {} };
+        row.projections.values.permissions = { currentValue: name };
+      }
+    },
+  };
   const titleService = {
     rename(session, title) { renames.push({ sessionId: session.id, title }); return { title }; },
   };
@@ -177,13 +193,14 @@ export function fakeHost({
   };
   const ctx = {
     handlers, prompts, cancels, listCalls, creates, selections, defaultSaves, compactions,
-    agentResolutions, renames, liveAgents, liveSessions, rows, registry, defaultModelService,
+    agentResolutions, renames, permissionSets, liveAgents, liveSessions, rows, registry, defaultModelService,
     on(name, fn) { handlers.set(name, fn); return () => { if (handlers.get(name) === fn) handlers.delete(name); }; },
     get(name) {
       if (name === 'workspaceRegistry') return registry;
       if (name === 'agentDefaultModel') return defaultModelService;
       if (name === 'agents') return { get: id => liveAgents.get(id) };
       if (name === 'sessions') return sessionStore;
+      if (name === 'permissionPresets') return permissionPresets ? permissionService : undefined;
       if (name === 'sessionTitle') return sessionTitle === false ? undefined : titleService;
       if (name === 'agentPresets') {
         // The real registry reads a service out of the agent's mounted preset.

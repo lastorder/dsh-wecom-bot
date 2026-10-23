@@ -48,6 +48,23 @@ export const MIN_LOG_RETENTION_DAYS = 1;
 export const MAX_LOG_RETENTION_DAYS = 365;
 export const DEFAULT_LOG_RETENTION_DAYS = 14;
 
+/**
+ * How far a Session may reach into the Workspace — DSH's own permission
+ * presets (the sandbox mode they bundle), under the names DSH's Session picker
+ * shows: `read-only` 仅可查看, `workspace-write` 工作区内修改,
+ * `danger-full-access` 完全权限 (Full access).
+ */
+export const PERMISSION_MODES = ['read-only', 'workspace-write', 'danger-full-access'] as const;
+export type PermissionMode = typeof PERMISSION_MODES[number];
+/** What a group starts with: a remote chat must be granted writes, never inherit them. */
+export const DEFAULT_PERMISSION_MODE: PermissionMode = 'read-only';
+/** The one mode that needs an explicit risk acknowledgement, as in DSH. */
+export const FULL_ACCESS_MODE: PermissionMode = 'danger-full-access';
+
+export function isPermissionMode(value: unknown): value is PermissionMode {
+  return typeof value === 'string' && (PERMISSION_MODES as readonly string[]).includes(value);
+}
+
 export type ConnectionPhase =
   | 'unconfigured' // Bot ID or Secret missing
   | 'invalid' // configuration rejected before connecting
@@ -105,6 +122,8 @@ export interface CatalogSession {
   readonly model?: ModelSelection;
   /** Agent preset the Session runs, when DSH reports one. */
   readonly preset?: string;
+  /** Permission preset the Session runs under (`custom`, `auto` possible), when DSH reports one. */
+  readonly permission?: string;
   readonly context?: ContextUsage;
   /** Latest turn number the Session log shows, when DSH reports one. */
   readonly turns?: number;
@@ -204,6 +223,8 @@ export interface GroupRecord {
   readonly reasoningEffort: string;
   /** Agent preset for Sessions created in this group; empty means the DSH default. */
   readonly preset: string;
+  /** Workspace access for every Session in this group. */
+  readonly permission: PermissionMode;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -259,6 +280,8 @@ export interface GroupMemberView {
   readonly sessionSelection?: ModelSelection;
   /** Agent preset the bound Session runs, when DSH reports one. */
   readonly sessionPreset?: string;
+  /** Permission preset the bound Session runs under right now, when DSH reports one. */
+  readonly sessionPermission?: string;
   /** Context occupancy of the bound Session, when DSH reports one. */
   readonly sessionContext?: ContextUsage;
   readonly messages: number;
@@ -283,6 +306,8 @@ export interface GroupView {
   readonly reasoningEffort?: string;
   /** Agent preset new Sessions in this group start with; empty means the DSH default. */
   readonly preset: string;
+  /** Workspace access every Session in this group runs with. */
+  readonly permission: PermissionMode;
   /** Model a new Session in this group would use. */
   readonly effectiveProvider: string;
   readonly effectiveModel: string;
@@ -363,7 +388,16 @@ export interface PresetCatalogView {
   readonly fetchedAt: number;
 }
 
-export interface WorkspaceOption {  readonly id: string;
+/** What DSH's permission presets offer, so the page can say when it cannot apply a mode. */
+export interface PermissionCatalogView {
+  /** False when the deployment has no permission-preset service: modes cannot be applied. */
+  readonly available: boolean;
+  /** The modes DSH currently lets a Session select. */
+  readonly modes: readonly PermissionMode[];
+}
+
+export interface WorkspaceOption {
+  readonly id: string;
   readonly path: string;
   readonly title: string;
   /** The plugin's own Workspace under the DSH home. */
@@ -398,6 +432,7 @@ export type StoreOp =
       readonly model?: string;
       readonly reasoningEffort?: string;
       readonly preset?: string;
+      readonly permission?: PermissionMode;
     };
   }
   | { readonly op: 'group.delete'; readonly id: string }
@@ -422,6 +457,16 @@ export type StoreOp =
     readonly key: string;
     readonly sessionId: string;
     readonly selection: ModelSelection;
+  }
+  | {
+    /**
+     * Set the Workspace access of this exact bound Session. Applied to the DSH
+     * Session itself, which is where the value lives: it is not stored here.
+     */
+    readonly op: 'member.permission';
+    readonly key: string;
+    readonly sessionId: string;
+    readonly permission: PermissionMode;
   }
   | { readonly op: 'member.remove'; readonly key: string }
   /**
@@ -470,6 +515,7 @@ export interface BridgeStateView {
   readonly modelsError?: string;
   readonly presets: PresetCatalogView | null;
   readonly presetsError?: string;
+  readonly permissions: PermissionCatalogView;
   readonly workspaces: readonly WorkspaceOption[];
   /** The store's settings block, as the ④管理员 / ⑤连接与日志 cards edit it. */
   readonly settings: StoreSettings;

@@ -57,20 +57,20 @@ const STATE = {
       {
         id: 'default', name: '默认分组', isDefault: true,
         workspace: '', workspaceTitle: '企业微信', workspacePath: '/Users/me/.dsh/wecom-bot/workspace',
-        provider: '', model: '', effectiveProvider: '', effectiveModel: '', preset: '',
+        provider: '', model: '', effectiveProvider: '', effectiveModel: '', preset: '', permission: 'read-only',
         memberCount: 1, messages: 2, lastSeenAt: Date.now(),
         members: [{
           key: 'user:alice', kind: 'user', id: 'alice', label: '爱丽丝', displayName: '爱丽丝', admin: false,
           sessionId: 'session-aaaa', sessionTitle: '企业微信插件开发', sessionState: 'bound', sessionRunning: true,
           sessionModel: { provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high' },
-          sessionPreset: 'standard', sessionContext: { used: 12_300, window: 200_000 },
+          sessionPreset: 'standard', sessionPermission: 'read-only', sessionContext: { used: 12_300, window: 200_000 },
           messages: 2, lastSeenAt: Date.now(), createdAt: 1,
         }],
       },
       {
         id: 'g1', name: '朋友', isDefault: false,
         workspace: '/Users/me/dsh-wecom-bot', workspaceTitle: 'dsh-wecom-bot', workspacePath: '/Users/me/dsh-wecom-bot',
-        provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high', preset: 'ptc',
+        provider: 'deepseek-account', model: 'deepseek-reasoner', reasoningEffort: 'high', preset: 'ptc', permission: 'workspace-write',
         effectiveProvider: 'deepseek-account', effectiveModel: 'deepseek-reasoner', effectiveReasoningEffort: 'high',
         memberCount: 1, messages: 0,
         members: [{
@@ -89,6 +89,7 @@ const STATE = {
     dshDefault: { provider: 'deepseek-account', model: 'deepseek-chat' },
     failures: [], fetchedAt: Date.now(),
   },
+  permissions: { available: true, modes: ['read-only', 'workspace-write', 'danger-full-access'] },
   presets: {
     presets: [
       { id: 'standard', isDefault: true },
@@ -296,13 +297,14 @@ test('a collapsed group names its Workspace, model, effort and preset', async ()
   );
   const [following, set] = lines.map(factsOf);
   // The same facts in the same order in every group.
-  assert.deepEqual(Object.keys(following), ['工作区', '模型', '推理等级', 'Agent 预设']);
+  assert.deepEqual(Object.keys(following), ['工作区', '模型', '推理等级', 'Agent 预设', '工作区权限']);
   // The default group follows DSH; the overview names what that resolves to.
   assert.deepEqual(following, {
     工作区: '企业微信',
     模型: 'DeepSeek Chat（DSH 默认）',
     推理等级: '默认',
     'Agent 预设': '标准模式（DSH 默认）',
+    工作区权限: '仅可查看',
   });
   // A group that sets them shows the values it sets, each under its own label.
   assert.deepEqual(set, {
@@ -310,6 +312,7 @@ test('a collapsed group names its Workspace, model, effort and preset', async ()
     模型: 'DeepSeek Reasoner',
     推理等级: '高',
     'Agent 预设': 'PTC 模式',
+    工作区权限: '工作区内修改',
   });
   renderer.unmount();
 });
@@ -342,10 +345,10 @@ test('member facts align under semantic table headers and the bound Session open
   const root = renderer.root;
   await act(async () => { buttonWithText(root, '默认分组').props.onClick(); });
   const table = root.find(node => node.type === 'table' && node.props['aria-label'] === '默认分组 的成员');
-  assert.deepEqual(table.findAllByType('th').map(text), ['成员', '会话', '模型', '推理等级', '上下文']);
+  assert.deepEqual(table.findAllByType('th').map(text), ['成员', '会话', '模型', '推理等级', '工作区权限', '上下文']);
   assert.ok(table.findAllByType('th').every(node => node.props.scope === 'col'));
   const row = table.find(node => node.type === 'tr' && node.props.className === 'wcb-member-row');
-  assert.equal(row.findAllByType('td').length, 5);
+  assert.equal(row.findAllByType('td').length, 6);
   const line = text(row);
   assert.ok(line.includes('爱丽丝'), 'the name');
   assert.equal(line.includes('企业微信插件开发'), false, 'the full Session title no longer stretches the row');
@@ -780,6 +783,114 @@ test('a group is edited as one draft: 编辑 becomes 保存 and posts a single p
   await act(async () => { byLabel(root, 'alice 的备注').props.onBlur({ target: { value: '同事小张' } }); });
   await flush();
   assert.deepEqual(posts(harness).at(-1), [{ op: 'label.set', key: 'user:alice', label: '同事小张' }]);
+  renderer.unmount();
+});
+
+const checkbox = root => root.find(node => node.type === 'input' && node.props.type === 'checkbox');
+const riskOpen = root => root.findAll(node => node.type === 'div' && node.props.role === 'dialog' && node.props['aria-label'] === '确认启用完全权限？').length > 0;
+
+test('a group edits its Workspace access; Full access needs the warning acknowledged first', async () => {
+  const harness = mount({ stored: { botId: 'bot' } });
+  const renderer = await render(harness);
+  const root = renderer.root;
+  await act(async () => { buttonByLabel(root, '编辑 默认分组').props.onClick(); });
+  const select = () => byLabel(root, '默认分组 的工作区权限');
+  assert.equal(select().props.value, 'read-only', 'a group starts read-only');
+  assert.deepEqual(select().findAllByType('option').map(text), ['仅可查看', '工作区内修改', '完全权限']);
+  assert.equal(buttonByText(root, '保存').props.disabled, true, 'nothing changed yet');
+
+  // Full access: the warning opens, and neither picking nor cancelling changes the draft.
+  await act(async () => { select().props.onChange({ target: { value: 'danger-full-access' } }); });
+  assert.equal(riskOpen(root), true, 'the warning opens');
+  assert.ok(text(root).includes('我已了解风险，并愿意继续'));
+  assert.equal(buttonByText(root, '启用完全权限').props.disabled, true, 'it needs the box ticked');
+  await act(async () => { buttonByText(root, '取消').props.onClick(); });
+  assert.equal(riskOpen(root), false);
+  assert.equal(select().props.value, 'read-only', 'cancelling keeps the mode');
+  assert.equal(buttonByText(root, '保存').props.disabled, true);
+
+  await act(async () => { select().props.onChange({ target: { value: 'danger-full-access' } }); });
+  await act(async () => { checkbox(root).props.onChange({ target: { checked: true } }); });
+  assert.equal(buttonByText(root, '启用完全权限').props.disabled, false);
+  await act(async () => { buttonByText(root, '启用完全权限').props.onClick(); });
+  assert.equal(select().props.value, 'danger-full-access');
+  assert.equal(posts(harness).length, 0, 'nothing is written until 保存');
+  await act(async () => { await buttonByText(root, '保存').props.onClick(); });
+  await flush();
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'group.update', id: 'default', patch: { permission: 'danger-full-access' } }]);
+  renderer.unmount();
+});
+
+test('a lesser mode needs no acknowledgement', async () => {
+  const harness = mount({ stored: { botId: 'bot' } });
+  const renderer = await render(harness);
+  const root = renderer.root;
+  await act(async () => { buttonByLabel(root, '编辑 默认分组').props.onClick(); });
+  await act(async () => { byLabel(root, '默认分组 的工作区权限').props.onChange({ target: { value: 'workspace-write' } }); });
+  assert.equal(riskOpen(root), false);
+  await act(async () => { await buttonByText(root, '保存').props.onClick(); });
+  await flush();
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'group.update', id: 'default', patch: { permission: 'workspace-write' } }]);
+  renderer.unmount();
+});
+
+test('a member Session shows its own Workspace access in the table and its dialog, and edits only that Session', async () => {
+  const harness = mount();
+  const renderer = await render(harness);
+  const root = renderer.root;
+  await act(async () => { buttonWithText(root, '默认分组').props.onClick(); });
+  const cell = () => byLabel(root, 'alice 当前会话的工作区权限');
+  assert.equal(cell().props.value, 'read-only', 'the table shows what the Session runs under');
+
+  await act(async () => { cell().props.onChange({ target: { value: 'workspace-write' } }); });
+  await flush();
+  assert.deepEqual(posts(harness), [[{ op: 'member.permission', key: 'user:alice', sessionId: 'session-aaaa', permission: 'workspace-write' }]]);
+
+  // Full access from the table: the warning first, then the write.
+  await act(async () => { cell().props.onChange({ target: { value: 'danger-full-access' } }); });
+  assert.equal(posts(harness).length, 1, 'nothing is written before the acknowledgement');
+  assert.equal(riskOpen(root), true);
+  await act(async () => { checkbox(root).props.onChange({ target: { checked: true } }); });
+  await act(async () => { buttonByText(root, '启用完全权限').props.onClick(); });
+  await flush();
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'member.permission', key: 'user:alice', sessionId: 'session-aaaa', permission: 'danger-full-access' }]);
+  renderer.unmount();
+});
+
+test('the Session dialog shows and edits the access; Full access replaces the dialog instead of stacking', async () => {
+  const harness = mount();
+  const renderer = await render(harness);
+  const root = renderer.root;
+  await act(async () => { buttonWithText(root, '默认分组').props.onClick(); });
+  await act(async () => { root.find(node => node.type === 'button' && node.props['aria-label'] === '查看 爱丽丝 的会话详情').props.onClick(); });
+  const dialog = () => root.find(node => node.type === 'div' && node.props['aria-label'] === '爱丽丝 的会话');
+  assert.ok(text(dialog()).includes('工作区权限'));
+  const select = () => byLabel(dialog(), 'alice 的会话工作区权限');
+  assert.equal(select().props.value, 'read-only');
+
+  await act(async () => { select().props.onChange({ target: { value: 'danger-full-access' } }); });
+  assert.equal(riskOpen(root), true);
+  assert.equal(root.findAll(node => node.type === 'div' && node.props['aria-label'] === '爱丽丝 的会话').length, 0, 'one modal at a time');
+  assert.equal(posts(harness).length, 0);
+  await act(async () => { buttonByText(root, '取消').props.onClick(); });
+  assert.equal(riskOpen(root), false);
+  assert.ok(dialog(), 'cancelling returns to the Session details');
+  await act(async () => { select().props.onChange({ target: { value: 'danger-full-access' } }); });
+  await act(async () => { checkbox(root).props.onChange({ target: { checked: true } }); });
+  await act(async () => { buttonByText(root, '启用完全权限').props.onClick(); });
+  await flush();
+  assert.deepEqual(posts(harness).at(-1), [{ op: 'member.permission', key: 'user:alice', sessionId: 'session-aaaa', permission: 'danger-full-access' }]);
+  renderer.unmount();
+});
+
+test('without DSH permission presets the access is shown but cannot be changed', async () => {
+  const harness = mount({ state: { ...STATE, permissions: { available: false, modes: [] } } });
+  const renderer = await render(harness);
+  const root = renderer.root;
+  await act(async () => { buttonWithText(root, '默认分组').props.onClick(); });
+  const cell = byLabel(root, 'alice 当前会话的工作区权限');
+  assert.equal(cell.props.disabled, true);
+  assert.equal(cell.props.value, 'read-only');
   renderer.unmount();
 });
 

@@ -162,7 +162,7 @@ export const STYLES = /* css */ `
 /* Members: a semantic table, left-aligned like every DSH list. */
 .wcb-table-scroll { overflow-x: auto; margin: 0 -16px; padding: 0 16px; }
 .wcb-table-scroll:focus-visible { outline: var(--wcb-focus-width) solid var(--wcb-focus); outline-offset: -2px; }
-.wcb-table { width: 100%; min-width: 660px; border-collapse: collapse; table-layout: fixed; }
+.wcb-table { width: 100%; min-width: 790px; border-collapse: collapse; table-layout: fixed; }
 .wcb-table th, .wcb-table td { padding: 8px 12px 8px 0; text-align: left; vertical-align: middle; white-space: nowrap; }
 .wcb-table th:last-child, .wcb-table td:last-child { padding-right: 0; }
 .wcb-table th { border-top: .5px solid var(--wcb-line); color: var(--wcb-text-3); font-size: 12px; font-weight: 400; line-height: 18px; }
@@ -170,6 +170,7 @@ export const STYLES = /* css */ `
 .wcb-col-session { width: 108px; }
 .wcb-col-model { width: 200px; }
 .wcb-col-effort { width: 108px; }
+.wcb-col-access { width: 128px; }
 .wcb-col-context { width: 140px; }
 .wcb-member-error td { white-space: normal; }
 
@@ -282,6 +283,8 @@ export const STYLES = /* css */ `
 .wcb-facts dt { flex: none; color: var(--wcb-text-2); }
 .wcb-facts dd { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; margin: 0; text-align: end; overflow-wrap: anywhere; }
 .wcb-facts dd .wcb-input, .wcb-facts dd .wcb-select { width: 220px; max-width: 100%; }
+.wcb-check { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.wcb-check input { flex: none; width: 14px; height: 14px; margin: 3px 0 0; accent-color: var(--wcb-focus); cursor: pointer; }
 .wcb-confirm-text { margin: 0; color: var(--wcb-text-2); }
 .wcb-footer-start { margin-right: auto; }
 span.wcb-footer-start { display: inline-flex; align-items: center; gap: 8px; }

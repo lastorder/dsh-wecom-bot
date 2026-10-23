@@ -17,6 +17,7 @@ import type {
 import { pluginHome, type Journal } from './journal.js';
 import { createModelService, type ModelService } from './models.js';
 import { createObservationStore, type ObservationStore } from './observation.js';
+import { createPermissionService, type PermissionService } from './permissions.js';
 import { createPresetService, type PresetService } from './presets.js';
 import { createRoundTracker, type RoundTracker } from './rounds.js';
 import { createRouter, type Router } from './routing.js';
@@ -118,11 +119,13 @@ export function createRuntime(options: RuntimeOptions): Runtime {
   const presets: PresetService = createPresetService({
     registry: () => ctx.get?.('agentPresets') as AgentPresetRegistry | undefined,
   });
+  const permissions: PermissionService = createPermissionService({ ctx, sessionController: ctx.sessionController, journal });
   const titles = createSessionTitler({ ctx, journal });
   const sessionOps: SessionOperations = createSessionOperations({ ctx, workspaces, catalogs, titles, journal });
   const provisioner: SessionProvisioner = createSessionProvisioner({
     sessionController: ctx.sessionController,
     models,
+    permissions,
     workspaces,
     catalogs,
     bindings: store,
@@ -332,7 +335,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     if (options.refresh) catalogs.invalidate();
     const policy = createAccessPolicy(readBridgeSettings(config, store.settings()), { memberOf: () => undefined });
     return await buildRoutingView({
-      store, provisioner, workspaces, models, presets, catalogs, observations, router,
+      store, provisioner, workspaces, models, presets, permissions, catalogs, observations, router,
       ops: sessionOps,
       isAdmin: user => policy.isAdmin(user),
     });
@@ -378,7 +381,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       const before = new Map(store.bindings().map(binding => [`${binding.kind}:${binding.id}`, binding]));
       const policy = createAccessPolicy(readBridgeSettings(config, store.settings()), { memberOf: () => undefined });
       const result = await applyStoreOps({
-        store, provisioner, workspaces, models, presets, router, catalogs, observations, log,
+        store, provisioner, workspaces, models, presets, permissions, router, catalogs, observations, log,
         ops: sessionOps,
         isAdmin: user => policy.isAdmin(user),
       }, ops);
@@ -483,6 +486,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
         ...(modelsError ? { modelsError } : {}),
         presets: presetView,
         ...(presetsError ? { presetsError } : {}),
+        permissions: permissions.catalog(),
         workspaces: workspaces.list(),
         settings: stored,
         admins: settings.adminUserIds.map(id => {

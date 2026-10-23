@@ -62,6 +62,8 @@ export function isStoreOp(value: unknown): value is StoreOp {
     case 'member.model':
       return typeof record.key === 'string' && typeof record.sessionId === 'string'
         && Boolean(record.selection) && typeof record.selection === 'object' && !Array.isArray(record.selection);
+    case 'member.permission':
+      return typeof record.key === 'string' && typeof record.sessionId === 'string' && typeof record.permission === 'string';
     case 'member.remove':
     case 'member.archive':
       return typeof record.key === 'string';

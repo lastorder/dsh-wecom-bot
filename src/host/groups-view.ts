@@ -1,5 +1,5 @@
 import {
-  DEFAULT_GROUP_ID, MAX_GROUPS, MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS,
+  DEFAULT_GROUP_ID, isPermissionMode, MAX_GROUPS, MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS,
   MIN_QUESTION_TIMEOUT_MS, type BindingKind, type BindingRecord, type BindingSessionState, type ContextUsage,
   type GroupMemberView, type GroupRecord, type GroupView, type ModelSelection, type StoreOp,
   type RoutingView, type StoreSettingsPatch,
@@ -7,6 +7,7 @@ import {
 import { isTrustedWsUrl, uniqueIds } from './config.js';
 import type { CatalogService } from './catalog.js';
 import type { ModelService } from './models.js';
+import type { PermissionService } from './permissions.js';
 import type { PresetService } from './presets.js';
 import type { ObservationStore } from './observation.js';
 import { bindingKey, normalizeLabel, parseBindingKey, validBindingId, type PluginStore } from './store.js';
@@ -30,10 +31,12 @@ export interface RoutingViewDeps {
   readonly workspaces: WorkspaceService;
   readonly models: ModelService;
   readonly presets?: PresetService;
+  /** Workspace access: absent in a deployment without DSH's permission presets. */
+  readonly permissions?: PermissionService;
   readonly catalogs: CatalogService;
   readonly observations?: ObservationStore;
   readonly isAdmin: (user: string) => boolean;
-  readonly router?: Pick<Router, 'reapplyGroup'>;
+  readonly router?: Pick<Router, 'reapplyGroup' | 'reapplyPermission'>;
   /** Archiving a Session needs a DSH service the view itself does not hold. */
   readonly ops?: { archive(sessionId: string): Promise<void> };
   readonly log?: { warn(message: string): void };
@@ -46,6 +49,7 @@ async function memberView(deps: RoutingViewDeps, binding: BindingRecord): Promis
   let sessionRunning = false;
   let sessionModel: ModelSelection | undefined;
   let sessionPreset: string | undefined;
+  let sessionPermission: string | undefined;
   let sessionContext: ContextUsage | undefined;
   if (binding.sessionId) {
     const described = await deps.provisioner.describe(binding.sessionId);
@@ -54,6 +58,7 @@ async function memberView(deps: RoutingViewDeps, binding: BindingRecord): Promis
     sessionRunning = described.running;
     sessionModel = described.model;
     sessionPreset = described.preset;
+    sessionPermission = described.permission;
     sessionContext = described.context;
   }
   const seen = deps.observations?.stats(binding.kind, binding.id);
@@ -73,6 +78,7 @@ async function memberView(deps: RoutingViewDeps, binding: BindingRecord): Promis
     ...(sessionModel ? { sessionModel } : {}),
     ...(binding.sessionId && sessionSelection ? { sessionSelection } : {}),
     ...(sessionPreset ? { sessionPreset } : {}),
+    ...(sessionPermission ? { sessionPermission } : {}),
     ...(sessionContext ? { sessionContext } : {}),
     messages: seen?.messages ?? 0,
     ...(seen?.lastSeenAt ? { lastSeenAt: seen.lastSeenAt } : {}),
@@ -118,6 +124,7 @@ async function groupView(deps: RoutingViewDeps, group: GroupRecord): Promise<Gro
     model: group.model,
     ...(group.reasoningEffort ? { reasoningEffort: group.reasoningEffort } : {}),
     preset: group.preset,
+    permission: group.permission,
     ...(desired
       ? {
         effectiveProvider: desired.provider,
@@ -307,6 +314,7 @@ export async function applyStoreOps(deps: RoutingViewDeps, ops: readonly StoreOp
     }
   }
   const modelChanged = new Set<string>();
+  const permissionChanged = new Set<string>();
   for (const op of ops.slice(0, 200)) {
     try {
       switch (op.op) {
@@ -328,10 +336,18 @@ export async function applyStoreOps(deps: RoutingViewDeps, ops: readonly StoreOp
           const group = deps.store.group(op.id);
           if (!group) { failure = `分组不存在：${op.id}`; break; }
           const patch = op.patch;
-          const fields = new Set(['name', 'workspace', 'provider', 'model', 'reasoningEffort', 'preset']);
+          const fields = new Set(['name', 'workspace', 'provider', 'model', 'reasoningEffort', 'preset', 'permission']);
           if (Object.entries(patch).some(([key, value]) => !fields.has(key) || typeof value !== 'string')) {
-            failure = '分组设置只能包含名称、Workspace、模型、effort 与 preset，且必须是文本。';
+            failure = '分组设置只能包含名称、Workspace、模型、effort、preset 与工作区权限，且必须是文本。';
             break;
+          }
+          if (patch.permission !== undefined) {
+            if (!isPermissionMode(patch.permission)) { failure = '工作区权限只能是「仅可查看」「工作区内修改」或「完全权限」。'; break; }
+            const offered = deps.permissions?.catalog();
+            if (offered?.available && !offered.modes.includes(patch.permission)) {
+              failure = 'DSH 当前没有这个权限模式，请重新选择。';
+              break;
+            }
           }
           if (patch.workspace !== undefined && patch.workspace.trim()) {
             try {
@@ -363,6 +379,7 @@ export async function applyStoreOps(deps: RoutingViewDeps, ops: readonly StoreOp
           if (patch.provider !== undefined || patch.model !== undefined || patch.reasoningEffort !== undefined) {
             modelChanged.add(op.id);
           }
+          if (updated.permission !== group.permission) permissionChanged.add(op.id);
           // A group's Workspace defines where its Sessions live, so moving the
           // group must not leave members pointing at Sessions of the old one.
           if (updated.workspace !== group.workspace) {
@@ -461,6 +478,28 @@ export async function applyStoreOps(deps: RoutingViewDeps, ops: readonly StoreOp
           changed++;
           break;
         }
+        case 'member.permission': {
+          const parsed = parseBindingKey(op.key);
+          if (!parsed) { failure = `无法识别的成员 id：${op.key}`; break; }
+          const key = bindingKey(parsed.kind, parsed.id);
+          const binding = deps.store.get(key);
+          if (!binding || !binding.sessionId || binding.sessionId !== op.sessionId) {
+            failure = '成员的绑定会话已变化，请刷新后重试。'; break;
+          }
+          if (!isPermissionMode(op.permission)) {
+            failure = '工作区权限只能是「仅可查看」「工作区内修改」或「完全权限」。'; break;
+          }
+          const offered = deps.permissions?.catalog();
+          if (!offered?.available) { failure = '当前 DSH 没有权限模式服务，无法修改会话的工作区权限。'; break; }
+          if (!offered.modes.includes(op.permission)) { failure = 'DSH 当前没有这个权限模式，请重新选择。'; break; }
+          const described = await deps.provisioner.describe(binding.sessionId);
+          if (!['bound', 'blank'].includes(described.state)) { failure = '绑定的会话已不可用，请先发送消息创建新会话。'; break; }
+          if (deps.store.get(key) !== binding) { failure = '成员的绑定会话已变化，请刷新后重试。'; break; }
+          await deps.provisioner.applyPermission(binding.sessionId, op.permission);
+          deps.catalogs.invalidate?.();
+          changed++;
+          break;
+        }
         case 'label.set': {
           const parsed = parseBindingKey(op.key);
           if (!parsed) { failure = `无法识别的人员 id：${op.key}`; break; }
@@ -534,6 +573,20 @@ export async function applyStoreOps(deps: RoutingViewDeps, ops: readonly StoreOp
       await deps.router?.reapplyGroup(id);
     } catch (error) {
       deps.log?.warn(`WeCom could not apply the group model: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  // A group's Workspace access applies to every Session it already owns. The
+  // group edit is kept even when a Session refuses it, but the operator is told:
+  // a Session left wider than its group says is not something to hide.
+  for (const id of permissionChanged) {
+    try {
+      const failed = await deps.router?.reapplyPermission(id) ?? [];
+      if (failed.length && !failure) {
+        failure = `分组已保存，但有 ${failed.length} 个会话没能应用新的工作区权限：${failed[0]!.message}`;
+      }
+    } catch (error) {
+      deps.log?.warn(`WeCom could not apply the group access mode: ${error instanceof Error ? error.message : String(error)}`);
+      if (!failure) failure = '分组已保存，但未能把工作区权限应用到已有会话，请稍后重试。';
     }
   }
   // Notifications describe the final effective assignment, not transient

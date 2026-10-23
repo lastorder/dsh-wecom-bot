@@ -97,7 +97,14 @@ export interface SessionSummary {
   readonly projections?: {
     readonly values?: {
       readonly title?: string | null;
-      readonly modelSelection?: { readonly lastUsed?: unknown; readonly next?: unknown } | null;
+      readonly modelSelection?: { readonly lastUsed?: unknown; readonly pending?: unknown; readonly next?: unknown } | null;
+      /** Permission projection: the preset (and the knobs behind it) the Session runs under. */
+      readonly permissions?: {
+        readonly currentValue?: unknown;
+        readonly preset?: unknown;
+        readonly sandbox?: unknown;
+        readonly approval?: unknown;
+      } | null;
       /** Preset projection: the preset the Session actually runs. */
       readonly agentPreset?: string | null;
       /** Whole-log turn/step counts, from the `sessionStats` fold. */

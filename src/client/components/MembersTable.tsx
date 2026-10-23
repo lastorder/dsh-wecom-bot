@@ -1,16 +1,16 @@
 import { useRef, useState } from 'react';
 import { Button, StateDot, Tag } from '@deepseek-ai/dsh-client-ui-primitives';
-import type { BridgeStateView, GroupMemberView, GroupView, StoreOp } from '../../shared/protocol.ts';
+import type { BridgeStateView, GroupMemberView, GroupView, PermissionMode, StoreOp } from '../../shared/protocol.ts';
 import { useStoreApply } from '../hooks.ts';
 import {
   SESSION_STATE_LABEL, archiveMember, choiceLabel, effortsFor, modelKey, modelName, parseModelKey, presetLabel,
-  removeMember, sessionActivity, setLabel, setMemberModel, updateMember,
+  removeMember, sessionActivity, setLabel, setMemberModel, setMemberPermission, updateMember,
 } from '../model.ts';
 import type { OpenSession } from '../types.ts';
 import { IconChevronRight } from './icons.tsx';
-import { ContextMeter, FactRow, PersonButton, PersonDialog, Select, SessionDialog } from './ui.tsx';
+import { ContextMeter, FactRow, PermissionSelect, PersonButton, PersonDialog, Select, SessionDialog } from './ui.tsx';
 
-const COLUMNS = ['成员', '会话', '模型', '推理等级', '上下文'];
+const COLUMNS = ['成员', '会话', '模型', '推理等级', '工作区权限', '上下文'];
 
 /**
  * A group's members as one semantic table: who, their Session's live state,
@@ -29,7 +29,7 @@ export function MembersTable({ group, groups, state, disabled, onChanged, onOpen
   return (
     <div className="wcb-table-scroll" tabIndex={0} role="region" aria-label={`${group.name} 成员表格，可横向滚动`}>
       <table className="wcb-table" aria-label={`${group.name} 的成员`}>
-        <colgroup><col /><col className="wcb-col-session" /><col className="wcb-col-model" /><col className="wcb-col-effort" /><col className="wcb-col-context" /></colgroup>
+        <colgroup><col /><col className="wcb-col-session" /><col className="wcb-col-model" /><col className="wcb-col-effort" /><col className="wcb-col-access" /><col className="wcb-col-context" /></colgroup>
         <thead><tr>{COLUMNS.map(label => <th key={label} scope="col">{label}</th>)}</tr></thead>
         <tbody>
           {group.members.map(member => (
@@ -115,6 +115,11 @@ function MemberRow({ member, group, groups, state, disabled, onChanged, onOpenSe
     await apply([setMemberModel(member.key, member.sessionId, next)]);
   };
 
+  const changePermission = async (mode: PermissionMode): Promise<void> => {
+    if (!usable) return;
+    await apply([setMemberPermission(member.key, member.sessionId, mode)]);
+  };
+
   const changeEffort = async (value: string): Promise<void> => {
     if (!usable || !selection || (value && !efforts.some(item => item.id === value))) return;
     if (value === (selection.reasoningEffort ?? '')) return;
@@ -182,6 +187,12 @@ function MemberRow({ member, group, groups, state, disabled, onChanged, onOpenSe
                 running={member.sessionRunning}
                 blank={member.sessionState === 'blank'}
                 preset={member.sessionPreset ? presetLabel(state?.presets, member.sessionPreset) : '—'}
+                permission={{
+                  value: member.sessionPermission,
+                  catalog: state?.permissions,
+                  label: `${member.id} 的会话工作区权限`,
+                  onChange: mode => { void changePermission(mode); },
+                }}
                 context={member.sessionContext}
                 disabled={Boolean(write.busy)}
                 error={error}
@@ -234,6 +245,20 @@ function MemberRow({ member, group, groups, state, disabled, onChanged, onOpenSe
               <option value="">默认</option>
               {efforts.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
             </Select>
+          ) : <span className="wcb-muted">—</span>}
+        </td>
+        <td>
+          {usable ? (
+            <PermissionSelect
+              compact
+              value={member.sessionPermission}
+              catalog={state?.permissions}
+              scope={`${name} 的这个会话`}
+              disabled={blocked}
+              label={`${member.id} 当前会话的工作区权限`}
+              title="只修改当前会话；新会话仍使用分组的工作区权限"
+              onChange={mode => { void changePermission(mode); }}
+            />
           ) : <span className="wcb-muted">—</span>}
         </td>
         <td><ContextMeter context={member.sessionContext} /></td>

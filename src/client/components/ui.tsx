@@ -7,8 +7,12 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode, SelectHTMLAttributes } from 'react';
 import { Button, Input, Modal, StateDot, writeClipboard } from '@deepseek-ai/dsh-client-ui-primitives';
-import type { BindingKind, ContextUsage } from '../../shared/protocol.ts';
-import { BINDING_KIND_LABEL, contextLabel, contextLevel, formatTokens, type GroupFact } from '../model.ts';
+import type { BindingKind, ContextUsage, PermissionCatalogView, PermissionMode } from '../../shared/protocol.ts';
+import { FULL_ACCESS_MODE } from '../../shared/protocol.ts';
+import {
+  BINDING_KIND_LABEL, contextLabel, contextLevel, formatTokens, needsRiskAcknowledgement, permissionLabel,
+  type GroupFact,
+} from '../model.ts';
 import { IconCheck, IconChevronRight, IconCopy, IconUser, IconUsers, IconWarning } from './icons.tsx';
 
 export function Section({ id, title, count, description, actions, children }: {
@@ -176,6 +180,97 @@ export function Dialog({ open, onClose, title, children, footer }: {
   );
 }
 
+/**
+ * DSH's Full access gate: a warning, and a box that has to be ticked before the
+ * confirming button does anything. Cancelling (or closing) changes nothing.
+ */
+export function RiskDialog({ open, scope, busy, onCancel, onConfirm }: {
+  open: boolean;
+  /** Whose access is widened, e.g. `本组的所有会话` or `这个会话`. */
+  scope: string;
+  busy?: boolean;
+  onCancel(): void;
+  onConfirm(): void;
+}) {
+  const [acknowledged, setAcknowledged] = useState(false);
+  useEffect(() => { if (!open) setAcknowledged(false); }, [open]);
+  return (
+    <Dialog
+      open={open} onClose={onCancel} title="确认启用完全权限？"
+      footer={<>
+        <Button variant="outline" size="sm" disabled={busy} onClick={onCancel}>取消</Button>
+        <Button variant="primary" size="sm" className="wcb-danger-solid" disabled={busy || !acknowledged} onClick={onConfirm}>
+          启用完全权限
+        </Button>
+      </>}
+    >
+      <Notice tone="warning">
+        启用完全权限后，{scope}将减少确认步骤，并且可以直接执行更多操作，包括敏感操作、文件修改或外部命令。企业微信里的消息也会以这个权限运行。仅建议在你信任这些任务时使用。
+      </Notice>
+      <label className="wcb-check">
+        <input type="checkbox" checked={acknowledged} disabled={busy} onChange={event => setAcknowledged(event.target.checked)} />
+        <span>我已了解风险，并愿意继续</span>
+      </label>
+    </Dialog>
+  );
+}
+
+/**
+ * The Workspace-access select, shared by the group editor, the members table and
+ * the Session dialog. Picking Full access never takes effect on its own: the
+ * risk dialog opens first, and only its confirmation calls `onChange`.
+ */
+export function PermissionSelect({ value, catalog, scope, disabled, compact, label, title, onChange, onAskRisk }: {
+  /** The mode in effect; `custom`, `auto` and unknown presets are shown but never chosen. */
+  value: string | undefined;
+  catalog: PermissionCatalogView | undefined;
+  /** What Full access would widen, for the risk dialog. */
+  scope: string;
+  disabled?: boolean;
+  compact?: boolean;
+  label: string;
+  title?: string;
+  onChange(mode: PermissionMode): void;
+  /**
+   * Where the risk dialog is shown by someone else (a dialog must not stack
+   * another one on top of itself); without it the select opens its own.
+   */
+  onAskRisk?(mode: PermissionMode): void;
+}) {
+  const [asking, setAsking] = useState<PermissionMode>();
+  const modes = catalog?.modes ?? [];
+  const known = value !== undefined && (modes as readonly string[]).includes(value);
+  const choose = (next: string): void => {
+    const mode = modes.find(item => item === next);
+    if (!mode || mode === value) return;
+    if (!needsRiskAcknowledgement(mode)) onChange(mode);
+    else if (onAskRisk) onAskRisk(mode);
+    else setAsking(mode);
+  };
+  return (
+    <>
+      <Select
+        compact={compact}
+        value={value ?? ''}
+        disabled={disabled || !catalog?.available || !modes.length}
+        aria-label={label}
+        title={catalog && !catalog.available ? '当前 DSH 没有权限模式服务，无法设置' : title}
+        onChange={event => choose(event.target.value)}
+      >
+        {!value && <option value="" disabled>未知</option>}
+        {value && !known && <option value={value} disabled>{permissionLabel(value)}（当前）</option>}
+        {modes.map(mode => <option key={mode} value={mode}>{permissionLabel(mode)}</option>)}
+      </Select>
+      <RiskDialog
+        open={asking === FULL_ACCESS_MODE}
+        scope={scope}
+        onCancel={() => setAsking(undefined)}
+        onConfirm={() => { const mode = asking; setAsking(undefined); if (mode) onChange(mode); }}
+      />
+    </>
+  );
+}
+
 /** One row of a dialog's facts list: label left, value or control right. */
 export function FactRow({ label, mono, children }: { label: string; mono?: boolean; children: ReactNode }) {
   return (
@@ -247,7 +342,7 @@ export function PersonDialog({
  * so no second modal stacks on top of this one.
  */
 export function SessionDialog({
-  open, onClose, name, title, id, running, blank, preset, context, disabled, error, onOpen, onArchive,
+  open, onClose, name, title, id, running, blank, preset, permission, context, disabled, error, onOpen, onArchive,
 }: {
   open: boolean;
   onClose(): void;
@@ -259,6 +354,13 @@ export function SessionDialog({
   /** A created Session whose first turn has not started yet. */
   blank?: boolean;
   preset: string;
+  /** This Session's Workspace access: what it runs under now, and how to change it. */
+  permission: {
+    value: string | undefined;
+    catalog: PermissionCatalogView | undefined;
+    label: string;
+    onChange(mode: PermissionMode): void;
+  };
   context?: ContextUsage;
   disabled?: boolean;
   error?: string;
@@ -267,11 +369,23 @@ export function SessionDialog({
   onArchive(): Promise<boolean>;
 }) {
   const [confirming, setConfirming] = useState(false);
-  useEffect(() => { if (!open) setConfirming(false); }, [open]);
+  const [risk, setRisk] = useState<PermissionMode>();
+  useEffect(() => { if (!open) { setConfirming(false); setRisk(undefined); } }, [open]);
   const archive = async (): Promise<void> => {
     if (await onArchive()) setConfirming(false);
   };
 
+  // Like archiving, the Full access gate replaces this dialog's content instead
+  // of stacking a second modal on top of it.
+  if (risk) {
+    return (
+      <RiskDialog
+        open={open} scope="这个会话" busy={disabled}
+        onCancel={() => setRisk(undefined)}
+        onConfirm={() => { permission.onChange(risk); setRisk(undefined); }}
+      />
+    );
+  }
   if (confirming) {
     return (
       <Dialog
@@ -308,6 +422,12 @@ export function SessionDialog({
           {blank ? '待使用（还没有开始）' : running ? '运行中' : '空闲'}
         </FactRow>
         <FactRow label="Agent 预设">{preset}</FactRow>
+        <FactRow label="工作区权限">
+          <PermissionSelect
+            value={permission.value} catalog={permission.catalog} scope="这个会话" disabled={disabled}
+            label={permission.label} onChange={permission.onChange} onAskRisk={setRisk}
+          />
+        </FactRow>
         <FactRow label="上下文">{contextLabel(context) || '—'}</FactRow>
         <FactRow label="会话 ID" mono>{id}<CopyButton text={id} label="复制会话 ID" /></FactRow>
       </dl>

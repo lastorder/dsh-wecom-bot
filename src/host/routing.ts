@@ -34,6 +34,11 @@ export interface Router {
   forSession(sessionId: string): readonly BindingRecord[];
   /** Re-install the group's model on every Session of that group. */
   reapplyGroup(groupId: string): Promise<void>;
+  /**
+   * Put every Session of that group under the group's Workspace access.
+   * Resolves to the members whose Session could not be updated, with the reason.
+   */
+  reapplyPermission(groupId: string): Promise<readonly { readonly key: string; readonly message: string }[]>;
   /** The group that decides Workspace and model for one member. */
   groupOf(binding: BindingRecord): GroupRecord;
   readonly store: PluginStore;
@@ -110,6 +115,24 @@ export function createRouter(options: RouterOptions): Router {
       }
     },
     forSession: sessionId => store.forSession(sessionId),
+    async reapplyPermission(groupId) {
+      const group = store.group(groupId);
+      if (!group) return [];
+      const failures: { key: string; message: string }[] = [];
+      for (const binding of store.inGroup(groupId)) {
+        if (!binding.sessionId) continue;
+        // A Session that is gone or archived has nothing to restrict; the next
+        // one is created under the group's mode.
+        const described = await provisioner.describe(binding.sessionId);
+        if (described.state !== 'bound' && described.state !== 'blank') continue;
+        try {
+          await provisioner.applyPermission(binding.sessionId, group.permission);
+        } catch (error) {
+          failures.push({ key: routerKey(binding), message: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      return failures;
+    },
     async reapplyGroup(groupId) {
       const group = store.group(groupId);
       if (!group) return;

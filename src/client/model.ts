@@ -5,11 +5,11 @@
  */
 import type {
   AgentPresetOption, BindingKind, ContextUsage, GroupMemberView, GroupView,
-  ModelCatalogView, ModelChoice, ModelSelection, PresetCatalogView, StoreOp,
+  ModelCatalogView, ModelChoice, ModelSelection, PermissionMode, PresetCatalogView, StoreOp,
   StoreSettings, StoreSettingsPatch,
 } from '../shared/protocol.ts';
 import {
-  DEFAULT_LOG_RETENTION_DAYS, DEFAULT_SECRET_REF, MAX_LOG_RETENTION_DAYS, MIN_LOG_RETENTION_DAYS,
+  FULL_ACCESS_MODE, DEFAULT_LOG_RETENTION_DAYS, DEFAULT_SECRET_REF, MAX_LOG_RETENTION_DAYS, MIN_LOG_RETENTION_DAYS,
 } from '../shared/protocol.ts';
 import type { FormOperation, StoredConfig } from './types.ts';
 
@@ -278,6 +278,32 @@ export function sessionActivity(member: Pick<GroupMemberView, 'sessionState' | '
   return member.sessionState === 'blank' ? '待使用' : '空闲';
 }
 
+/** DSH's own names for the permission presets (its Session picker, in Chinese). */
+export const PERMISSION_LABEL: Readonly<Record<string, string>> = {
+  'read-only': '仅可查看',
+  'workspace-write': '工作区内修改',
+  'danger-full-access': '完全权限',
+  auto: '自动审查（实验）',
+  custom: '自定义',
+};
+
+/** One permission value in words; an unknown preset shows as itself. */
+export function permissionLabel(value: string | undefined): string {
+  return value ? PERMISSION_LABEL[value] ?? value : '—';
+}
+
+/** One line on what a mode lets a Session do, for hints next to the select. */
+export const PERMISSION_HINT: Readonly<Record<PermissionMode, string>> = {
+  'read-only': '只能读取工作区；修改文件或执行有副作用的命令需要审批。',
+  'workspace-write': '可以在工作区内修改文件；超出工作区的操作需要审批。',
+  'danger-full-access': '不受沙箱限制，也不再询问审批。',
+};
+
+/** Whether choosing `mode` has to be acknowledged first, as in DSH. */
+export function needsRiskAcknowledgement(mode: string): boolean {
+  return mode === FULL_ACCESS_MODE;
+}
+
 export interface GroupFact {
   readonly key: string;
   readonly label: string;
@@ -305,6 +331,7 @@ export function groupFacts(
     { key: 'model', label: '模型', value: groupModelSummary(catalog, group) },
     { key: 'effort', label: '推理等级', value: effort },
     { key: 'preset', label: 'Agent 预设', value: presetSummaryLabel(presets, group.preset) },
+    { key: 'permission', label: '工作区权限', value: permissionLabel(group.permission) },
   ];
 }
 
@@ -369,6 +396,7 @@ export function updateGroup(id: string, patch: {
   model?: string;
   reasoningEffort?: string;
   preset?: string;
+  permission?: PermissionMode;
 }): StoreOp {
   return { op: 'group.update', id, patch };
 }
@@ -397,6 +425,11 @@ export function removeMember(key: string): StoreOp {
 /** Change only the member's current Session; a stale Session id is refused by the Host. */
 export function setMemberModel(key: string, sessionId: string, selection: ModelSelection): StoreOp {
   return { op: 'member.model', key, sessionId, selection };
+}
+
+/** Put one member's bound Session under a Workspace access mode. */
+export function setMemberPermission(key: string, sessionId: string, permission: PermissionMode): StoreOp {
+  return { op: 'member.permission', key, sessionId, permission };
 }
 
 /** Archive one member's Session; the next message creates a fresh one. */

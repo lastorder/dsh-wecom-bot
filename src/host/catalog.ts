@@ -1,6 +1,8 @@
 import { basename } from 'node:path';
-import type {
-  CatalogGroup, CatalogSession, ContextUsage, HiddenSelection, ModelSelection, SessionCatalogView,
+import {
+  isPermissionMode, PERMISSION_MODES,
+  type CatalogGroup, type CatalogSession, type ContextUsage, type HiddenSelection, type ModelSelection,
+  type PermissionMode, type SessionCatalogView,
 } from '../shared/protocol.js';
 import type { SessionSummary, WorkspaceRegistry } from './dsh.js';
 
@@ -78,6 +80,37 @@ export function sessionPreset(summary: SessionSummary | undefined): string | und
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }
 
+/** Knob bundle of each DSH permission preset: the sandbox mode and approval policy it sets. */
+const PERMISSION_BUNDLES: Readonly<Record<PermissionMode, { readonly sandbox: string; readonly approval: string }>> = {
+  'read-only': { sandbox: 'read-only', approval: 'ask' },
+  'workspace-write': { sandbox: 'workspace-write', approval: 'ask' },
+  'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
+};
+
+/**
+ * The permission preset the Session runs under, from the `permissions`
+ * projection: the wire view's `currentValue` when it is there, otherwise the
+ * folded knobs (`preset`, `sandbox`, `approval`) matched the way DSH matches
+ * them — the recorded preset while it still agrees with the knobs, else the
+ * first preset whose bundle they equal, else `custom`.
+ */
+export function sessionPermission(summary: SessionSummary | undefined): string | undefined {
+  const value = summary?.projections?.values?.permissions as Record<string, unknown> | null | undefined;
+  if (!value || typeof value !== 'object') return undefined;
+  const text = (raw: unknown): string => typeof raw === 'string' ? raw.trim() : '';
+  const current = text(value.currentValue);
+  if (current) return current;
+  const sandbox = text(value.sandbox);
+  const approval = text(value.approval);
+  const preset = text(value.preset);
+  if (!sandbox && !approval) return preset || undefined;
+  const matches = (mode: PermissionMode): boolean => PERMISSION_BUNDLES[mode].sandbox === sandbox
+    && PERMISSION_BUNDLES[mode].approval === (approval || 'ask');
+  if (isPermissionMode(preset) && matches(preset)) return preset;
+  if (preset === 'auto' && sandbox === 'danger-full-access') return 'auto';
+  return PERMISSION_MODES.find(matches) ?? 'custom';
+}
+
 /** Context occupancy of the Session, from the `contextPressure` projection. */
 export function sessionContext(summary: SessionSummary | undefined): ContextUsage | undefined {
   const value = summary?.projections?.values?.contextPressure;
@@ -130,6 +163,7 @@ export function buildCatalog(
   const toSession = (summary: SessionSummary): CatalogSession => {
     const model = sessionModel(summary);
     const preset = sessionPreset(summary);
+    const permission = sessionPermission(summary);
     const context = sessionContext(summary);
     const progress = sessionProgress(summary);
     return {
@@ -140,6 +174,7 @@ export function buildCatalog(
       updatedAt: summary.updatedAt ?? 0,
       ...(model ? { model } : {}),
       ...(preset ? { preset } : {}),
+      ...(permission ? { permission } : {}),
       ...(context ? { context } : {}),
       ...progress,
     };
