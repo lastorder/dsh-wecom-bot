@@ -55,13 +55,15 @@ export function memoryJournal(secrets = []) {
 export function fakeClient() {
   const sends = [];
   const replies = [];
+  const cardUpdates = [];
   const client = Object.assign(new EventEmitter(), {
-    sends, replies,
+    sends, replies, cardUpdates,
     connected: false,
     connect() { this.connected = true; return this; },
     disconnect() { this.connected = false; },
     async sendMessage(chat, body) { sends.push({ chat, body }); return { headers: { req_id: `send_${sends.length}` }, errcode: 0, errmsg: 'ok' }; },
     async replyStream(frame, streamId, content, finish) { replies.push({ frame, streamId, content, finish }); return { headers: { req_id: frame.headers.req_id }, errcode: 0, errmsg: 'ok' }; },
+    async updateTemplateCard(frame, card) { cardUpdates.push({ frame, card }); return { headers: { req_id: frame.headers.req_id }, errcode: 0, errmsg: 'ok' }; },
   });
   return client;
 }
@@ -321,4 +323,24 @@ export async function writeStore(home, document = {}) {
   await writeFile(join(directory, 'settings.json'), JSON.stringify({
     version: '0.5', settings: {}, groups: [], bindings: [], labels: {}, adminDefaults: {}, ...document,
   }, undefined, 2));
+}
+
+/** The verification code of an approval notice, whichever form it arrived in. */
+export function approvalNonce(send) {
+  const body = send?.body ?? {};
+  const taskId = body.template_card?.task_id;
+  if (typeof taskId === 'string' && taskId.startsWith('apv_')) return taskId.slice('apv_'.length);
+  const text = body.markdown?.content ?? '';
+  return text.match(/\/approve ([a-z0-9]{6})/)?.[1];
+}
+
+/** A `template_card_event` frame, as WeCom sends it after a button tap. */
+export function cardClick(taskId, eventKey, { chat = 'root', user = 'root' } = {}) {
+  return {
+    headers: { req_id: `click_${taskId}` },
+    body: {
+      msgtype: 'event', chatid: chat, chattype: 'single', from: { userid: user },
+      event: { eventtype: 'template_card_event', event_key: eventKey, task_id: taskId },
+    },
+  };
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { WSClient, WsFrame } from '@wecom/aibot-node-sdk';
+import type { TemplateCard, WSClient, WsFrame } from '@wecom/aibot-node-sdk';
 
 import { createCatalogService, type CatalogService } from '../catalog.js';
 import type { BridgeSettings } from '../config.js';
@@ -21,6 +21,8 @@ import { parseCommand, runCommand, type CommandServices, type TargetInfo } from 
 import { createSessionDirectory, type SessionDirectory } from './directory.js';
 import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, extractSessionPointer } from './format.js';
 import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.js';
+import { approvalCard, approvalSettledCards } from './notices.js';
+import { parseCardEvent } from './cards.js';
 import { createInteractionRegistry } from './interactions.js';
 import {
   adminUnassignedText, approvalNotice, code, promptFailedNotice, questionNotice, reviewNotice, routingChangedText,
@@ -44,7 +46,7 @@ import { createSelectionStore } from './selection.js';
  * process started.
  */
 
-export type BridgeClient = Pick<WSClient, 'on' | 'connect' | 'disconnect' | 'removeAllListeners' | 'sendMessage' | 'replyStream'>;
+export type BridgeClient = Pick<WSClient, 'on' | 'connect' | 'disconnect' | 'removeAllListeners' | 'sendMessage' | 'replyStream' | 'updateTemplateCard'>;
 
 export interface BridgeDeps {
   readonly ctx: Pick<HostContext, 'on' | 'sessionController'>;
@@ -210,8 +212,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
     return unique;
   }
 
-  function notify(chats: readonly string[], text: string, kind: NoticeKind, sessionId?: string, interactionNonce?: string): void {
-    for (const chat of chats) outbox.enqueue({ chat, text, kind, ...(sessionId ? { sessionId } : {}), ...(interactionNonce ? { interactionNonce } : {}) });
+  function notify(chats: readonly string[], text: string, kind: NoticeKind, sessionId?: string, interactionNonce?: string, card?: TemplateCard): void {
+    for (const chat of chats) outbox.enqueue({ chat, text, kind, ...(sessionId ? { sessionId } : {}), ...(interactionNonce ? { interactionNonce } : {}), ...(card ? { card } : {}) });
   }
 
   async function reply(message: InboundMessage, round: Round, text: string): Promise<void> {
@@ -518,6 +520,60 @@ export function createBridge(deps: BridgeDeps): Bridge {
     return answer ?? next();
   }
 
+  /**
+   * An approval answered with a card button instead of a typed code.
+   *
+   * The nonce rides in the card's `task_id`, so the same registry lookup and
+   * the same administrator/private-chat checks as `/approve` apply. WeCom has
+   * no disabled button: replacing the card with one that has none is what stops
+   * a second tap, so the replacement must land inside the five seconds WeCom
+   * allows — and the verdict is still spoken in text if that fails.
+   */
+  async function onCardEvent(frame: WsFrame): Promise<void> {
+    const event = parseCardEvent(frame);
+    const meta = { source: 'card', userId: event.userId, chatId: event.chatId, nonce: event.nonce, action: event.action ?? 'unknown' };
+    if (!event.action || !event.nonce) {
+      journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'unknown-button-or-task' });
+      return;
+    }
+    const state = interactions.findApproval(event.nonce);
+    const admin = settings.adminUserIds.includes(event.userId);
+    // A card is replaced for every recipient of that chat, so a tap by anybody
+    // else must not touch it: rewriting the card would wipe live buttons the
+    // administrator still needs.
+    if (!state || !admin || !state.privateChats.has(event.chatId)) {
+      journal.write({ event: 'wecom.card.rejected', ...meta, admin, reason: 'not-the-asking-administrator' });
+      return;
+    }
+    let outcome = 'ignored';
+    if (state.active() && !closed) {
+      const permitted = await directory.permitted(state.sessionId);
+      if (permitted && state.active() && !closed) {
+        const verdict = event.action === 'approve' ? 'allowed-once' : 'rejected';
+        const submission = await state.submit(verdict);
+        outcome = submission === 'closed' ? 'ignored' : verdict;
+      }
+    }
+    journal.write({ event: 'dsh.approval.answer', ...meta, sessionId: state?.sessionId, toolName: state?.toolName, outcome, admin });
+    const candidates = approvalSettledCards(outcome, state?.toolName, event.taskId);
+    for (const [index, card] of candidates.entries()) {
+      try {
+        await client.updateTemplateCard(frame, card);
+        journal.write({ event: 'wecom.card.updated', ...meta, index, cardType: card.card_type });
+        return;
+      } catch (error) {
+        journal.write({ event: 'wecom.card.update.failed', level: 'warn', ...meta, index, cardType: card.card_type, error });
+      }
+    }
+    const settled = candidates[0]!;
+    try {
+      await client.sendMessage(event.chatId, { msgtype: 'markdown', markdown: { content: `${settled.main_title?.title ?? ''} · ${settled.main_title?.desc ?? ''}` } });
+      journal.write({ event: 'wecom.card.text-fallback', ...meta });
+    } catch (error) {
+      journal.write({ event: 'wecom.card.lost', level: 'warn', ...meta, error });
+    }
+  }
+
   async function onApproval(request: ApprovalRequest, next: () => Promise<ApprovalOutcome>, delivery?: InteractionDelivery): Promise<ApprovalOutcome> {
     const sessionId = request.agent?.id;
     if (closed || !sessionId) return next();
@@ -547,7 +603,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       return next();
     }
     journal.write({ event: 'dsh.approval', ...meta, remote: true, nonce: wait.nonce, chats: admins, timeoutMs: settings.questionTimeoutMs });
-    notify(admins, approvalNotice(sessionId, info.title, request, wait.nonce, settings.questionTimeoutMs), 'approval-request', sessionId, wait.nonce);
+    notify(admins, approvalNotice(sessionId, info.title, request, wait.nonce, settings.questionTimeoutMs), 'approval-request', sessionId, wait.nonce, approvalCard(info.title, request, wait.nonce, settings.questionTimeoutMs));
     const outcome = await wait.result;
     journal.write({ event: 'dsh.approval.result', ...meta, nonce: wait.nonce, outcome: outcome ?? 'fallback' });
     return outcome ?? next();
@@ -583,6 +639,12 @@ export function createBridge(deps: BridgeDeps): Bridge {
       status.set('displaced', '同一个 Bot 在别处建立了新连接，本连接已被断开');
     });
     client.on('event', (frame: WsFrame) => journal.write({ event: 'wecom.event', level: 'debug', frame }));
+    client.on('event.template_card_event', (frame: WsFrame) => {
+      void onCardEvent(frame).catch(error => {
+        log.warn('WeCom card event failed (details in the plugin journal)');
+        journal.write({ event: 'bridge.error', level: 'error', stage: 'card', error });
+      });
+    });
     client.on('message', (frame: WsFrame) => {
       void handleFrame(frame).catch(error => {
         log.error('WeCom callback failed (details in the plugin journal)');

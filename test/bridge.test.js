@@ -17,8 +17,8 @@ import { createSessionTitler } from '../dist/host/session-title.js';
 import { summarizeTurn } from '../dist/host/turns.js';
 import { createWorkspaceService } from '../dist/host/workspaces.js';
 import {
-  baseSettings, fakeClient, fakeHost, finishedSession, frame, memoryJournal, scratchDirectory,
-  scratchRoot, settle, until, TEST_WORKSPACE_PATH,
+  approvalNonce, baseSettings, cardClick, fakeClient, fakeHost, finishedSession, frame, memoryJournal,
+  scratchDirectory, scratchRoot, settle, until, TEST_WORKSPACE_PATH,
 } from './helpers.js';
 
 const silent = { warn() {}, error() {}, info() {} };
@@ -587,12 +587,12 @@ test('each remote approval has a fresh code; an old code cannot approve a later 
   await h.send('hi');
   const first = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash', callId: 'first' }, async () => 'unavailable');
   await settle();
-  const firstCode = h.client.sends.at(-1).body.markdown.content.match(/\/approve ([a-z0-9]{6})/)[1];
+  const firstCode = approvalNonce(h.client.sends.at(-1));
   await h.send(`/deny ${firstCode}`, { chat: 'root', user: 'root' });
   assert.equal(await first, 'rejected');
   const second = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash', callId: 'second' }, async () => 'unavailable');
   await settle();
-  const secondCode = h.client.sends.at(-1).body.markdown.content.match(/\/approve ([a-z0-9]{6})/)[1];
+  const secondCode = approvalNonce(h.client.sends.at(-1));
   assert.notEqual(secondCode, firstCode);
   await h.send(`/approve ${firstCode}`, { chat: 'root', user: 'root' });
   assert.match(lastReply(h), /该请求已处理或已结束/);
@@ -708,7 +708,7 @@ test('narrowing Workspace scope or replacing administrators retires existing non
     let fallback = 0;
     const request = h.bridge.onApproval({ agent: { id: 's1' }, toolName: 'bash' }, async () => { fallback++; return 'unavailable'; });
     assert.ok(await until(() => h.client.sends.length > 0));
-    const nonce = h.client.sends.at(-1).body.markdown.content.match(/\/approve ([a-z0-9]{6})/)[1];
+    const nonce = approvalNonce(h.client.sends.at(-1));
     h.bridge.updateSettings({ ...h.settings, ...patch });
     assert.equal(await request, 'unavailable');
     assert.equal(fallback, 1);
@@ -1029,7 +1029,10 @@ test('tool approvals are announced to administrators only', async () => {
   const pending = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
   await settle();
   assert.deepEqual(sentChats(h), ['root'], 'the member whose Session it is never receives it');
-  assert.match(h.client.sends.at(-1).body.markdown.content, /DSH 权限请求/);
+  const card = h.client.sends.at(-1).body.template_card;
+  assert.equal(card.card_type, 'button_interaction', 'administrators get a button card');
+  assert.deepEqual(card.button_list.map(button => button.text), ['批准', '拒绝']);
+  assert.ok(card.task_id.startsWith('apv_'));
   h.stop();
   assert.equal(await pending, 'unavailable');
 });
@@ -1081,5 +1084,62 @@ test('a normal cancellation is still only relayed while a WeCom round is waiting
   await h.send('hi');
   assert.deepEqual([...(await h.endTurn('session-created-1', { reason: 'aborted' }))].sort(), ['alice', 'root'],
     'a round that is waiting still hears its turn end');
+  h.stop();
+});
+
+test('an approval button answers the request and leaves a card with no live buttons', async () => {
+  const h = await harness({ remoteApprovals: true, adminUserIds: ['root'] }, {}, {
+    members: [['user', 'root'], ['user', 'alice']],
+  });
+  h.client.emit('authenticated');
+  await h.send('hi');
+  const pending = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash', callId: 'card-1' }, async () => 'unavailable');
+  await settle();
+
+  const notice = h.client.sends.at(-1);
+  assert.equal(notice.body.msgtype, 'template_card', 'the administrator gets a card, not a code to copy');
+  const card = notice.body.template_card;
+  assert.equal(card.card_type, 'button_interaction');
+  assert.deepEqual(card.button_list.map(button => button.key), ['approve', 'deny']);
+  assert.equal(card.task_id, `apv_${approvalNonce(notice)}`);
+
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'approve'));
+  assert.equal(await pending, 'allowed-once');
+
+  const settled = h.client.cardUpdates.at(-1).card;
+  assert.equal(settled.card_type, 'text_notice', 'the buttons are replaced, there is no disabled state');
+  assert.equal(settled.button_list, undefined);
+  assert.equal(settled.task_id, card.task_id);
+  assert.match(settled.main_title.title, /已批准/);
+  assert.ok(settled.card_action, 'a replaced card needs card_action or WeCom answers 42045');
+
+  const answer = h.journal.find('dsh.approval.answer').at(-1);
+  assert.equal(answer.source, 'card');
+  assert.equal(answer.outcome, 'allowed-once');
+  h.stop();
+});
+
+test('a card button from a stranger, or from a foreign card, resolves nothing', async () => {
+  const h = await harness({ remoteApprovals: true, adminUserIds: ['root'] }, {}, {
+    members: [['user', 'root'], ['user', 'alice']],
+  });
+  h.client.emit('authenticated');
+  await h.send('hi');
+  const pending = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
+  await settle();
+  const taskId = h.client.sends.at(-1).body.template_card.task_id;
+  const updates = h.client.cardUpdates.length;
+
+  h.client.emit('event.template_card_event', cardClick(taskId, 'approve', { chat: 'alice', user: 'alice' }));
+  h.client.emit('event.template_card_event', cardClick('foreign', 'approve'));
+  h.client.emit('event.template_card_event', cardClick(taskId, 'not-a-button'));
+  await settle();
+  assert.equal(h.client.cardUpdates.length, updates, 'a stranger never gets the card updated');
+  assert.ok(h.journal.find('wecom.card.ignored').length >= 2, 'unknown buttons and foreign cards are journaled and dropped');
+  assert.ok(h.journal.find('wecom.card.rejected').length >= 1, 'a stranger tap never rewrites the asking administrator\'s card');
+
+  h.client.emit('event.template_card_event', cardClick(taskId, 'deny'));
+  assert.equal(await pending, 'rejected', 'the administrator can still deny it');
+  assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已拒绝/);
   h.stop();
 });
