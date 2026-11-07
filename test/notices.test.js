@@ -257,8 +257,8 @@ test('a question card is only built for one question with options, buttons up to
   assert.equal(questionCardKind([six, six, six, six]), undefined, 'a card carries three dropdowns');
   assert.equal(questionCardKind([six, { ...six, multiSelect: true }]), undefined, 'a dropdown cannot take several');
   assert.equal(questionCardKind([six, { id: 'f', question: 'Q?' }]), undefined, 'nor free text');
-  assert.equal(questionCardKind([six, { ...six, options: Array.from({ length: 10 }, (_, n) => option(n)) }]), undefined, 'a dropdown carries ten entries, one is 请选择');
-  assert.equal(questionCardKind([six, { ...six, options: Array.from({ length: 9 }, (_, n) => option(n)) }]), 'dropdowns');
+  assert.equal(questionCardKind([six, { ...six, options: Array.from({ length: 9 }, (_, n) => option(n)) }]), undefined, 'a dropdown carries ten entries: 请选择, the options, 自己回答');
+  assert.equal(questionCardKind([six, { ...six, options: Array.from({ length: 8 }, (_, n) => option(n)) }]), 'dropdowns');
 
   const card = questionCard('《会话》', six, 'abc123', 1_800_000);
   assert.equal(card.task_id, 'qst_abc123');
@@ -320,14 +320,14 @@ test('a dropdown card starts every question on 请选择, so an untouched one is
   const card = questionCard('《会话》', ask, 'abc123', 1_800_000);
   assert.equal(card.card_type, 'multiple_interaction');
   assert.deepEqual(card.select_list.map(item => item.question_key), ['q0', 'q1']);
-  assert.deepEqual(card.select_list[0].option_list.map(o => o.id), ['none', 'opt_0', 'opt_1']);
+  assert.deepEqual(card.select_list[0].option_list.map(o => o.id), ['none', 'opt_0', 'opt_1', 'other'], 'each dropdown can be told to type the answer');
   assert.ok(card.select_list.every(item => item.selected_id === 'none'));
   // This card type shows only title, description and controls: the questions
   // must be in the description, or they are not readable at all.
   assert.equal(card.sub_title_text, undefined);
   assert.equal(card.horizontal_content_list, undefined);
   assert.match(card.main_title.desc, /1\. 先选哪个？\n2\. 再选哪个？\n/);
-  assert.match(card.main_title.desc, /每题选一项 · 会话：《会话》 · 30 分钟内有效 · 验证码 abc123\n自己写答案：\/answer abc123 题号 答案$/, 'and says how to write an answer instead');
+  assert.match(card.main_title.desc, /每题选一项 · 会话：《会话》 · 30 分钟内有效 · 验证码 abc123\n自己写答案：选「✏️ 自己回答」，或 \/answer abc123 题号 答案$/, 'and says how to write an answer instead');
   assert.match(card.select_list[0].title, /^1\. 先选哪个/, 'each dropdown repeats the start of its question');
 
   const items = { selected_item: [

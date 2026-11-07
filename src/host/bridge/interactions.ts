@@ -46,9 +46,15 @@ export interface PendingApproval extends PendingState<ApprovalOutcome> {
   finish(value: ApprovalOutcome | null): void;
 }
 
+/**
+ * What a person who tapped 「自己回答」 still owes: the questions they will type
+ * an answer to, in order, and the answers already fixed by the card (options
+ * picked in a dropdown, or ticked next to 「其他」).
+ */
 export interface ArmedAnswer {
   readonly nonce: string;
-  readonly questionId: string;
+  readonly done: readonly QuestionAnswerItem[];
+  readonly awaiting: readonly { readonly id: string; readonly picked: readonly string[] }[];
 }
 
 export interface Wait<T> {

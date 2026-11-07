@@ -1310,8 +1310,7 @@ test('a question card tap from a stranger, another chat or a foreign card change
   h.client.emit('event.template_card_event', cardClick(taskId, 'opt_9', { chat: 'alice', user: 'alice' }));
   h.client.emit('event.template_card_event', cardClick('foreign', 'opt_0', { chat: 'alice', user: 'alice' }));
   await settle();
-  assert.equal(h.client.cardUpdates.length, updates + 1, 'only the out-of-range tap from the right chat is answered, as expired');
-  assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已失效/);
+  assert.equal(h.client.cardUpdates.length, updates, 'none of them rewrites the card');
 
   h.client.emit('event.template_card_event', cardClick(taskId, 'opt_0', { chat: 'alice', user: 'alice' }));
   assert.deepEqual(await ask, { answers: [{ id: 'pick', selected: ['方案 A'] }] }, 'the real owner can still answer');
@@ -1505,26 +1504,114 @@ test('「自己回答」 is one message, one person, and dies with the question 
   h.stop();
 });
 
-test('a checkbox card: 「自己回答」 ticked alone arms the chat, ticked with others it is refused', async () => {
+test('a multi-select card: 「其他」 ticked with options keeps them and adds the typed text', async () => {
   const h = await harness({}, {}, { members: [['user', 'alice']] });
   h.client.emit('authenticated');
   await h.send('hi', { chat: 'alice', user: 'alice' });
   const ask = h.bridge.onQuestion(MULTI, async () => ({ answers: [] }));
   await settle();
   const card = h.client.sends.at(-1).body.template_card;
+  assert.equal(card.checkbox.option_list.at(-1).text, '✏️ 其他（自己回答）');
+  const mine = { chat: 'alice', user: 'alice' };
+  h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['opt_0', 'opt_2', 'other'], mine));
+  await settle();
+  assert.match(h.client.sends.at(-1).body.markdown.content, /请直接回复你的答案/);
+  await h.send('还有 d', mine);
+  assert.deepEqual(await ask, { answers: [{ id: 'tools', selected: ['a', 'c'], custom: '还有 d' }] });
+  h.stop();
+});
+
+test('a single-choice list card: 「自己回答」 cannot be combined with an option', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const ask = h.bridge.onQuestion({
+    agent: { id: 'session-created-1' },
+    questions: [{ id: 'one', question: '选一个', options: Array.from({ length: 8 }, (_, n) => ({ label: `o${n}` })) }],
+  }, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  assert.equal(card.checkbox.mode, 0);
+  assert.equal(card.checkbox.option_list.at(-1).text, '✏️ 自己回答');
   const mine = { chat: 'alice', user: 'alice' };
   const sends = h.client.sends.length;
-
-  h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['opt_0', 'other'], mine));
+  h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['opt_1', 'other'], mine));
   await settle();
-  assert.match(h.client.sends.slice(sends).at(-1).body.markdown.content, /单独勾选/);
+  assert.match(h.client.sends.slice(sends).at(-1).body.markdown.content, /只能选择一个/);
   await h.send('不该算答案', mine);
   assert.equal(h.journal.find('dsh.question.answer').filter(r => r.source === 'typed').length, 0, 'it was not armed');
 
   h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['other'], mine));
   await settle();
-  await h.send('a 和 d', mine);
-  assert.deepEqual(await ask, { answers: [{ id: 'tools', selected: [], custom: 'a 和 d' }] });
+  await h.send('自己的答案', mine);
+  assert.deepEqual(await ask, { answers: [{ id: 'one', selected: [], custom: '自己的答案' }] });
+  h.stop();
+});
+
+test('on a dropdown card each question can be typed, one message at a time', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const ask = h.bridge.onQuestion(TWO, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  const mine = { chat: 'alice', user: 'alice' };
+  const sends = h.client.sends.length;
+
+  // 问题 1 is chosen on the card, 问题 2 is to be typed; and the reverse order of asking is the card's order.
+  h.client.emit('event.template_card_event', cardSubmitDropdowns(card.task_id, { q0: 'other', q1: 'other' }, mine));
+  await settle();
+  assert.match(h.client.sends.slice(sends).at(-1).body.markdown.content, /请直接回复问题 1 的答案/);
+  assert.match(h.client.sends.slice(sends).at(-1).body.markdown.content, /还有 1 题要自己回答/);
+  await h.send('杭州', mine);
+  assert.match(lastReply(h), /请直接回复问题 2 的答案/);
+  await h.send('下周', mine);
+  assert.deepEqual(await ask, { answers: [
+    { id: 'where', selected: [], custom: '杭州' },
+    { id: 'when', selected: [], custom: '下周' },
+  ] });
+  h.stop();
+});
+
+test('a dropdown card mixes chosen options and typed answers, in the questions\' own order', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const ask = h.bridge.onQuestion(TWO, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  const mine = { chat: 'alice', user: 'alice' };
+  h.client.emit('event.template_card_event', cardSubmitDropdowns(card.task_id, { q0: 'opt_1', q1: 'other' }, mine));
+  await settle();
+  assert.match(h.client.sends.at(-1).body.markdown.content, /请直接回复问题 2 的答案/);
+  assert.doesNotMatch(h.client.sends.at(-1).body.markdown.content, /还有/, 'only one is left to type');
+  await h.send('大后天', mine);
+  assert.deepEqual(await ask, { answers: [{ id: 'where', selected: ['上海'] }, { id: 'when', selected: [], custom: '大后天' }] });
+  h.stop();
+});
+
+test('a card whose question is gone gets a dead card, however long ago it was', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'root'], ['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const updates = h.client.cardUpdates.length;
+
+  // Never seen by this process (a restart, or older than any memory of it).
+  h.client.emit('event.template_card_event', cardClick('qst_zzzzzz', 'opt_0', { chat: 'alice', user: 'alice' }));
+  await settle();
+  assert.equal(h.client.cardUpdates.length, updates + 1, 'the member who taps it gets 「已失效」, not WeCom\'s bare ok');
+  assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已失效/);
+  assert.equal(h.client.cardUpdates.at(-1).card.button_list, undefined);
+
+  h.client.emit('event.template_card_event', cardClick('apv_zzzzzz', 'approve', { chat: 'root', user: 'root' }));
+  await settle();
+  assert.equal(h.client.cardUpdates.length, updates + 2, 'and so does an administrator for an approval');
+
+  // Somebody who may not talk here changes nothing, whatever they tap.
+  h.client.emit('event.template_card_event', cardClick('qst_zzzzzz', 'opt_0', { chat: 'eve', user: 'eve' }));
+  h.client.emit('event.template_card_event', cardClick('apv_zzzzzz', 'approve', { chat: 'alice', user: 'alice' }));
+  await settle();
+  assert.equal(h.client.cardUpdates.length, updates + 2);
   h.stop();
 });
 

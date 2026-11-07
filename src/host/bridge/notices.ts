@@ -450,7 +450,7 @@ export function questionBodyNotice(sessionTitle: string | null, questions: reado
     '',
     questionBlocks(questions, true),
     '',
-    `> 请在下面的卡片上作答${several ? '，每题选一项后点「提交」' : ''}。`,
+    `> 请在下面的卡片上作答${several ? '，每题选一项后点「提交」' : ''}；想自己写答案，选「✏️ 自己回答」。`,
   ].join('\n');
 }
 
@@ -507,7 +507,7 @@ export function questionCard(sessionTitle: string | null, asked: Question | read
 function questionDropdownCard(sessionTitle: string | null, questions: readonly Question[], nonce: string, timeoutMs: number): TemplateCard {
   return {
     card_type: 'multiple_interaction',
-    main_title: { title: '❓ DSH 等待你的回答', desc: describeQuestions(questions, sessionTitle, nonce, timeoutMs, '每题选一项', `自己写答案：/answer ${nonce} 题号 答案`) },
+    main_title: { title: '❓ DSH 等待你的回答', desc: describeQuestions(questions, sessionTitle, nonce, timeoutMs, '每题选一项', `自己写答案：选「✏️ 自己回答」，或 /answer ${nonce} 题号 答案`) },
     select_list: questions.map((question, n) => ({
       question_key: questionKey(n),
       // The full text is in the description; the dropdown's own label repeats its start.
@@ -516,11 +516,24 @@ function questionDropdownCard(sessionTitle: string | null, questions: readonly Q
       option_list: [
         { id: PLACEHOLDER_OPTION, text: '请选择' },
         ...(question.options ?? []).map((option, i) => ({ id: optionButton(i), text: cardText(`${i + 1}. ${option.label}`, 60) })),
+        { id: OTHER_ID, text: '✏️ 自己回答' },
       ],
     })),
     submit_button: { text: '提交', key: SUBMIT_BUTTON },
     task_id: questionTaskId(nonce),
   };
+}
+
+/**
+ * Asks for a typed answer after 「自己回答」. With several questions it names the
+ * one being asked and how many are still to come.
+ */
+export function typeAnswerPrompt(question?: number, remaining = 1): string {
+  const which = question === undefined ? '你的答案' : `问题 ${question} 的答案`;
+  return [
+    title('✏️', `请直接回复${which}`),
+    `> 你发的下一条消息会作为答案提交给 DSH，不会当作新的提问${remaining > 1 ? `；还有 ${remaining - 1} 题要自己回答，会依次问你` : ''}；也可以回到卡片上选一个选项。`,
+  ].join('\n');
 }
 
 /**
@@ -561,7 +574,7 @@ function questionCheckboxCard(sessionTitle: string | null, question: Question, n
       mode: several ? 1 : 0,
       option_list: [
         ...options.map((option, n) => ({ id: optionButton(n), text: cardText(`${n + 1}. ${option.label}`, 60) })),
-        { id: OTHER_ID, text: '✏️ 自己回答（单独勾选）' },
+        { id: OTHER_ID, text: several ? '✏️ 其他（自己回答）' : '✏️ 自己回答' },
       ],
     },
     submit_button: { text: '提交', key: SUBMIT_BUTTON },

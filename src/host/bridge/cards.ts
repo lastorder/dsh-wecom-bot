@@ -27,7 +27,7 @@ export const MAX_CHECKBOX_OPTIONS = 20;  // including the 「自己回答」 ent
 export const SUBMIT_BUTTON = 'submit';
 /** Dropdown cards: most questions one card carries, and options per dropdown. */
 export const MAX_SELECT_QUESTIONS = 3;
-export const MAX_SELECT_OPTIONS = 9;  // a dropdown carries ten entries, one of them 「请选择」
+export const MAX_SELECT_OPTIONS = 8;  // a dropdown carries ten entries: 「请选择」, the options, 「自己回答」
 /** 「自己回答」: the button, and the checkbox entry, that lets a person type an answer instead. */
 export const OTHER_ID = 'other';
 /** The 「请选择」 entry every dropdown starts on, so an untouched one is never an answer. */
@@ -65,7 +65,7 @@ export interface CardEvent {
    */
   readonly selected?: readonly number[];
   /** For a dropdown card's submit: per question key (`q<index>`), the 0-based option chosen, or none. */
-  readonly chosen?: Readonly<Record<string, number | undefined>>;
+  readonly chosen?: Readonly<Record<string, number | typeof OTHER_ID | undefined>>;
   /** For a checkbox card's submit: 「自己回答」 was ticked. */
   readonly other?: boolean;
   /** The verification code carried by the card, empty when the id is foreign. */
@@ -104,7 +104,7 @@ export function parseCardEvent(frame: WsFrame | undefined): CardEvent {
   let action: CardEvent['action'];
   let option: number | undefined;
   let selected: number[] | undefined;
-  let chosen: Record<string, number | undefined> | undefined;
+  let chosen: Record<string, number | typeof OTHER_ID | undefined> | undefined;
   let other = false;
   if (kind === 'approval') action = key === APPROVE_BUTTON ? 'approve' : key === DENY_BUTTON ? 'deny' : undefined;
   if (kind === 'question' && typeof key === 'string' && /^opt_\d{1,2}$/.test(key)) {
@@ -167,15 +167,15 @@ export function questionKey(index: number): string {
  * What each dropdown of a multi-question card is set to, by question key.
  *
  * A dropdown left on 「请选择」 (or with an id this plugin never sent) maps to
- * `undefined`, so the caller can ask for it instead of submitting a default.
+ * `undefined`, and one on 「自己回答」 to `'other'`, so the caller can ask for it instead of submitting a default.
  * No `selected_items` at all returns undefined: the frame cannot be read.
  */
-export function chosenOptions(items: unknown): Record<string, number | undefined> | undefined {
+export function chosenOptions(items: unknown): Record<string, number | typeof OTHER_ID | undefined> | undefined {
   if (!items || typeof items !== 'object') return undefined;
   const list = (items as { selected_item?: unknown }).selected_item;
   const entries = Array.isArray(list) ? list : list ? [list] : [];
   if (!entries.length) return undefined;
-  const chosen: Record<string, number | undefined> = {};
+  const chosen: Record<string, number | typeof OTHER_ID | undefined> = {};
   for (const entry of entries) {
     if (!entry || typeof entry !== 'object') continue;
     const { question_key: key, option_ids: ids } = entry as { question_key?: unknown; option_ids?: unknown };
@@ -183,7 +183,7 @@ export function chosenOptions(items: unknown): Record<string, number | undefined
     const raw = (ids as { option_id?: unknown } | undefined)?.option_id;
     const first = Array.isArray(raw) ? raw[0] : raw;
     const match = typeof first === 'string' ? /^opt_(\d{1,2})$/.exec(first) : null;
-    chosen[key] = match ? Number(match[1]) : undefined;
+    chosen[key] = match ? Number(match[1]) : first === OTHER_ID ? OTHER_ID : undefined;
   }
   return chosen;
 }

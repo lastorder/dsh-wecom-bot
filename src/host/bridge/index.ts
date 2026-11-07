@@ -5,7 +5,7 @@ import { createCatalogService, type CatalogService } from '../catalog.js';
 import type { BridgeSettings } from '../config.js';
 import { bindingKey, bindingKeyFor } from '../store.js';
 import type {
-  ApprovalOutcome, ApprovalRequest, HostContext, Logger, QuestionAnswer, QuestionRequest,
+  ApprovalOutcome, ApprovalRequest, HostContext, Logger, QuestionAnswer, QuestionAnswerItem, QuestionRequest,
   SessionEvent, SessionHandle,
 } from '../dsh.js';
 import { nullJournal, type Journal } from '../journal.js';
@@ -23,10 +23,10 @@ import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, extractSess
 import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.js';
 import { approvalCard, approvalSettledCards, questionBodyNotice, questionCard, questionCardKind, questionSettledCards } from './notices.js';
 import { parseCardEvent, questionKey } from './cards.js';
-import { createInteractionRegistry } from './interactions.js';
+import { createInteractionRegistry, type ArmedAnswer } from './interactions.js';
 import {
   adminUnassignedText, approvalNotice, code, interactionIgnoredText, interactionSubmittedText, promptFailedNotice, questionNotice, reviewNotice, routingChangedText,
-  sessionErrorNotice, sessionLabel, title, turnCompleteNotice, unauthorizedText,
+  sessionErrorNotice, sessionLabel, title, turnCompleteNotice, typeAnswerPrompt, unauthorizedText,
 } from './notices.js';
 import { ackSummary, createOutbox, type NoticeKind } from './outbox.js';
 import { createAccessPolicy } from './policy.js';
@@ -476,9 +476,10 @@ export function createBridge(deps: BridgeDeps): Bridge {
   }
 
   /** The message that follows a tap on 「自己回答」: a free-text answer, never a prompt. */
-  async function answerArmed(message: InboundMessage, round: Round, armed: { readonly nonce: string; readonly questionId: string }, content: string): Promise<void> {
+  async function answerArmed(message: InboundMessage, round: Round, armed: ArmedAnswer, content: string): Promise<void> {
     const state = interactions.findQuestion(armed.nonce);
-    if (!state?.active()) {
+    const [current, ...rest] = armed.awaiting;
+    if (!state?.active() || !current) {
       // The question was answered elsewhere or timed out: say so rather than
       // sending an answer to nobody as a brand new prompt.
       await reply(message, round, interactionIgnoredText());
@@ -491,8 +492,19 @@ export function createBridge(deps: BridgeDeps): Bridge {
       await reply(message, round, interactionIgnoredText());
       return;
     }
-    journal.write({ event: 'dsh.question.answer', source: 'typed', roundId: round.id, sessionId: state.sessionId, questionId: armed.questionId, answer: { id: armed.questionId, selected: [], custom: content } });
-    const result = await state.submit({ answers: [{ id: armed.questionId, selected: [], custom: content }] });
+    // Verbatim, even when it looks like an option number; what the card already
+    // fixed for this question (ticked next to 「其他」) is kept alongside it.
+    const typed = { id: current.id, selected: [...current.picked], custom: content };
+    const done = [...armed.done, typed];
+    journal.write({ event: 'dsh.question.answer', source: 'typed', roundId: round.id, sessionId: state.sessionId, questionId: current.id, answer: typed, remaining: rest.length });
+    if (rest.length) {
+      interactions.arm(message.chat, message.user, { nonce: armed.nonce, done, awaiting: rest });
+      const next = state.questions.findIndex(question => question.id === rest[0]!.id);
+      await reply(message, round, typeAnswerPrompt(next + 1, rest.length));
+      return;
+    }
+    const answers = state.questions.flatMap(question => done.filter(item => item.id === question.id));
+    const result = await state.submit({ answers });
     await reply(message, round, result === 'closed' ? interactionIgnoredText()
       : result === 'submitted' ? interactionSubmittedText('question') : title('✅', '答案已提交给 DSH'));
   }
@@ -586,7 +598,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
     // A request that is already closed (answered on the DSH page, by text, or
     // timed out) has no pending state left, but its card is still live on the
     // phone. An administrator tapping it deserves a dead card, not silence.
-    const stale = !state && admin && interactions.wasClosed(event.nonce);
+    // (A tombstone is not required: the registry forgets after a while and on every restart.)
+    const stale = !state && admin;
     if (!stale && (!state || !admin || !state.privateChats.has(event.chatId))) {
       journal.write({ event: 'wecom.card.rejected', ...meta, admin, reason: 'not-the-asking-administrator' });
       return;
@@ -639,99 +652,121 @@ export function createBridge(deps: BridgeDeps): Bridge {
   }
 
   /**
-   * A single-choice question answered with a button.
+   * A question answered on its card: a button, ticked boxes, or dropdowns.
    *
-   * Unlike an approval, the chat may be a group, so the tap is only honoured
-   * when it comes from a chat the question was announced to, by somebody the
-   * access policy lets talk there, and the Session is still that chat's (or an
+   * Unlike an approval, the chat may be a group, so a tap is only honoured when
+   * it comes from a chat the question was announced to, by somebody the access
+   * policy lets talk there, while the Session is still that chat's (or an
    * administrator's, in a private chat, within scope) at the moment of the tap.
+   *
+   * What a tap means is decided first (`plan`), then done: an answer is
+   * submitted, a typed answer is asked for, or the person is told what is
+   * missing. A frame this plugin cannot read is never guessed at.
    */
   async function onQuestionCardEvent(frame: WsFrame, event: ReturnType<typeof parseCardEvent>, meta: Record<string, unknown>): Promise<void> {
     const state = interactions.findQuestion(event.nonce);
     const chatType = event.chatId === event.userId ? 'single' : 'group';
     const entitled = policy.evaluate({ chat: event.chatId, user: event.userId, chatType }).accepted;
-    // A closed question's card is still live on the phone: whoever may talk in
-    // that chat deserves a dead card, not silence. Anybody else changes nothing.
-    const stale = !state && entitled && interactions.wasClosed(event.nonce);
-    if (!stale && (!state || !entitled || !state.chats.has(event.chatId))) {
+    const tell = (text: string) => client.sendMessage(event.chatId, { msgtype: 'markdown', markdown: { content: text } }).catch(() => undefined);
+    // A card outlives its question — answered elsewhere, timed out, or lost with
+    // a restart — and is still live on the phone. Whoever may talk in that chat
+    // deserves a dead card, not WeCom's bare 「ok」; anybody else changes nothing.
+    if (!state) {
+      if (!entitled) {
+        journal.write({ event: 'wecom.card.rejected', ...meta, reason: 'not-in-the-asked-chat' });
+        return;
+      }
+      journal.write({ event: 'wecom.card.stale', ...meta, closed: interactions.wasClosed(event.nonce) });
+      await settleCard(frame, event.chatId, meta, questionSettledCards('expired', undefined, event.taskId));
+      return;
+    }
+    if (!entitled || !state.chats.has(event.chatId)) {
       journal.write({ event: 'wecom.card.rejected', ...meta, reason: 'not-in-the-asked-chat' });
       return;
     }
-    if (state && !state.active()) {
+    if (!state.active()) {
       journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'already-submitting' });
       return;
     }
-    // 「自己回答」: a card cannot take typed text, so the person's next plain
-    // message in this chat becomes the answer. The card keeps its controls, so
-    // they can still change their mind and tap an option.
-    if (state && !closed && state.questions.length === 1 && (event.action === 'other' || (event.action === 'submit' && event.other))) {
-      const question = state.questions[0]!;
-      const boundHere = router.forSession(state.sessionId).some(binding => binding.id === event.chatId);
-      const adminHere = chatType === 'single' && policy.isAdmin(event.userId) && await directory.permitted(state.sessionId);
-      if (!(boundHere || adminHere) || !state.active()) {
-        journal.write({ event: 'wecom.card.rejected', ...meta, reason: 'not-bound-to-this-chat' });
-        return;
-      }
-      const alone = event.action === 'other' || !(event.selected?.length);
-      const text = alone
-        ? `${title('✏️', '请直接回复你的答案')}\n> 你发的下一条消息会作为答案提交给 DSH，不会当作新的提问；也可以回到卡片上选一个选项。`
-        : `${title('⚠️', '「自己回答」请单独勾选')}\n> 取消其他选项后再点「提交」，或直接回复 ${code(`/answer ${state.nonce} 你的答案`)}。`;
-      if (alone) interactions.arm(event.chatId, event.userId, { nonce: state.nonce, questionId: question.id });
-      journal.write({ event: 'dsh.question.armed', ...meta, sessionId: state.sessionId, questionId: question.id, armed: alone });
-      await client.sendMessage(event.chatId, { msgtype: 'markdown', markdown: { content: text } }).catch(() => undefined);
+    const boundHere = router.forSession(state.sessionId).some(binding => binding.id === event.chatId);
+    const adminHere = chatType === 'single' && policy.isAdmin(event.userId) && await directory.permitted(state.sessionId);
+    if (closed || !(boundHere || adminHere) || !state.active()) {
+      journal.write({ event: 'wecom.card.rejected', ...meta, reason: 'not-bound-to-this-chat' });
       return;
     }
-    let outcome = 'ignored';
-    let label: string | undefined;
-    if (state?.active() && !closed) {
-      const question = state.questions[0];
-      const options = question?.options ?? [];
-      let labels: string[] | undefined;
-      if (state.questions.length === 1 && question) {
-        if (event.action === 'option' && event.option !== undefined && options[event.option]) {
-          labels = [options[event.option]!.label];
-        } else if (event.action === 'submit') {
-          // WeCom's selection field is not typed by the SDK: never guess an
-          // answer from a frame this plugin cannot read, say so and keep the
-          // question open for the typed reply.
-          const picked = (event.selected ?? []).filter(index => options[index]);
-          const hint = event.selected === undefined
-            ? '没能读取卡片上的选择，请改为回复文字作答'
-            : !picked.length ? '还没有勾选任何选项'
-              : !question.multiSelect && picked.length > 1 ? '这道题只能选择一个选项' : undefined;
-          if (hint) {
-            journal.write({ event: 'wecom.card.unreadable', level: event.selected === undefined ? 'warn' : 'info', ...meta, sessionId: state.sessionId, reason: hint, frame: frame.body });
-            await client.sendMessage(event.chatId, { msgtype: 'markdown', markdown: { content: `${title('⚠️', hint)}\n> 也可以回复 ${code(`/answer ${state.nonce} 序号`)}。` } }).catch(() => undefined);
-            return;
-          }
-          labels = picked.map(index => options[index]!.label);
-        }
+
+    const questions = state.questions;
+    const label = (question: { readonly options?: readonly { readonly label: string }[] }, index: number) => question.options?.[index]?.label;
+    type Plan =
+      | { readonly kind: 'answers'; readonly answers: QuestionAnswerItem[]; readonly summary: string }
+      | { readonly kind: 'type'; readonly done: QuestionAnswerItem[]; readonly awaiting: { id: string; picked: string[] }[] }
+      | { readonly kind: 'hint'; readonly text: string; readonly detail: string; readonly unreadable: boolean };
+    const hint = (text: string, detail: string, unreadable = false): Plan => ({ kind: 'hint', text, detail, unreadable });
+    const unreadable = (): Plan => hint('没能读取卡片上的选择，请改为回复文字作答', `也可以回复 ${code(`/answer ${state.nonce} ${questions.length === 1 ? '序号' : '题号 序号'}`)}。`, true);
+    let plan: Plan | undefined;
+
+    if (questions.length === 1) {
+      const question = questions[0]!;
+      if (event.action === 'option' && event.option !== undefined && label(question, event.option) !== undefined) {
+        plan = { kind: 'answers', answers: [{ id: question.id, selected: [label(question, event.option)!] }], summary: label(question, event.option)! };
+      } else if (event.action === 'other') {
+        plan = { kind: 'type', done: [], awaiting: [{ id: question.id, picked: [] }] };
+      } else if (event.action === 'submit') {
+        const picked = (event.selected ?? []).flatMap(index => label(question, index) === undefined ? [] : [label(question, index)!]);
+        if (event.selected === undefined) plan = unreadable();
+        else if (event.other) {
+          // Ticked next to 「其他」: what was ticked is kept, the typed text is added to it.
+          plan = question.multiSelect || !picked.length
+            ? { kind: 'type', done: [], awaiting: [{ id: question.id, picked }] }
+            : hint('这道题只能选择一个选项', '取消其他选项后再点「提交」。');
+        } else if (!picked.length) plan = hint('还没有勾选任何选项', `也可以回复 ${code(`/answer ${state.nonce} 序号`)}。`);
+        else if (!question.multiSelect && picked.length > 1) plan = hint('这道题只能选择一个选项', `也可以回复 ${code(`/answer ${state.nonce} 序号`)}。`);
+        else plan = { kind: 'answers', answers: [{ id: question.id, selected: picked }], summary: picked.join('、') };
       }
-      // Several questions on one dropdown card: every dropdown must be set.
-      let answers: { id: string; selected: string[] }[] | undefined;
-      if (state.questions.length > 1 && event.action === 'submit') {
-        const missing = state.questions.flatMap((q, n) => event.chosen?.[questionKey(n)] !== undefined && q.options?.[event.chosen[questionKey(n)]!] ? [] : [n + 1]);
-        const hint = event.chosen === undefined ? '没能读取卡片上的选择，请改为回复文字作答'
-          : missing.length ? `还没有选择：问题 ${missing.join('、')}` : undefined;
-        if (hint) {
-          journal.write({ event: 'wecom.card.unreadable', level: event.chosen === undefined ? 'warn' : 'info', ...meta, sessionId: state.sessionId, reason: hint, frame: frame.body });
-          await client.sendMessage(event.chatId, { msgtype: 'markdown', markdown: { content: `${title('⚠️', hint)}\n> ${event.chosen === undefined ? `也可以回复 ${code(`/answer ${state.nonce} 题目ID 序号`)}。` : '每道题都选好后再点「提交」。'}` } }).catch(() => undefined);
-          return;
-        }
-        answers = state.questions.map((q, n) => ({ id: q.id, selected: [q.options![event.chosen![questionKey(n)]!]!.label] }));
-        label = answers.map((answer, n) => `${n + 1}. ${answer.selected[0]}`).join('；');
-      }
-      if (labels) label = labels.join('、');
-      const boundHere = router.forSession(state.sessionId).some(binding => binding.id === event.chatId);
-      const adminHere = chatType === 'single' && policy.isAdmin(event.userId) && await directory.permitted(state.sessionId);
-      const submitted = answers ?? (question && labels ? [{ id: question.id, selected: labels }] : undefined);
-      if (submitted && (boundHere || adminHere) && state.active() && !closed) {
-        const submission = await state.submit({ answers: submitted });
-        outcome = submission === 'closed' ? 'ignored' : 'answered';
+    } else if (event.action === 'submit') {
+      const chosen = event.chosen;
+      const unset = chosen === undefined ? [] : questions.flatMap((q, n) => {
+        const value = chosen[questionKey(n)];
+        return value === 'other' || (typeof value === 'number' && label(q, value) !== undefined) ? [] : [n + 1];
+      });
+      if (chosen === undefined) plan = unreadable();
+      else if (unset.length) plan = hint(`还没有选择：问题 ${unset.join('、')}`, '每道题都选好后再点「提交」。');
+      else {
+        const done: QuestionAnswerItem[] = [];
+        const awaiting: { id: string; picked: string[] }[] = [];
+        questions.forEach((q, n) => {
+          const value = chosen[questionKey(n)];
+          if (value === 'other') awaiting.push({ id: q.id, picked: [] });
+          else done.push({ id: q.id, selected: [label(q, value as number)!] });
+        });
+        plan = awaiting.length ? { kind: 'type', done, awaiting }
+          : { kind: 'answers', answers: done, summary: done.map((answer, n) => `${n + 1}. ${answer.selected[0]}`).join('；') };
       }
     }
-    journal.write({ event: 'dsh.question.answer', ...meta, source: 'card', sessionId: state?.sessionId, questionId: state?.questions[0]?.id, outcome, ...(outcome === 'answered' ? { answer: label } : {}) });
-    await settleCard(frame, event.chatId, meta, questionSettledCards(outcome, label, event.taskId));
+
+    if (!plan) {
+      journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'unknown-button-or-task' });
+      return;
+    }
+    if (plan.kind === 'hint') {
+      journal.write({ event: 'wecom.card.unreadable', level: plan.unreadable ? 'warn' : 'info', ...meta, sessionId: state.sessionId, reason: plan.text, ...(plan.unreadable ? { frame: frame.body } : {}) });
+      await tell(`${title('⚠️', plan.text)}\n> ${plan.detail}`);
+      return;
+    }
+    if (plan.kind === 'type') {
+      // A card cannot take typed text: the person's next plain message in this
+      // chat becomes the answer. The card keeps its controls, so they can still
+      // change their mind and tap an option.
+      interactions.arm(event.chatId, event.userId, { nonce: state.nonce, done: plan.done, awaiting: plan.awaiting });
+      const first = questions.findIndex(question => question.id === plan.awaiting[0]!.id);
+      journal.write({ event: 'dsh.question.armed', ...meta, sessionId: state.sessionId, questionIds: plan.awaiting.map(entry => entry.id) });
+      await tell(typeAnswerPrompt(questions.length > 1 ? first + 1 : undefined, plan.awaiting.length));
+      return;
+    }
+    const submission = await state.submit({ answers: plan.answers });
+    const outcome = submission === 'closed' ? 'ignored' : 'answered';
+    journal.write({ event: 'dsh.question.answer', ...meta, source: 'card', sessionId: state.sessionId, questionId: questions[0]?.id, outcome, ...(outcome === 'answered' ? { answer: plan.summary } : {}) });
+    await settleCard(frame, event.chatId, meta, questionSettledCards(outcome, plan.summary, event.taskId));
   }
 
   async function onApproval(request: ApprovalRequest, next: () => Promise<ApprovalOutcome>, delivery?: InteractionDelivery): Promise<ApprovalOutcome> {
