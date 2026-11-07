@@ -1,4 +1,4 @@
-import type { WSClient } from '@wecom/aibot-node-sdk';
+import type { TemplateCard, WSClient } from '@wecom/aibot-node-sdk';
 import type { Logger } from '../dsh.js';
 import type { Journal } from '../journal.js';
 import type { StatusTracker } from '../status.js';
@@ -27,6 +27,8 @@ export interface Notice {
   readonly sessionId?: string;
   /** An actionable notice may not outlive this exact pending interaction. */
   readonly interactionNonce?: string;
+  /** Sent instead of {@link text} when the client can show a card (approval buttons). */
+  readonly card?: TemplateCard;
   readonly roundIds?: readonly string[];
 }
 
@@ -71,7 +73,15 @@ export function createOutbox(options: {
     try {
       while (online && !closed && queue.length) {
         const notice = queue.shift()!;
-        const body = { msgtype: 'markdown' as const, markdown: { content: notice.text } };
+        // A card notice carries buttons; the markdown text stays as the fallback
+        // body, because a card the server (or the client) refuses must never
+        // swallow the request.
+        const body = notice.card
+          ? { msgtype: 'template_card' as const, template_card: notice.card }
+          : { msgtype: 'markdown' as const, markdown: { content: notice.text } };
+        const fallbackBody = notice.card
+          ? { msgtype: 'markdown' as const, markdown: { content: notice.text } }
+          : undefined;
         const started = Date.now();
         const meta = {
           chatId: notice.chat, kind: notice.kind,
@@ -90,6 +100,15 @@ export function createOutbox(options: {
           status.count('notifications');
           journal.write({ event: 'wecom.send', ...meta, request: { chatid: notice.chat, body }, response: ackSummary(ack), durationMs: Date.now() - started });
         } catch (error) {
+          // A rejected card must not swallow an approval request: fall back to the
+          // text form, which carries the same verification code.
+          if (fallbackBody) {
+            try {
+              const ack = await client.sendMessage(notice.chat, fallbackBody);
+              journal.write({ event: 'wecom.send', ...meta, request: { chatid: notice.chat, body: fallbackBody }, response: ackSummary(ack), fallback: 'markdown', durationMs: Date.now() - started });
+              continue;
+            } catch { /* report the card failure below */ }
+          }
           status.count('failures');
           // SDK errors may echo the socket URL: keep them out of the DSH log.
           log.warn('WeCom notification send failed');

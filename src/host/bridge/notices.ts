@@ -1,7 +1,9 @@
+import type { TemplateCard } from '@wecom/aibot-node-sdk';
 import type { ApprovalRequest, Question } from '../dsh.js';
 import type { TurnSummary } from '../turns.js';
 import type { OperableGroup } from './directory.js';
 import type { WorkspaceOption } from '../../shared/protocol.js';
+import { APPROVE_BUTTON, DENY_BUTTON, SETTLED_BUTTON, approvalTaskId } from './cards.js';
 import {
   displayPath, displayTitle, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, sessionToken, shortId,
 } from './format.js';
@@ -429,6 +431,70 @@ export function approvalNotice(sessionId: string, sessionTitle: string | null, r
     : '请到 DSH 页面审批。');
   lines.push('', quotePointer(sessionId));
   return lines.join('\n');
+}
+
+/**
+ * Where a tap on the card body (not a button) leads.
+ *
+ * WeCom validates `card_action` when a card is *replaced*: without it the
+ * update fails with 42045 “card_action Missing or Invalid” and the settled
+ * request would keep live buttons on the phone. A card whose only real
+ * controls are its buttons therefore points its body at the WeCom workbench.
+ */
+const CARD_ACTION = { type: 1 as const, url: 'https://work.weixin.qq.com/' };
+
+/**
+ * The approval as a card with 「批准 / 拒绝」 buttons.
+ *
+ * The nonce travels in `task_id`, so a click resolves exactly the request that
+ * was announced; the text form (`/approve <nonce>`) stays in the description
+ * and in {@link approvalNotice} for keyboards and clients that drop cards.
+ */
+export function approvalCard(sessionTitle: string | null, request: ApprovalRequest, nonce: string, timeoutMs?: number): TemplateCard {
+  const reason = request.displayReason?.zh ?? request.displayReason?.en ?? request.reason ?? '';
+  const seconds = Math.round((timeoutMs ?? 0) / 1000);
+  const desc = [
+    reason ? `原因：${inline(reason, 90)}` : '',
+    `会话：${inline(sessionTitle ?? '未命名会话', 40)}`,
+    `验证码 ${nonce} · ${seconds} 秒内有效`,
+  ].filter(Boolean).join(' · ');
+  return {
+    card_type: 'button_interaction',
+    main_title: { title: `🔐 权限请求：${inline(request.toolName, 60)}`, desc },
+    button_list: [
+      { text: '批准', key: APPROVE_BUTTON, style: 1 },
+      { text: '拒绝', key: DENY_BUTTON, style: 2 },
+    ],
+    task_id: approvalTaskId(nonce),
+  };
+}
+
+/**
+ * The cards that replace the buttons once the request is settled, in the order
+ * they are tried. WeCom has no disabled button, so "greyed out" means the card
+ * is replaced by one without live buttons; the inert button card is the shape
+ * to fall back on if the plain notice is ever rejected.
+ */
+export function approvalSettledCards(outcome: 'allowed-once' | 'rejected' | string, toolName: string | undefined, taskId: string): TemplateCard[] {
+  const allowed = outcome === 'allowed-once';
+  const rejected = outcome === 'rejected';
+  const headline = allowed ? '✅ 已批准' : rejected ? '🚫 已拒绝' : '⌛ 已失效';
+  const what = toolName ? `：${inline(toolName, 60)}` : '';
+  const detail = allowed
+    ? `已允许本次工具调用${what}`
+    : rejected
+      ? `已拒绝本次工具调用${what}`
+      : '这条请求已经处理过或已超时，结果以 DSH 页面为准。';
+  const base = { card_action: CARD_ACTION, main_title: { title: headline, desc: detail }, task_id: taskId };
+  return [
+    { card_type: 'text_notice', ...base },
+    {
+      card_type: 'button_interaction',
+      ...base,
+      main_title: { title: headline, desc: `${detail} · 按钮不再可用` },
+      button_list: [{ text: allowed ? '已批准' : rejected ? '已拒绝' : '已失效', key: SETTLED_BUTTON, style: 4 }],
+    },
+  ];
 }
 
 export function promptFailedNotice(sessionId: string, sessionTitle: string | null): string {
