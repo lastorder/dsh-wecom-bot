@@ -38,7 +38,10 @@ export const CHECKBOX_KEY = 'pick';
 const TASK_PREFIX = 'apv_';
 const QUESTION_PREFIX = 'qst_';
 
-/** WeCom echoes `task_id` on every click, so the nonce travels with the card. */
+/**
+ * WeCom echoes `task_id` on every click, so the nonce travels with the card.
+ * A task_id may be used once per bot: a second chat gets a `_<n>` suffix.
+ */
 export function approvalTaskId(nonce: string): string {
   return `${TASK_PREFIX}${nonce}`;
 }
@@ -99,7 +102,9 @@ export function parseCardEvent(frame: WsFrame | undefined): CardEvent {
   const chatId = typeof body.chatid === 'string' ? body.chatid : userId;
   const id = typeof taskId === 'string' ? taskId : '';
   const kind = id.startsWith(TASK_PREFIX) ? 'approval' : id.startsWith(QUESTION_PREFIX) ? 'question' : undefined;
-  const nonce = id.slice(kind === 'approval' ? TASK_PREFIX.length : kind === 'question' ? QUESTION_PREFIX.length : id.length);
+  // `<prefix><nonce>` for the first chat, `<prefix><nonce>_<n>` for the others (see `notify`);
+  // a nonce never contains an underscore.
+  const nonce = id.slice(kind === 'approval' ? TASK_PREFIX.length : kind === 'question' ? QUESTION_PREFIX.length : id.length).split('_')[0]!;
   // A button only means something on the kind of card that carries it.
   let action: CardEvent['action'];
   let option: number | undefined;

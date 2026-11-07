@@ -56,12 +56,22 @@ export function fakeClient() {
   const sends = [];
   const replies = [];
   const cardUpdates = [];
+  // WeCom refuses a task_id it has already seen (errcode 42014, "taskid has existed").
+  const taskIds = new Set();
   const client = Object.assign(new EventEmitter(), {
     sends, replies, cardUpdates,
     connected: false,
     connect() { this.connected = true; return this; },
     disconnect() { this.connected = false; },
-    async sendMessage(chat, body) { sends.push({ chat, body }); return { headers: { req_id: `send_${sends.length}` }, errcode: 0, errmsg: 'ok' }; },
+    async sendMessage(chat, body) {
+      const taskId = body?.template_card?.task_id;
+      if (taskId !== undefined) {
+        if (taskIds.has(taskId)) throw new Error('errcode=42014, errmsg=taskid has existed or empty or exceed max len');
+        taskIds.add(taskId);
+      }
+      sends.push({ chat, body });
+      return { headers: { req_id: `send_${sends.length}` }, errcode: 0, errmsg: 'ok' };
+    },
     async replyStream(frame, streamId, content, finish) { replies.push({ frame, streamId, content, finish }); return { headers: { req_id: frame.headers.req_id }, errcode: 0, errmsg: 'ok' }; },
     async updateTemplateCard(frame, card) { cardUpdates.push({ frame, card }); return { headers: { req_id: frame.headers.req_id }, errcode: 0, errmsg: 'ok' }; },
   });

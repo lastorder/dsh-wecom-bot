@@ -213,7 +213,12 @@ export function createBridge(deps: BridgeDeps): Bridge {
   }
 
   function notify(chats: readonly string[], text: string, kind: NoticeKind, sessionId?: string, interactionNonce?: string, card?: TemplateCard): void {
-    for (const chat of chats) outbox.enqueue({ chat, text, kind, ...(sessionId ? { sessionId } : {}), ...(interactionNonce ? { interactionNonce } : {}), ...(card ? { card } : {}) });
+    chats.forEach((chat, index) => outbox.enqueue({
+      chat, text, kind, ...(sessionId ? { sessionId } : {}), ...(interactionNonce ? { interactionNonce } : {}),
+      // WeCom refuses a task_id it has seen (errcode 42014), so every chat the
+      // same request is announced to needs its own; the first keeps the plain one.
+      ...(card ? { card: index ? { ...card, task_id: `${card.task_id}_${index}` } : card } : {}),
+    }));
   }
 
   async function reply(message: InboundMessage, round: Round, text: string): Promise<void> {

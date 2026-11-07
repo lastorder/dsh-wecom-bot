@@ -1687,3 +1687,42 @@ test('a checkbox or dropdown card is preceded by the whole question in text; a b
   b.stop();
   await one;
 });
+
+test('one request announced to several chats gets a card in each, with a task_id of its own', async () => {
+  // WeCom answers errcode 42014 to a task_id it has seen, and the card then fell
+  // back to text for every chat but the first. The fake client now refuses it too.
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'root'], ['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const before = h.client.sends.length;
+  const ask = h.bridge.onQuestion(CHOICE, async () => ({ answers: [] }));
+  await settle();
+  const cards = h.client.sends.slice(before).filter(send => send.body.template_card);
+  assert.deepEqual(cards.map(send => send.chat).sort(), ['alice', 'root'], 'both chats got a card, not the text fallback');
+  const ids = cards.map(send => send.body.template_card.task_id);
+  assert.equal(new Set(ids).size, 2);
+  assert.ok(ids.every(id => /^qst_[a-z0-9]{6}(_\d+)?$/.test(id)), ids.join());
+  assert.equal(h.journal.find('wecom.send').filter(r => r.fallback).length, 0);
+
+  // A tap on the second chat's card answers the same question and retires that card, by its own id.
+  const second = cards.find(send => send.body.template_card.task_id.includes('_'));
+  h.client.emit('event.template_card_event', cardClick(second.body.template_card.task_id, 'opt_1', { chat: second.chat, user: second.chat }));
+  assert.deepEqual(await ask, { answers: [{ id: 'pick', selected: ['一个名字特别特别长的方案 B'] }] });
+  assert.equal(h.client.cardUpdates.at(-1).card.task_id, second.body.template_card.task_id, 'WeCom wants the id it called back with');
+  h.stop();
+});
+
+test('an approval for two administrators is a card for each', async () => {
+  const h = await harness({ adminUserIds: ['root', 'boss'] }, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const before = h.client.sends.length;
+  const approval = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
+  await settle();
+  const cards = h.client.sends.slice(before).filter(send => send.body.template_card);
+  assert.deepEqual(cards.map(send => send.chat).sort(), ['boss', 'root']);
+  const [first, other] = cards;
+  h.client.emit('event.template_card_event', cardClick(other.body.template_card.task_id, 'approve', { chat: other.chat, user: other.chat }));
+  assert.equal(await approval, 'allowed-once');
+  h.stop();
+});

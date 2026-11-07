@@ -105,7 +105,8 @@ export function createOutbox(options: {
           if (fallbackBody) {
             try {
               const ack = await client.sendMessage(notice.chat, fallbackBody);
-              journal.write({ event: 'wecom.send', ...meta, request: { chatid: notice.chat, body: fallbackBody }, response: ackSummary(ack), fallback: 'markdown', durationMs: Date.now() - started });
+              // Say why the card did not go: the text alone looks like a design choice.
+              journal.write({ event: 'wecom.send', ...meta, request: { chatid: notice.chat, body: fallbackBody }, response: ackSummary(ack), fallback: 'markdown', cardError: error, durationMs: Date.now() - started });
               continue;
             } catch { /* report the card failure below */ }
           }
