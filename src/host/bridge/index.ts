@@ -21,7 +21,7 @@ import { parseCommand, runCommand, type CommandServices, type TargetInfo } from 
 import { createSessionDirectory, type SessionDirectory } from './directory.js';
 import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, extractSessionPointer } from './format.js';
 import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.js';
-import { approvalCard, approvalSettledCards } from './notices.js';
+import { approvalCard, approvalSettledCards, questionCard, questionFitsCard, questionSettledCards } from './notices.js';
 import { parseCardEvent } from './cards.js';
 import { createInteractionRegistry } from './interactions.js';
 import {
@@ -511,10 +511,13 @@ export function createBridge(deps: BridgeDeps): Bridge {
       notify(chats, reviewNotice(sessionId, info.title), 'review', sessionId);
       return next();
     }
-    const wait = interactions.waitQuestion(sessionId, request.questions, settings.questionTimeoutMs, request.signal, delivery);
+    const wait = interactions.waitQuestion(sessionId, request.questions, settings.answerTimeoutMs, request.signal, delivery, chats);
     if (!wait) return next();
-    journal.write({ event: 'dsh.question', sessionId, nonce: wait.nonce, questions: request.questions, chats, timeoutMs: settings.questionTimeoutMs });
-    notify(chats, questionNotice(sessionId, info.title, request.questions, wait.nonce, settings.questionTimeoutMs), 'question', sessionId, wait.nonce);
+    journal.write({ event: 'dsh.question', sessionId, nonce: wait.nonce, questions: request.questions, chats, timeoutMs: settings.answerTimeoutMs });
+    // One single-choice question is answered with a tap; anything else keeps the typed reply.
+    const card = questionFitsCard(request.questions)
+      ? questionCard(info.title, request.questions[0]!, wait.nonce, settings.answerTimeoutMs) : undefined;
+    notify(chats, questionNotice(sessionId, info.title, request.questions, wait.nonce, settings.answerTimeoutMs), 'question', sessionId, wait.nonce, card);
     const answer = await wait.result;
     journal.write({ event: 'dsh.question.result', sessionId, nonce: wait.nonce, outcome: answer ? 'answered' : 'fallback', ...(answer ? { answer } : {}) });
     return answer ?? next();
@@ -536,6 +539,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'unknown-button-or-task' });
       return;
     }
+    if (event.kind === 'question') return onQuestionCardEvent(frame, event, meta);
     const state = interactions.findApproval(event.nonce);
     const admin = settings.adminUserIds.includes(event.userId);
     // A card is replaced for every recipient of that chat, so a tap by anybody
@@ -571,7 +575,14 @@ export function createBridge(deps: BridgeDeps): Bridge {
       }
     }
     journal.write({ event: 'dsh.approval.answer', ...meta, sessionId: state?.sessionId, toolName: state?.toolName, outcome, admin });
-    const candidates = approvalSettledCards(outcome, state?.toolName, event.taskId);
+    await settleCard(frame, event.chatId, meta, approvalSettledCards(outcome, state?.toolName, event.taskId));
+  }
+
+  /**
+   * Replace a tapped card with one that has no live buttons; if WeCom refuses
+   * every replacement, say the verdict in text so the tap is never silent.
+   */
+  async function settleCard(frame: WsFrame, chatId: string, meta: Record<string, unknown>, candidates: readonly TemplateCard[]): Promise<void> {
     for (const [index, card] of candidates.entries()) {
       try {
         await client.updateTemplateCard(frame, card);
@@ -583,11 +594,50 @@ export function createBridge(deps: BridgeDeps): Bridge {
     }
     const settled = candidates[0]!;
     try {
-      await client.sendMessage(event.chatId, { msgtype: 'markdown', markdown: { content: `${settled.main_title?.title ?? ''} · ${settled.main_title?.desc ?? ''}` } });
+      await client.sendMessage(chatId, { msgtype: 'markdown', markdown: { content: `${settled.main_title?.title ?? ''} · ${settled.main_title?.desc ?? ''}` } });
       journal.write({ event: 'wecom.card.text-fallback', ...meta });
     } catch (error) {
       journal.write({ event: 'wecom.card.lost', level: 'warn', ...meta, error });
     }
+  }
+
+  /**
+   * A single-choice question answered with a button.
+   *
+   * Unlike an approval, the chat may be a group, so the tap is only honoured
+   * when it comes from a chat the question was announced to, by somebody the
+   * access policy lets talk there, and the Session is still that chat's (or an
+   * administrator's, in a private chat, within scope) at the moment of the tap.
+   */
+  async function onQuestionCardEvent(frame: WsFrame, event: ReturnType<typeof parseCardEvent>, meta: Record<string, unknown>): Promise<void> {
+    const state = interactions.findQuestion(event.nonce);
+    const chatType = event.chatId === event.userId ? 'single' : 'group';
+    const entitled = policy.evaluate({ chat: event.chatId, user: event.userId, chatType }).accepted;
+    // A closed question's card is still live on the phone: whoever may talk in
+    // that chat deserves a dead card, not silence. Anybody else changes nothing.
+    const stale = !state && entitled && interactions.wasClosed(event.nonce);
+    if (!stale && (!state || !entitled || !state.chats.has(event.chatId))) {
+      journal.write({ event: 'wecom.card.rejected', ...meta, reason: 'not-in-the-asked-chat' });
+      return;
+    }
+    if (state && !state.active()) {
+      journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'already-submitting' });
+      return;
+    }
+    let outcome = 'ignored';
+    let label: string | undefined;
+    if (state?.active() && !closed) {
+      const question = state.questions[0];
+      label = state.questions.length === 1 && event.option !== undefined ? question?.options?.[event.option]?.label : undefined;
+      const boundHere = router.forSession(state.sessionId).some(binding => binding.id === event.chatId);
+      const adminHere = chatType === 'single' && policy.isAdmin(event.userId) && await directory.permitted(state.sessionId);
+      if (question && label !== undefined && (boundHere || adminHere) && state.active() && !closed) {
+        const submission = await state.submit({ answers: [{ id: question.id, selected: [label] }] });
+        outcome = submission === 'closed' ? 'ignored' : 'answered';
+      }
+    }
+    journal.write({ event: 'dsh.question.answer', ...meta, source: 'card', sessionId: state?.sessionId, questionId: state?.questions[0]?.id, outcome, ...(outcome === 'answered' ? { answer: label } : {}) });
+    await settleCard(frame, event.chatId, meta, questionSettledCards(outcome, label, event.taskId));
   }
 
   async function onApproval(request: ApprovalRequest, next: () => Promise<ApprovalOutcome>, delivery?: InteractionDelivery): Promise<ApprovalOutcome> {

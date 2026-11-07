@@ -498,17 +498,42 @@ test('a single question is answered from the bound chat with the short code', as
     questions: [{ id: 'choice', question: 'Pick one?', options: [{ label: 'yes' }, { label: 'no' }] }],
   }, async () => { delegated++; return { answers: [] }; });
   await settle();
-  const notice = h.client.sends.at(-1).body.markdown.content;
-  const code = notice.match(/\/answer ([a-z0-9]{6}) /)?.[1];
-  assert.ok(code, notice);
+  // A single-choice question is a card; its typed form works with the same code.
+  const card = h.client.sends.at(-1).body.template_card;
+  const code = card.task_id.replace('qst_', '');
+  assert.match(code, /^[a-z0-9]{6}$/);
   await h.send(`/answer ${code} 2`);
   assert.deepEqual(await ask, { answers: [{ id: 'choice', selected: ['no'] }] });
   assert.equal(delegated, 0);
   h.stop();
 });
 
+test('a multi-choice question stays a typed reply that names its code, ids and examples', async () => {
+  const h = await harness({ answerTimeoutMs: 1_800_000 });
+  h.client.emit('authenticated');
+  await h.send('hi');
+  const ask = h.bridge.onQuestion({
+    agent: { id: 'session-created-1' },
+    questions: [
+      { id: 'tools', question: 'Which?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }, { label: 'c' }] },
+      { id: 'why', question: 'Why?' },
+    ],
+  }, async () => ({ answers: [] }));
+  await settle();
+  const notice = h.client.sends.at(-1).body.markdown.content;
+  const code = notice.match(/\/answer ([a-z0-9]{6}) /)?.[1];
+  assert.ok(code, notice);
+  assert.match(notice, /`tools`/, 'each question shows the id the reply must name');
+  assert.match(notice, /`why`/);
+  assert.match(notice, /30 分钟内有效/);
+  await h.send(`/answer ${code} tools 1,3`);
+  await h.send(`/answer ${code} why 因为需要`);
+  assert.deepEqual(await ask, { answers: [{ id: 'tools', selected: ['a', 'c'] }, { id: 'why', selected: [], custom: '因为需要' }] });
+  h.stop();
+});
+
 test('an unanswered question falls back to the DSH page', async () => {
-  const h = await harness({ questionTimeoutMs: 20 });
+  const h = await harness({ answerTimeoutMs: 20 });
   await h.send('hi');
   const result = await h.bridge.onQuestion({
     agent: { id: 'session-created-1' }, questions: [{ id: 'q', question: 'Q?' }],
@@ -520,9 +545,9 @@ test('an unanswered question falls back to the DSH page', async () => {
 test('a question-timeout edit reaches the running bridge for the next question', async () => {
   // The bridge started with a minute; the ⑤ card now says 20ms. The next
   // question must use the new value, not a snapshot taken at construction.
-  const h = await harness({ questionTimeoutMs: 60_000 });
+  const h = await harness({ answerTimeoutMs: 60_000 });
   await h.send('hi');
-  h.bridge.updateSettings({ ...h.settings, questionTimeoutMs: 20 });
+  h.bridge.updateSettings({ ...h.settings, answerTimeoutMs: 20 });
   const result = await h.bridge.onQuestion({
     agent: { id: 'session-created-1' }, questions: [{ id: 'q', question: 'Q?' }],
   }, async () => ({ answers: [{ id: 'q', selected: [], custom: 'DSH' }] }));
@@ -1208,5 +1233,106 @@ test('an approval stays open for approvalTimeoutMs, not the question timeout, an
   h.bridge.updateSettings({ ...h.settings, approvalTimeoutMs: 20 });
   const second = await h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
   assert.equal(second, 'unavailable', 'it timed out and fell back to DSH');
+  h.stop();
+});
+
+const CHOICE = {
+  agent: { id: 'session-created-1' },
+  questions: [{
+    id: 'pick', question: '用哪种方案？',
+    options: [{ label: '方案 A' }, { label: '一个名字特别特别长的方案 B', description: '更稳妥' }],
+  }],
+};
+
+test('a single-choice question is a card with one button per option, and a tap answers it', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'root'], ['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const ask = h.bridge.onQuestion(CHOICE, async () => ({ answers: [] }));
+  await settle();
+
+  const sent = h.client.sends.find(send => send.chat === 'alice');
+  const card = sent.body.template_card;
+  assert.equal(card.card_type, 'button_interaction');
+  assert.match(card.task_id, /^qst_[a-z0-9]{6}$/);
+  assert.deepEqual(card.button_list.map(button => [button.text, button.key]), [['方案 A', 'opt_0'], ['选项 2', 'opt_1']],
+    'a long option is labelled by number; the full list sits in rows');
+  const rows = Object.fromEntries(card.horizontal_content_list.map(row => [row.keyname, row.value]));
+  assert.equal(rows['选项2'], '一个名字特别特别长的方案 B — 更稳妥', 'the full option is a row, not a clipped quote');
+  assert.equal(card.quote_area, undefined);
+  assert.match(card.main_title.desc, /验证码 [a-z0-9]{6}/, 'the code for a typed reply is on the card');
+  assert.match(card.sub_title_text, /用哪种方案/);
+
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'opt_1', { chat: 'alice', user: 'alice' }));
+  assert.deepEqual(await ask, { answers: [{ id: 'pick', selected: ['一个名字特别特别长的方案 B'] }] });
+  const settled = h.client.cardUpdates.at(-1).card;
+  assert.equal(settled.button_list, undefined);
+  assert.match(settled.main_title.title, /已回答/);
+  assert.match(settled.main_title.desc, /方案 B/);
+  assert.equal(h.journal.find('dsh.question.answer').at(-1).source, 'card');
+  h.stop();
+});
+
+test('only a single-choice question with few options becomes a card', async () => {
+  const shapes = [
+    { id: 'm', question: 'Q?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] },
+    { id: 'f', question: 'Q?' },
+    { id: 'many', question: 'Q?', options: Array.from({ length: 7 }, (_, n) => ({ label: `o${n}` })) },
+  ];
+  for (const question of shapes) {
+    const h = await harness({}, {}, { members: [['user', 'alice']] });
+    h.client.emit('authenticated');
+    await h.send('hi', { chat: 'alice', user: 'alice' });
+    const ask = h.bridge.onQuestion({ agent: { id: 'session-created-1' }, questions: [question] }, async () => ({ answers: [] }));
+    await settle();
+    const body = h.client.sends.at(-1).body;
+    assert.equal(body.template_card, undefined, `${question.id}: stays a typed reply`);
+    assert.match(body.markdown.content, /\/answer [a-z0-9]{6} /);
+    h.stop();
+    await ask;
+  }
+});
+
+test('a question card tap from a stranger, another chat or a foreign card changes nothing', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'root'], ['user', 'alice'], ['user', 'bob']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const ask = h.bridge.onQuestion(CHOICE, async () => ({ answers: [] }));
+  await settle();
+  const taskId = h.client.sends.find(send => send.chat === 'alice').body.template_card.task_id;
+  const updates = h.client.cardUpdates.length;
+
+  // bob is a member, but of another chat: the question was never announced to it.
+  h.client.emit('event.template_card_event', cardClick(taskId, 'opt_0', { chat: 'bob', user: 'bob' }));
+  // alice's tap in a group the question never reached.
+  h.client.emit('event.template_card_event', cardClick(taskId, 'opt_0', { chat: 'group-x', user: 'alice' }));
+  // an option the card never had, and a foreign card.
+  h.client.emit('event.template_card_event', cardClick(taskId, 'opt_9', { chat: 'alice', user: 'alice' }));
+  h.client.emit('event.template_card_event', cardClick('foreign', 'opt_0', { chat: 'alice', user: 'alice' }));
+  await settle();
+  assert.equal(h.client.cardUpdates.length, updates + 1, 'only the out-of-range tap from the right chat is answered, as expired');
+  assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已失效/);
+
+  h.client.emit('event.template_card_event', cardClick(taskId, 'opt_0', { chat: 'alice', user: 'alice' }));
+  assert.deepEqual(await ask, { answers: [{ id: 'pick', selected: ['方案 A'] }] }, 'the real owner can still answer');
+  h.stop();
+});
+
+test('tapping a question card that already closed gets a dead card', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const ask = h.bridge.onQuestion(CHOICE, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.find(send => send.chat === 'alice').body.template_card;
+  const code = card.task_id.slice('qst_'.length);
+  await h.send(`/answer ${code} 1`, { chat: 'alice', user: 'alice' });
+  assert.deepEqual(await ask, { answers: [{ id: 'pick', selected: ['方案 A'] }] }, 'the typed reply still works');
+  const updates = h.client.cardUpdates.length;
+
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'opt_1', { chat: 'alice', user: 'alice' }));
+  await settle();
+  assert.equal(h.client.cardUpdates.length, updates + 1);
+  assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已失效/);
   h.stop();
 });

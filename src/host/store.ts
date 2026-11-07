@@ -2,9 +2,9 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
   DEFAULT_GROUP_ID, DEFAULT_GROUP_NAME, DEFAULT_LOG_RETENTION_DAYS, DEFAULT_PERMISSION_MODE,
-  DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_QUESTION_TIMEOUT_MS, isPermissionMode,
-  MAX_BINDINGS, MAX_GROUPS, MAX_LABEL_CHARS, MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS,
-  MIN_APPROVAL_TIMEOUT_MS, MAX_APPROVAL_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS, MIN_QUESTION_TIMEOUT_MS, STORE_FILE, STORE_VERSION,
+  DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_ANSWER_TIMEOUT_MS, isPermissionMode,
+  MAX_BINDINGS, MAX_GROUPS, MAX_LABEL_CHARS, MAX_LOG_RETENTION_DAYS, MAX_ANSWER_TIMEOUT_MS,
+  MIN_APPROVAL_TIMEOUT_MS, MAX_APPROVAL_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS, MIN_ANSWER_TIMEOUT_MS, STORE_FILE, STORE_VERSION,
   type BindingKind, type BindingRecord, type GroupRecord, type GroupSessionMemory, type ModelSelection, type PermissionMode,
   type StoreSettings, type StoreSettingsPatch,
 } from '../shared/protocol.js';
@@ -190,7 +190,7 @@ export function defaultStoreSettings(): StoreSettings {
     wsUrl: '',
     adminUserIds: [],
     adminWorkspaces: [],
-    questionTimeoutMs: DEFAULT_QUESTION_TIMEOUT_MS,
+    answerTimeoutMs: DEFAULT_ANSWER_TIMEOUT_MS,
     approvalTimeoutMs: DEFAULT_APPROVAL_TIMEOUT_MS,
     remoteApprovals: true,
     logEnabled: true,
@@ -213,8 +213,8 @@ export function normalizeStoreSettings(value: unknown): StoreSettings {
     wsUrl: text(record.wsUrl),
     adminUserIds: uniqueIds(asArray(record.adminUserIds)),
     adminWorkspaces: uniqueIds(asArray(record.adminWorkspaces)),
-    questionTimeoutMs: bounded(
-      record.questionTimeoutMs, MIN_QUESTION_TIMEOUT_MS, MAX_QUESTION_TIMEOUT_MS, DEFAULT_QUESTION_TIMEOUT_MS,
+    answerTimeoutMs: bounded(
+      record.answerTimeoutMs, MIN_ANSWER_TIMEOUT_MS, MAX_ANSWER_TIMEOUT_MS, DEFAULT_ANSWER_TIMEOUT_MS,
     ),
     approvalTimeoutMs: bounded(
       record.approvalTimeoutMs, MIN_APPROVAL_TIMEOUT_MS, MAX_APPROVAL_TIMEOUT_MS, DEFAULT_APPROVAL_TIMEOUT_MS,

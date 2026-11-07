@@ -1,6 +1,6 @@
 import {
-  DEFAULT_GROUP_ID, isPermissionMode, MAX_APPROVAL_TIMEOUT_MS, MIN_APPROVAL_TIMEOUT_MS, MAX_GROUPS, MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS,
-  MIN_QUESTION_TIMEOUT_MS, type BindingKind, type BindingRecord, type BindingSessionState, type ContextUsage,
+  DEFAULT_GROUP_ID, isPermissionMode, MAX_ANSWER_TIMEOUT_MS, MAX_APPROVAL_TIMEOUT_MS, MAX_GROUPS, MAX_LOG_RETENTION_DAYS,
+  MIN_ANSWER_TIMEOUT_MS, MIN_APPROVAL_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS, type BindingKind, type BindingRecord, type BindingSessionState, type ContextUsage,
   type GroupMemberView, type GroupRecord, type GroupView, type ModelSelection, type StoreOp,
   type RoutingView, type StoreSettingsPatch,
 } from '../shared/protocol.js';
@@ -189,7 +189,7 @@ export interface StoreOpResult {
 export function validateSettingsPatch(patch: StoreSettingsPatch): StoreSettingsPatch | string {
   const record = patch as Record<string, unknown>;
   const known = new Set([
-    'wsUrl', 'adminUserIds', 'adminWorkspaces', 'questionTimeoutMs', 'approvalTimeoutMs', 'remoteApprovals', 'logEnabled', 'logRetentionDays',
+    'wsUrl', 'adminUserIds', 'adminWorkspaces', 'answerTimeoutMs', 'approvalTimeoutMs', 'remoteApprovals', 'logEnabled', 'logRetentionDays',
   ]);
   for (const key of Object.keys(record)) if (!known.has(key)) return `无法识别的设置项：${key}`;
   const clean: Record<string, unknown> = {};
@@ -210,12 +210,12 @@ export function validateSettingsPatch(patch: StoreSettingsPatch): StoreSettingsP
     }
     clean.adminWorkspaces = uniqueIds(record.adminWorkspaces);
   }
-  if (record.questionTimeoutMs !== undefined) {
-    const ms = Number(record.questionTimeoutMs);
-    if (!Number.isFinite(ms) || ms < MIN_QUESTION_TIMEOUT_MS || ms > MAX_QUESTION_TIMEOUT_MS) {
-      return `「等待企微回复」需要在 ${MIN_QUESTION_TIMEOUT_MS / 1000}–${MAX_QUESTION_TIMEOUT_MS / 1000} 秒之间。`;
+  if (record.answerTimeoutMs !== undefined) {
+    const ms = Number(record.answerTimeoutMs);
+    if (!Number.isFinite(ms) || ms < MIN_ANSWER_TIMEOUT_MS || ms > MAX_ANSWER_TIMEOUT_MS) {
+      return `「提问有效期」需要在 ${MIN_ANSWER_TIMEOUT_MS / 60_000}–${MAX_ANSWER_TIMEOUT_MS / 60_000} 分钟之间。`;
     }
-    clean.questionTimeoutMs = Math.round(ms);
+    clean.answerTimeoutMs = Math.round(ms);
   }
   if (record.approvalTimeoutMs !== undefined) {
     const ms = Number(record.approvalTimeoutMs);

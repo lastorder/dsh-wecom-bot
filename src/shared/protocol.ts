@@ -41,13 +41,14 @@ export const DEFAULT_GROUP_NAME = '默认分组';
 /** Longest accepted 备注 / group name, in characters. */
 export const MAX_LABEL_CHARS = 60;
 /** Bounds the page and the Host both enforce on the store's settings block. */
-export const MIN_QUESTION_TIMEOUT_MS = 1000;
-export const MAX_QUESTION_TIMEOUT_MS = 300000;
-export const DEFAULT_QUESTION_TIMEOUT_MS = 60000;
 /** How long a tool approval stays answerable from WeCom: 1 minute – 24 hours, 30 minutes by default. */
 export const MIN_APPROVAL_TIMEOUT_MS = 60_000;
 export const MAX_APPROVAL_TIMEOUT_MS = 24 * 60 * 60_000;
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 30 * 60_000;
+/** The same window for a question the Agent is blocked on. */
+export const MIN_ANSWER_TIMEOUT_MS = 60_000;
+export const MAX_ANSWER_TIMEOUT_MS = 24 * 60 * 60_000;
+export const DEFAULT_ANSWER_TIMEOUT_MS = 30 * 60_000;
 export const MIN_LOG_RETENTION_DAYS = 1;
 export const MAX_LOG_RETENTION_DAYS = 365;
 export const DEFAULT_LOG_RETENTION_DAYS = 14;
@@ -193,8 +194,8 @@ export interface StoreSettings {
   readonly adminUserIds: readonly string[];
   /** Workspaces an administrator's notices cover; empty means every one. */
   readonly adminWorkspaces: readonly string[];
-  /** Legacy serialized value; DSH and WeCom now handle interactions concurrently. */
-  readonly questionTimeoutMs: number;
+  /** How long a question stays answerable from WeCom before it falls back to the DSH page. */
+  readonly answerTimeoutMs: number;
   /** How long a tool approval card stays answerable from WeCom before it is retired. */
   readonly approvalTimeoutMs: number;
   /** Legacy serialized value; scoped administrator approvals are always enabled. */

@@ -662,7 +662,7 @@ test('a fresh store starts from the documented settings defaults', async () => {
     wsUrl: '',
     adminUserIds: [],
     adminWorkspaces: [],
-    questionTimeoutMs: 60000,
+    answerTimeoutMs: 1_800_000,
     approvalTimeoutMs: 1_800_000,
     remoteApprovals: true,
     logEnabled: true,
@@ -691,12 +691,12 @@ test('settings share the file with the groups and survive a reload', async () =>
   const dir = await directory();
   const store = createStore({ directory: dir, onError: fail });
   await store.load();
-  await store.setSettings({ wsUrl: 'wss://openws.example', questionTimeoutMs: 120000, approvalTimeoutMs: 3_600_000, logRetentionDays: 3 });
+  await store.setSettings({ wsUrl: 'wss://openws.example', answerTimeoutMs: 7_200_000, approvalTimeoutMs: 3_600_000, logRetentionDays: 3 });
   await store.createGroup('朋友');
   await store.flush();
   const parsed = JSON.parse(await readFile(store.file, 'utf8'));
   assert.equal(parsed.settings.wsUrl, 'wss://openws.example');
-  assert.equal(parsed.settings.questionTimeoutMs, 120000);
+  assert.equal(parsed.settings.answerTimeoutMs, 7_200_000);
   assert.equal(parsed.settings.approvalTimeoutMs, 3_600_000);
   assert.equal(parsed.groups.length, 2, 'one document holds both');
   const reloaded = createStore({ directory: dir, onError: fail });
@@ -714,7 +714,7 @@ test('hand-edited settings are re-typed and clamped, never trusted', async () =>
       wsUrl: 42,
       adminUserIds: ['root', 'root', '', 7, '  root2  '],
       adminWorkspaces: 'not-an-array',
-      questionTimeoutMs: 10 ** 9,
+      answerTimeoutMs: 10 ** 12,
       approvalTimeoutMs: 10 ** 12,
       remoteApprovals: 'yes',
       logEnabled: 0,
@@ -728,7 +728,7 @@ test('hand-edited settings are re-typed and clamped, never trusted', async () =>
   assert.equal(settings.wsUrl, '', 'a non-string endpoint is not an endpoint');
   assert.deepEqual(settings.adminUserIds, ['root', 'root2']);
   assert.deepEqual(settings.adminWorkspaces, []);
-  assert.equal(settings.questionTimeoutMs, 300000, 'clamped to the documented maximum');
+  assert.equal(settings.answerTimeoutMs, 86_400_000, 'clamped to the documented maximum');
   assert.equal(settings.approvalTimeoutMs, 86_400_000, 'an approval is valid for at most a day');
   assert.equal(settings.remoteApprovals, true, 'legacy approval flags never disable scoped administrator interactions');
   assert.equal(settings.logEnabled, true, 'only a real false turns the journal off');
@@ -750,7 +750,7 @@ test('a file without a settings block keeps its groups and gets the defaults', a
     wsUrl: '',
     adminUserIds: [],
     adminWorkspaces: [],
-    questionTimeoutMs: 60000,
+    answerTimeoutMs: 1_800_000,
     approvalTimeoutMs: 1_800_000,
     remoteApprovals: true,
     logEnabled: true,

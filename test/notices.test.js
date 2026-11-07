@@ -241,3 +241,36 @@ test('validity is said the way a person says it', async () => {
   assert.equal(validityText(5_400_000), '1 小时 30 分钟');
   assert.match(approvalNotice('session-1', 't', { toolName: 'bash' }, 'a1b2c3', 1_800_000), /最长有效 30 分钟/);
 });
+
+test('a question card is only built for one single-choice question with at most six options', async () => {
+  const { questionFitsCard, questionCard, questionSettledCards } = await import('../dist/host/bridge/notices.js');
+  const { parseCardEvent } = await import('../dist/host/bridge/cards.js');
+  const option = n => ({ label: `o${n}` });
+  const six = { id: 'q', question: 'Q?', options: Array.from({ length: 6 }, (_, n) => option(n)) };
+  assert.equal(questionFitsCard([six]), true);
+  assert.equal(questionFitsCard([{ ...six, options: [...six.options, option(7)] }]), false, 'a card carries six buttons');
+  assert.equal(questionFitsCard([{ ...six, multiSelect: true }]), false, 'a tap cannot pick several');
+  assert.equal(questionFitsCard([{ id: 'q', question: 'Q?' }]), false, 'free text cannot be typed into a card');
+  assert.equal(questionFitsCard([six, six]), false);
+
+  const card = questionCard('《会话》', six, 'abc123', 1_800_000);
+  assert.equal(card.task_id, 'qst_abc123');
+  assert.equal(card.button_list.length, 6);
+  assert.match(card.main_title.desc, /30 分钟内有效 · 验证码 abc123/);
+  assert.deepEqual(card.horizontal_content_list.map(row => row.keyname), ['会话'], 'short bare options need no list: the buttons say it all');
+  const long = questionCard('《会话》', { ...six, options: six.options.map((o, n) => ({ ...o, label: `一个很长很长的选项名称${n}` })) }, 'abc123', 1_800_000);
+  assert.deepEqual(long.horizontal_content_list.map(row => row.keyname), ['选项1', '选项2', '选项3', '选项4', '选项5', '选项6'],
+    'six long options fill the six rows, and the Session name yields');
+  assert.deepEqual(long.button_list.map(b => b.text), ['选项 1', '选项 2', '选项 3', '选项 4', '选项 5', '选项 6']);
+  const [notice] = questionSettledCards('answered', 'o2', 'qst_abc123');
+  assert.equal(notice.main_title.title, '✅ 已回答');
+  assert.match(notice.main_title.desc, /o2/);
+  assert.ok(notice.card_action, 'a replaced card needs card_action or WeCom answers 42045');
+
+  const click = (taskId, key) => parseCardEvent({ headers: {}, body: { from: { userid: 'u' }, event: { event_key: key, task_id: taskId } } });
+  assert.deepEqual([click('qst_abc123', 'opt_2').kind, click('qst_abc123', 'opt_2').action, click('qst_abc123', 'opt_2').option], ['question', 'option', 2]);
+  assert.equal(click('qst_abc123', 'approve').action, undefined, 'an approval button means nothing on a question card');
+  assert.equal(click('apv_abc123', 'opt_1').action, undefined, 'and an option button means nothing on an approval card');
+  assert.equal(click('apv_abc123', 'approve').action, 'approve');
+  assert.equal(click('foreign', 'opt_1').nonce, '');
+});

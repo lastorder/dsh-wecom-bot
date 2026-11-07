@@ -27,7 +27,7 @@ test('the reduced Config form holds the connection identity and drops everything
   // Administrators and the advanced knobs belong to the store's settings block
   // now; a Config snapshot that still carries them contributes nothing.
   assert.deepEqual(
-    storedFrom({ botId: 'bot', secretEnv: 'REF', adminUserIds: ['root'], adminWorkspaces: ['/w'], wsUrl: 'wss://x', questionTimeoutMs: 30000 }),
+    storedFrom({ botId: 'bot', secretEnv: 'REF', adminUserIds: ['root'], adminWorkspaces: ['/w'], wsUrl: 'wss://x', answerTimeoutMs: 1_200_000 }),
     { botId: 'bot', secretEnv: 'REF' },
   );
 });
@@ -39,7 +39,7 @@ test('each Config card validates only its own fields', () => {
 });
 
 test('the 连接与日志 fields are validated against the store bounds the Host enforces', () => {
-  const advanced = { wsUrl: '', questionTimeoutMs: 60000, logRetentionDays: 14, approvalTimeoutMs: 1_800_000 };
+  const advanced = { wsUrl: '', answerTimeoutMs: 1_800_000, logRetentionDays: 14, approvalTimeoutMs: 1_800_000 };
   assert.deepEqual(validateAdvanced(advanced), {});
   assert.deepEqual(validateAdvanced({ ...advanced, wsUrl: 'wss://openws.example' }), {});
   assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, wsUrl: 'ws://x' })), ['wsUrl']);
@@ -62,21 +62,25 @@ test('the 连接与日志 fields are validated against the store bounds the Host
   assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, approvalTimeoutMs: NaN })), ['approvalTimeoutMs'], 'an emptied field is refused');
   assert.equal(validateAdvanced({ ...advanced, approvalTimeoutMs: 0 }).approvalTimeoutMs, '请输入 1–1440 分钟。');
 
-  assert.equal('questionTimeoutMs' in validateAdvanced({ ...advanced, questionTimeoutMs: 0 }), false, 'legacy timeout is no longer a UI field');
+  assert.deepEqual(validateAdvanced({ ...advanced, answerTimeoutMs: 60_000 }), {});
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, answerTimeoutMs: 59_999 })), ['answerTimeoutMs']);
+  assert.deepEqual(Object.keys(validateAdvanced({ ...advanced, answerTimeoutMs: 86_400_001 })), ['answerTimeoutMs']);
+  assert.equal(validateAdvanced({ ...advanced, answerTimeoutMs: 0 }).answerTimeoutMs, '请输入 1–1440 分钟。');
 
 });
 
 test('a settings patch carries only the fields the operator moved', () => {
   const stored = advancedSlice({
     wsUrl: 'wss://openws.example', adminUserIds: [], adminWorkspaces: [],
-    questionTimeoutMs: 60000, approvalTimeoutMs: 1_800_000, remoteApprovals: false, logEnabled: true, logRetentionDays: 14,
+    answerTimeoutMs: 1_800_000, approvalTimeoutMs: 1_800_000, remoteApprovals: false, logEnabled: true, logRetentionDays: 14,
   });
   assert.deepEqual(stored, {
-    wsUrl: 'wss://openws.example', logEnabled: true, logRetentionDays: 14, approvalTimeoutMs: 1_800_000,
+    wsUrl: 'wss://openws.example', logEnabled: true, logRetentionDays: 14, approvalTimeoutMs: 1_800_000, answerTimeoutMs: 1_800_000,
   });
+  assert.deepEqual(settingsPatch({ ...stored, answerTimeoutMs: 600_000 }, stored), { answerTimeoutMs: 600_000 });
   assert.deepEqual(settingsPatch({ ...stored, approvalTimeoutMs: 3_600_000 }, stored), { approvalTimeoutMs: 3_600_000 });
   assert.deepEqual(settingsPatch(stored, stored), {}, 'an untouched card produces no write at all');
-  assert.deepEqual(settingsPatch({ ...stored, questionTimeoutMs: 30000, remoteApprovals: false }, stored), {}, 'legacy fields are never written by the UI');
+  assert.deepEqual(settingsPatch({ ...stored, remoteApprovals: false }, stored), {}, 'legacy fields are never written by the UI');
   assert.deepEqual(settingsPatch({ ...stored, logRetentionDays: 30 }, stored), { logRetentionDays: 30 });
   // The endpoint is written trimmed, and only when it really moved.
   assert.deepEqual(settingsPatch({ ...stored, wsUrl: ' wss://other.example ' }, stored), { wsUrl: 'wss://other.example' });
@@ -84,7 +88,7 @@ test('a settings patch carries only the fields the operator moved', () => {
 
   // A deployment that has not answered the state route yet still has a draft.
   assert.deepEqual(advancedSlice(undefined), {
-    wsUrl: '', logEnabled: true, logRetentionDays: 14, approvalTimeoutMs: 1_800_000,
+    wsUrl: '', logEnabled: true, logRetentionDays: 14, approvalTimeoutMs: 1_800_000, answerTimeoutMs: 1_800_000,
   });
 
   // One op carries the whole patch, and it is the store op the page posts.

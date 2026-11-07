@@ -9,8 +9,9 @@ import type {
   StoreSettings, StoreSettingsPatch,
 } from '../shared/protocol.ts';
 import {
-  FULL_ACCESS_MODE, DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_LOG_RETENTION_DAYS, DEFAULT_SECRET_REF, MAX_APPROVAL_TIMEOUT_MS,
-  MAX_LOG_RETENTION_DAYS, MIN_APPROVAL_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS,
+  FULL_ACCESS_MODE, DEFAULT_ANSWER_TIMEOUT_MS, DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_LOG_RETENTION_DAYS, DEFAULT_SECRET_REF,
+  MAX_ANSWER_TIMEOUT_MS, MAX_APPROVAL_TIMEOUT_MS, MAX_LOG_RETENTION_DAYS, MIN_ANSWER_TIMEOUT_MS, MIN_APPROVAL_TIMEOUT_MS,
+  MIN_LOG_RETENTION_DAYS,
 } from '../shared/protocol.ts';
 import type { FormOperation, StoredConfig } from './types.ts';
 
@@ -53,7 +54,7 @@ export function changedOperations(draft: StoredConfig, base: StoredConfig): Form
 }
 
 export type FieldErrors = Partial<Record<
-  'botId' | 'secret' | 'wsUrl' | 'logRetentionDays' | 'approvalTimeoutMs',
+  'botId' | 'secret' | 'wsUrl' | 'logRetentionDays' | 'approvalTimeoutMs' | 'answerTimeoutMs',
   string
 >>;
 
@@ -74,7 +75,7 @@ export function validateCredentials(draft: { readonly botId: string; readonly se
  * without the two ever drifting apart.
  */
 export function validateAdvanced(
-  draft: Pick<StoreSettings, 'wsUrl' | 'logRetentionDays'> & { readonly approvalTimeoutMs?: number },
+  draft: Pick<StoreSettings, 'wsUrl' | 'logRetentionDays'> & { readonly approvalTimeoutMs?: number; readonly answerTimeoutMs?: number },
 ): FieldErrors {
   const errors: FieldErrors = {};
   const wsUrl = draft.wsUrl.trim();
@@ -95,18 +96,24 @@ export function validateAdvanced(
     && (!Number.isFinite(approval) || approval < MIN_APPROVAL_TIMEOUT_MS || approval > MAX_APPROVAL_TIMEOUT_MS)) {
     errors.approvalTimeoutMs = `请输入 ${MIN_APPROVAL_TIMEOUT_MS / 60_000}–${MAX_APPROVAL_TIMEOUT_MS / 60_000} 分钟。`;
   }
+  const answer = draft.answerTimeoutMs;
+  if (answer !== undefined
+    && (!Number.isFinite(answer) || answer < MIN_ANSWER_TIMEOUT_MS || answer > MAX_ANSWER_TIMEOUT_MS)) {
+    errors.answerTimeoutMs = `请输入 ${MIN_ANSWER_TIMEOUT_MS / 60_000}–${MAX_ANSWER_TIMEOUT_MS / 60_000} 分钟。`;
+  }
   return errors;
 }
 
 /** The store's settings block as the 高级设置 section seeds its draft. */
 export function advancedSlice(settings: StoreSettings | undefined): Pick<
-  StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays' | 'approvalTimeoutMs'
+  StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays' | 'approvalTimeoutMs' | 'answerTimeoutMs'
 > {
   return {
     wsUrl: settings?.wsUrl ?? '',
     logEnabled: settings?.logEnabled ?? true,
     logRetentionDays: settings?.logRetentionDays ?? DEFAULT_LOG_RETENTION_DAYS,
     approvalTimeoutMs: settings?.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS,
+    answerTimeoutMs: settings?.answerTimeoutMs ?? DEFAULT_ANSWER_TIMEOUT_MS,
   };
 }
 
@@ -117,14 +124,15 @@ export function advancedSlice(settings: StoreSettings | undefined): Pick<
  * cannot write back a stale copy of something another window just changed.
  */
 export function settingsPatch(
-  draft: Pick<StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays' | 'approvalTimeoutMs'>,
-  stored: Pick<StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays' | 'approvalTimeoutMs'>,
+  draft: Pick<StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays' | 'approvalTimeoutMs' | 'answerTimeoutMs'>,
+  stored: Pick<StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays' | 'approvalTimeoutMs' | 'answerTimeoutMs'>,
 ): StoreSettingsPatch {
   const patch: { -readonly [K in keyof StoreSettingsPatch]: StoreSettingsPatch[K] } = {};
   if (draft.wsUrl.trim() !== stored.wsUrl.trim()) patch.wsUrl = draft.wsUrl.trim();
   if (draft.logEnabled !== stored.logEnabled) patch.logEnabled = draft.logEnabled;
   if (draft.logRetentionDays !== stored.logRetentionDays) patch.logRetentionDays = draft.logRetentionDays;
   if (draft.approvalTimeoutMs !== stored.approvalTimeoutMs) patch.approvalTimeoutMs = draft.approvalTimeoutMs;
+  if (draft.answerTimeoutMs !== stored.answerTimeoutMs) patch.answerTimeoutMs = draft.answerTimeoutMs;
   return patch;
 }
 

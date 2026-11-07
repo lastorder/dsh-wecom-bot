@@ -226,7 +226,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       botId: settings.botId, secretRef: settings.secretRef, secretConfigured: Boolean(resolved),
       wsUrl: settings.wsUrl || 'sdk-default',
       adminUserIds: settings.adminUserIds, adminWorkspaces: settings.adminWorkspaces,
-      questionTimeoutMs: settings.questionTimeoutMs, approvalTimeoutMs: settings.approvalTimeoutMs, remoteApprovals: settings.remoteApprovals,
+      answerTimeoutMs: settings.answerTimeoutMs, approvalTimeoutMs: settings.approvalTimeoutMs, remoteApprovals: settings.remoteApprovals,
     };
     if (connection === identity) {
       // Nothing about the connection moved: the settings changed, or the event

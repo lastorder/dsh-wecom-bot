@@ -31,7 +31,7 @@ const SAMPLE_OPS = [
   setLabel('user:alice', '爱丽丝'),
   setLabel('user:alice', ''),
   setSettings({ adminUserIds: ['alice'] }),
-  setSettings({ questionTimeoutMs: 30000, remoteApprovals: true }),
+  setSettings({ answerTimeoutMs: 1_200_000, remoteApprovals: true }),
   setSettings({ adminWorkspaces: ['/w/alpha'] }),
   setSettings({ wsUrl: 'wss://openws.example' }),
   setSettings({ logEnabled: false, logRetentionDays: 7 }),

@@ -301,7 +301,7 @@ export function finishedSession(id, { turn = 1, text = '完成', reason = 'compl
 export const baseSettings = {
   botId: 'bot', secretRef: 'WECOM_BOT_SECRET', wsUrl: '',
   adminUserIds: [], adminWorkspaces: [],
-  questionTimeoutMs: 1000, approvalTimeoutMs: 1_800_000, remoteApprovals: false,
+  answerTimeoutMs: 1000, approvalTimeoutMs: 1_800_000, remoteApprovals: false,
 };
 
 /** A routing store plus the standard services every Host test needs. */

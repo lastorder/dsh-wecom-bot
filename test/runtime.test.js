@@ -60,7 +60,7 @@ test('Config carries the connection identity, and nothing else', () => {
   // Everything the operator edits lives in the plugin's own document, so an edit
   // is a store write and never a Config write: no profile rewrite, no reconnect.
   for (const moved of [
-    'adminUserIds', 'adminWorkspaces', 'wsUrl', 'questionTimeoutMs', 'remoteApprovals',
+    'adminUserIds', 'adminWorkspaces', 'wsUrl', 'answerTimeoutMs', 'remoteApprovals',
     'logEnabled', 'logRetentionDays',
   ]) {
     assert.equal(moved in config, false, `${moved} moved to the plugin store`);
@@ -411,7 +411,7 @@ test('editing the settings never reconnects the socket', () => withHome(async ho
   assert.equal(refused.ok, false, 'an unusable patch never reaches the store');
   const applied = await runtime.applyOps([
     { op: 'settings.set', patch: { adminUserIds: ['root', 'second'], adminWorkspaces: ['/w/alpha'] } },
-    { op: 'settings.set', patch: { remoteApprovals: true, questionTimeoutMs: 30000 } },
+    { op: 'settings.set', patch: { remoteApprovals: true, answerTimeoutMs: 1_200_000 } },
   ]);
   assert.equal(applied.ok, true);
   assert.equal(applied.settingsChanged, true);
@@ -423,7 +423,7 @@ test('editing the settings never reconnects the socket', () => withHome(async ho
   assert.deepEqual(state.settings.adminUserIds, ['root', 'second']);
   assert.deepEqual(state.settings.adminWorkspaces, ['/w/alpha']);
   assert.equal(state.settings.remoteApprovals, true);
-  assert.equal(state.settings.questionTimeoutMs, 30000);
+  assert.equal(state.settings.answerTimeoutMs, 1_200_000);
   assert.deepEqual(state.admins.map(admin => admin.id), ['root', 'second']);
   const kept = journal.find('config.applied').filter(record => record.connection === 'kept');
   assert.equal(kept.length >= 1, true, 'the live update is journaled as a kept connection');
@@ -500,7 +500,7 @@ test('a batch that fails after a settings edit still updates the running bridge'
 
   const result = await runtime.applyOps([
     { op: 'settings.set', patch: { adminUserIds: ['newcomer'] } },
-    { op: 'settings.set', patch: { questionTimeoutMs: 1 } },
+    { op: 'settings.set', patch: { answerTimeoutMs: 1 } },
   ]);
   assert.equal(result.ok, false);
   assert.equal(result.settingsChanged, true, 'the accepted edit is still reported');
@@ -669,7 +669,7 @@ test('a settings patch that cannot be used is refused with its reason', () => wi
   const cases = [
     [{ wsUrl: 'ws://plaintext.example' }, /wss:\/\//],
     [{ wsUrl: 'wss://user:pass@openws.example' }, /wss:\/\//],
-    [{ questionTimeoutMs: 10 }, /等待企微回复/],
+    [{ answerTimeoutMs: 10 }, /提问有效期/],
     [{ logRetentionDays: 400 }, /日志保留天数/],
     [{ adminUserIds: [''] }, /userid/],
     [{ adminWorkspaces: [42] }, /Workspace 路径/],
@@ -690,7 +690,7 @@ test('the stored settings are read before the first connection decision', () => 
   // not dial out with the defaults and adopt the real settings afterwards: that
   // would refuse a stored administrator for as long as the file takes to read,
   // and leave a spurious `rebuilt` in the journal.
-  await writeStore(home, { settings: { adminUserIds: ['root'], questionTimeoutMs: 45000 } });
+  await writeStore(home, { settings: { adminUserIds: ['root'], answerTimeoutMs: 2_700_000 } });
   const { ctx } = hostWithServices();
   const clients = [];
   const journal = memoryJournal();
@@ -706,7 +706,7 @@ test('the stored settings are read before the first connection decision', () => 
   const applied = journal.find('config.applied');
   assert.equal(applied.length, 1, 'the first decision already had the stored settings');
   assert.deepEqual(applied[0].adminUserIds, ['root']);
-  assert.equal(applied[0].questionTimeoutMs, 45000);
+  assert.equal(applied[0].answerTimeoutMs, 2_700_000);
   assert.equal(applied[0].connection, 'rebuilt');
   await runtime.stop();
 }));

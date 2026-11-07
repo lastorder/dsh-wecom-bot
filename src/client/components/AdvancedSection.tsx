@@ -19,6 +19,25 @@ function minutesText(ms: number): string {
   return `${Math.round(ms / 600) / 100} 分钟`;
 }
 
+/** A duration stored in milliseconds, edited in minutes. */
+function MinutesInput({ label, value, disabled, onChange }: {
+  label: string; value: number; disabled: boolean; onChange(ms: number): void;
+}) {
+  return (
+    <span className="wcb-switch-row">
+      <Input
+        className="wcb-number"
+        type="number" min={1} max={1440} step={1}
+        value={Number.isFinite(value) ? Math.round(value / 600) / 100 : ''}
+        disabled={disabled}
+        aria-label={label}
+        onChange={event => onChange(Math.round(Number(event.target.value) * 60_000))}
+      />
+      <span>分钟</span>
+    </span>
+  );
+}
+
 export function AdvancedSection({ settings, journal, disabled, onChanged }: {
   settings: StoreSettings | undefined;
   journal: JournalInfo | undefined;
@@ -42,6 +61,7 @@ export function AdvancedSection({ settings, journal, disabled, onChanged }: {
   const summary = [
     stored.wsUrl ? '自定义接入地址' : '默认接入地址',
     `审批 ${minutesText(stored.approvalTimeoutMs)}内有效`,
+    `提问 ${minutesText(stored.answerTimeoutMs)}内有效`,
     stored.logEnabled ? `对话日志保留 ${stored.logRetentionDays} 天` : '对话日志已关闭',
   ].join(' · ');
   const message = save.error ?? (dirty ? '有未保存的更改' : save.saved ? '已保存。' : undefined);
@@ -79,17 +99,16 @@ export function AdvancedSection({ settings, journal, disabled, onChanged }: {
               error={errors.approvalTimeoutMs}
               hint="企业微信里的权限审批卡片在多久内可以点「批准 / 拒绝」，超时后卡片失效，DSH 页面仍可处理。修改即时生效，只影响之后发出的审批。"
             >
-              <span className="wcb-switch-row">
-                <Input
-                  className="wcb-number"
-                  type="number" min={1} max={1440} step={1}
-                  value={Number.isFinite(draft.approvalTimeoutMs) ? Math.round(draft.approvalTimeoutMs / 600) / 100 : ''}
-                  disabled={disabled}
-                  aria-label="审批有效期（分钟）"
-                  onChange={event => setDraft(current => ({ ...current, approvalTimeoutMs: Math.round(Number(event.target.value) * 60_000) }))}
-                />
-                <span>分钟</span>
-              </span>
+              <MinutesInput label="审批有效期（分钟）" value={draft.approvalTimeoutMs} disabled={disabled}
+                onChange={ms => setDraft(current => ({ ...current, approvalTimeoutMs: ms }))} />
+            </Field>
+            <Field
+              label="提问有效期"
+              error={errors.answerTimeoutMs}
+              hint="Agent 向你提问后，企业微信里可以回答多久；超时后退回 DSH 页面回答。修改即时生效，只影响之后发出的提问。"
+            >
+              <MinutesInput label="提问有效期（分钟）" value={draft.answerTimeoutMs} disabled={disabled}
+                onChange={ms => setDraft(current => ({ ...current, answerTimeoutMs: ms }))} />
             </Field>
             <Field
               label="对话日志"

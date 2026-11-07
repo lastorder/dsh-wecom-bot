@@ -274,7 +274,7 @@ test('a batch that fails later still reports the settings and authorizations it 
   const result = await apply([
     { op: 'settings.set', patch: { adminUserIds: ['root'] } },
     { op: 'member.add', groupId: 'default', kind: 'user', id: 'alice' },
-    { op: 'settings.set', patch: { questionTimeoutMs: 1 } },
+    { op: 'settings.set', patch: { answerTimeoutMs: 1 } },
   ]);
   assert.equal(result.ok, false);
   assert.equal(result.settingsChanged, true);
@@ -326,7 +326,7 @@ test('a settings edit is applied to the store and reported as such', async () =>
   const { store, apply } = await context();
   const result = await apply([
     { op: 'settings.set', patch: { adminUserIds: ['root', 'second'], adminWorkspaces: ['/w/a'] } },
-    { op: 'settings.set', patch: { remoteApprovals: true, questionTimeoutMs: 45000, logEnabled: false } },
+    { op: 'settings.set', patch: { remoteApprovals: true, answerTimeoutMs: 2_700_000, logEnabled: false } },
   ]);
   assert.equal(result.ok, true);
   assert.equal(result.settingsChanged, true);
@@ -334,7 +334,7 @@ test('a settings edit is applied to the store and reported as such', async () =>
   assert.deepEqual(store.settings().adminUserIds, ['root', 'second']);
   assert.deepEqual(store.settings().adminWorkspaces, ['/w/a']);
   assert.equal(store.settings().remoteApprovals, true);
-  assert.equal(store.settings().questionTimeoutMs, 45000);
+  assert.equal(store.settings().answerTimeoutMs, 2_700_000);
   assert.equal(store.settings().logEnabled, false);
   assert.equal(store.settings().logRetentionDays, 14, 'a field the patch omitted keeps its value');
 });
@@ -344,8 +344,8 @@ test('a settings patch that cannot be used is refused before it reaches the stor
   const cases = [
     [{ wsUrl: 'ws://plaintext.example' }, /wss:\/\//, 'a plaintext endpoint is not an endpoint'],
     [{ wsUrl: 'wss://user:pass@openws.example' }, /wss:\/\//, 'a credentialed endpoint is refused too'],
-    [{ questionTimeoutMs: 999 }, /等待企微回复/, 'below the documented minimum'],
-    [{ questionTimeoutMs: 300001 }, /等待企微回复/, 'above the documented maximum'],
+    [{ answerTimeoutMs: 59_999 }, /提问有效期/, 'below the documented minimum'],
+    [{ answerTimeoutMs: 86_400_001 }, /提问有效期/, 'above the documented maximum'],
     [{ approvalTimeoutMs: 59_999 }, /审批有效期/, 'below one minute'],
     [{ approvalTimeoutMs: 86_400_001 }, /审批有效期/, 'above a day'],
     [{ approvalTimeoutMs: 'soon' }, /审批有效期/, 'not a duration'],
@@ -365,17 +365,17 @@ test('a settings patch that cannot be used is refused before it reaches the stor
     assert.equal(result.changed, 0, why);
   }
   assert.equal(store.settings().wsUrl, '', 'nothing was half-applied');
-  assert.equal(store.settings().questionTimeoutMs, 60000);
+  assert.equal(store.settings().answerTimeoutMs, 1_800_000);
 });
 
 test('a refused settings patch does not stop the ops that precede it', async () => {
   const { store, apply } = await context();
   const result = await apply([
     { op: 'settings.set', patch: { adminUserIds: ['root'] } },
-    { op: 'settings.set', patch: { questionTimeoutMs: 1 } },
+    { op: 'settings.set', patch: { answerTimeoutMs: 1 } },
   ]);
   assert.equal(result.ok, false);
   assert.equal(result.changed, 1);
   assert.deepEqual(store.settings().adminUserIds, ['root'], 'the accepted op stays applied');
-  assert.equal(store.settings().questionTimeoutMs, 60000, 'the refused one changed nothing');
+  assert.equal(store.settings().answerTimeoutMs, 1_800_000, 'the refused one changed nothing');
 });

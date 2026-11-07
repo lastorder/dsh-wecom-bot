@@ -3,7 +3,7 @@ import type { ApprovalRequest, Question } from '../dsh.js';
 import type { TurnSummary } from '../turns.js';
 import type { OperableGroup } from './directory.js';
 import type { WorkspaceOption } from '../../shared/protocol.js';
-import { APPROVE_BUTTON, DENY_BUTTON, SETTLED_BUTTON, approvalTaskId } from './cards.js';
+import { APPROVE_BUTTON, DENY_BUTTON, MAX_CARD_BUTTONS, SETTLED_BUTTON, approvalTaskId, optionButton, questionTaskId } from './cards.js';
 import {
   displayPath, displayTitle, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, sessionToken, shortId,
 } from './format.js';
@@ -405,23 +405,91 @@ export function interactionSubmittedText(kind: 'question' | 'approval'): string 
 
 export function questionNotice(sessionId: string, sessionTitle: string | null, questions: readonly Question[], nonce: string, timeoutMs: number): string {
   const single = questions.length === 1;
-  const blocks = questions.map((question, index) => {
+  const blocks = questions.map(question => {
     const options = (question.options ?? []).map((option, n) =>
       `   ${n + 1}. ${inline(option.label, 200)}${option.description ? ` — ${inline(option.description, 300)}` : ''}`);
-    const head = single ? '' : `${index + 1}. `;
+    // A question is told apart by its id when there are several: the reply names it.
+    const head = single ? '' : `${code(inline(question.id, 60))} `;
     return [`${head}${inline(question.question, 600)}${question.multiSelect ? '（可多选）' : ''}`, ...options].join('\n');
   });
-  const usage = single
-    ? `回复 /answer ${nonce} 选项序号或文字`
-    : `逐题回复 /answer ${nonce} 题目ID 选项序号或文字`;
+  const first = questions[0];
+  const hasOptions = questions.some(question => (question.options ?? []).length > 0);
+  const example = single
+    ? `/answer ${nonce} ${first?.multiSelect ? '1,3' : hasOptions ? '1' : '你的答案'}`
+    : `/answer ${nonce} ${inline(questions[0]?.id ?? '题目ID', 60)} ${(questions[0]?.options ?? []).length ? '1' : '你的答案'}`;
+  const how = single
+    ? `回复 ${code(example)}${hasOptions ? '，填选项序号，也可以直接写你自己的答案' : ''}${first?.multiSelect ? '；多选用逗号隔开' : ''}`
+    : `每题回复一次 ${code(example)}，题目 ID 见各题开头；全部答完才会提交`;
   return [
     `${title('❓', 'DSH 等待你的回答')} · ${sessionLabel(sessionTitle)}`,
     '',
     blocks.join('\n\n'),
     '',
-    `> ${usage}；DSH 页面也可同时回答，以先处理的结果为准。本验证码最长有效 ${Math.round(timeoutMs / 1000)} 秒，请求结束会提前失效。`,
+    `> ${how}。`,
+    `> DSH 页面也可同时回答，以先处理的结果为准；${validityText(timeoutMs)}内有效，请求结束会提前失效。`,
     quotePointer(sessionId),
   ].join('\n');
+}
+
+/** Whether one tap can answer these questions: one single-choice question with few enough options. */
+export function questionFitsCard(questions: readonly Question[]): boolean {
+  const [only] = questions;
+  const count = only?.options?.length ?? 0;
+  return questions.length === 1 && !only!.multiSelect && count >= 1 && count <= MAX_CARD_BUTTONS;
+}
+
+/**
+ * A single-choice question as a card with one button per option.
+ *
+ * Button text is short (WeCom suggests 10 characters), so a long option is
+ * labelled 「选项 n」 and the full numbered list sits in rows below the question —
+ * the same numbers the typed `/answer` reply uses. Free text cannot be typed
+ * into a card, so the verification code stays in the subtitle for `/answer`.
+ */
+export function questionCard(sessionTitle: string | null, question: Question, nonce: string, timeoutMs: number): TemplateCard {
+  const options = question.options ?? [];
+  const short = (label: string): boolean => [...label].length <= 8;
+  // The buttons already say everything when every option is short and bare.
+  // Otherwise each option gets a row of its own: the quote area would be cut
+  // after two lines, a row list is not. WeCom allows six rows, so options come
+  // first and the Session name only takes what is left.
+  const rows = options.some(option => !short(option.label) || option.description)
+    ? options.map((option, n) => ({
+      keyname: `选项${n + 1}`,
+      value: cardText(`${option.label}${option.description ? ` — ${option.description}` : ''}`, 120),
+    }))
+    : [];
+  if (rows.length < MAX_CARD_BUTTONS) rows.push({ keyname: '会话', value: cardText(displayTitle(sessionTitle), 78) });
+  return {
+    card_type: 'button_interaction',
+    main_title: { title: '❓ DSH 等待你的回答', desc: `${validityText(timeoutMs)}内有效 · 验证码 ${nonce}` },
+    sub_title_text: cardText(question.question, 330),
+    horizontal_content_list: rows,
+    button_list: options.map((option, n) => ({
+      text: short(option.label) ? cardText(option.label, 30) : `选项 ${n + 1}`,
+      key: optionButton(n), style: 1,
+    })),
+    task_id: questionTaskId(nonce),
+  };
+}
+
+/** What replaces a question card once it is settled; same fallbacks as {@link approvalSettledCards}. */
+export function questionSettledCards(outcome: 'answered' | string, answer: string | undefined, taskId: string): TemplateCard[] {
+  const answered = outcome === 'answered';
+  const headline = answered ? '✅ 已回答' : '⌛ 已失效';
+  const detail = answered
+    ? `你选择了：${cardText(answer ?? '', 60)}`
+    : '请求已处理或已超时，以 DSH 页面为准';
+  const base = { card_action: CARD_ACTION, main_title: { title: headline, desc: detail }, task_id: taskId };
+  return [
+    { card_type: 'text_notice', ...base },
+    {
+      card_type: 'button_interaction',
+      ...base,
+      main_title: { title: headline, desc: `${detail} · 按钮不再可用` },
+      button_list: [{ text: answered ? '已回答' : '已失效', key: SETTLED_BUTTON, style: 4 }],
+    },
+  ];
 }
 
 export function reviewNotice(sessionId: string, sessionTitle: string | null): string {

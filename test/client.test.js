@@ -108,7 +108,7 @@ const STATE = {
     wsUrl: '',
     adminUserIds: [],
     adminWorkspaces: [],
-    questionTimeoutMs: 60000,
+    answerTimeoutMs: 1800000,
     approvalTimeoutMs: 1800000,
     remoteApprovals: false,
     logEnabled: true,

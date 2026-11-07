@@ -31,6 +31,8 @@ export interface PendingQuestion extends PendingState<QuestionAnswer> {
   readonly questions: readonly Question[];
   readonly nonce: string;
   readonly answers: Map<string, QuestionAnswerItem>;
+  /** The chats the question was announced to; a card tap must come from one of them. */
+  readonly chats: ReadonlySet<string>;
   finish(value: QuestionAnswer | null): void;
 }
 
@@ -53,7 +55,7 @@ export interface InteractionRegistry {
   readonly questions: ReadonlyMap<string, PendingQuestion>;
   readonly approvals: ReadonlyMap<string, PendingApproval>;
   /** Undefined when this Session already has a pending question. */
-  waitQuestion(sessionId: string, questions: readonly Question[], timeoutMs: number, signal?: AbortSignal, delivery?: InteractionDelivery): Wait<QuestionAnswer> | undefined;
+  waitQuestion(sessionId: string, questions: readonly Question[], timeoutMs: number, signal?: AbortSignal, delivery?: InteractionDelivery, chats?: readonly string[]): Wait<QuestionAnswer> | undefined;
   /** Undefined when this Session already has a pending approval. */
   waitApproval(
     sessionId: string,
@@ -130,12 +132,12 @@ export function createInteractionRegistry(): InteractionRegistry {
   const findApproval = (nonce: string) => [...approvals.values()].find(state => state.nonce === normalized(nonce));
   return {
     questions, approvals,
-    waitQuestion(sessionId, list, timeoutMs, signal, delivery) {
+    waitQuestion(sessionId, list, timeoutMs, signal, delivery, chats = []) {
       const key = delivery?.id ?? sessionId;
       if (questions.has(key) || signal?.aborted) return undefined;
       const nonce = fresh();
       const result = open<QuestionAnswer, PendingQuestion>(questions, key, nonce, timeoutMs, signal,
-        (finish, active, submit) => ({ sessionId, questions: list, nonce, answers: new Map(), finish, active, submit }), delivery);
+        (finish, active, submit) => ({ sessionId, questions: list, nonce, answers: new Map(), chats: new Set(chats), finish, active, submit }), delivery);
       return { nonce, result };
     },
     waitApproval(sessionId, request, timeoutMs, signal, delivery) {
