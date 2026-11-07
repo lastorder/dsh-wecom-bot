@@ -9,7 +9,8 @@ import type {
   StoreSettings, StoreSettingsPatch,
 } from '../shared/protocol.ts';
 import {
-  FULL_ACCESS_MODE, DEFAULT_LOG_RETENTION_DAYS, DEFAULT_SECRET_REF, MAX_LOG_RETENTION_DAYS, MIN_LOG_RETENTION_DAYS,
+  FULL_ACCESS_MODE, DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_LOG_RETENTION_DAYS, DEFAULT_SECRET_REF, MAX_APPROVAL_TIMEOUT_MS,
+  MAX_LOG_RETENTION_DAYS, MIN_APPROVAL_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS,
 } from '../shared/protocol.ts';
 import type { FormOperation, StoredConfig } from './types.ts';
 
@@ -52,7 +53,7 @@ export function changedOperations(draft: StoredConfig, base: StoredConfig): Form
 }
 
 export type FieldErrors = Partial<Record<
-  'botId' | 'secret' | 'wsUrl' | 'logRetentionDays',
+  'botId' | 'secret' | 'wsUrl' | 'logRetentionDays' | 'approvalTimeoutMs',
   string
 >>;
 
@@ -73,7 +74,7 @@ export function validateCredentials(draft: { readonly botId: string; readonly se
  * without the two ever drifting apart.
  */
 export function validateAdvanced(
-  draft: Pick<StoreSettings, 'wsUrl' | 'logRetentionDays'>,
+  draft: Pick<StoreSettings, 'wsUrl' | 'logRetentionDays'> & { readonly approvalTimeoutMs?: number },
 ): FieldErrors {
   const errors: FieldErrors = {};
   const wsUrl = draft.wsUrl.trim();
@@ -89,17 +90,23 @@ export function validateAdvanced(
     || draft.logRetentionDays < MIN_LOG_RETENTION_DAYS || draft.logRetentionDays > MAX_LOG_RETENTION_DAYS) {
     errors.logRetentionDays = `请输入 ${MIN_LOG_RETENTION_DAYS}–${MAX_LOG_RETENTION_DAYS} 的整数天数。`;
   }
+  const approval = draft.approvalTimeoutMs;
+  if (approval !== undefined
+    && (!Number.isFinite(approval) || approval < MIN_APPROVAL_TIMEOUT_MS || approval > MAX_APPROVAL_TIMEOUT_MS)) {
+    errors.approvalTimeoutMs = `请输入 ${MIN_APPROVAL_TIMEOUT_MS / 60_000}–${MAX_APPROVAL_TIMEOUT_MS / 60_000} 分钟。`;
+  }
   return errors;
 }
 
 /** The store's settings block as the 高级设置 section seeds its draft. */
 export function advancedSlice(settings: StoreSettings | undefined): Pick<
-  StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays'
+  StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays' | 'approvalTimeoutMs'
 > {
   return {
     wsUrl: settings?.wsUrl ?? '',
     logEnabled: settings?.logEnabled ?? true,
     logRetentionDays: settings?.logRetentionDays ?? DEFAULT_LOG_RETENTION_DAYS,
+    approvalTimeoutMs: settings?.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS,
   };
 }
 
@@ -110,13 +117,14 @@ export function advancedSlice(settings: StoreSettings | undefined): Pick<
  * cannot write back a stale copy of something another window just changed.
  */
 export function settingsPatch(
-  draft: Pick<StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays'>,
-  stored: Pick<StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays'>,
+  draft: Pick<StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays' | 'approvalTimeoutMs'>,
+  stored: Pick<StoreSettings, 'wsUrl' | 'logEnabled' | 'logRetentionDays' | 'approvalTimeoutMs'>,
 ): StoreSettingsPatch {
   const patch: { -readonly [K in keyof StoreSettingsPatch]: StoreSettingsPatch[K] } = {};
   if (draft.wsUrl.trim() !== stored.wsUrl.trim()) patch.wsUrl = draft.wsUrl.trim();
   if (draft.logEnabled !== stored.logEnabled) patch.logEnabled = draft.logEnabled;
   if (draft.logRetentionDays !== stored.logRetentionDays) patch.logRetentionDays = draft.logRetentionDays;
+  if (draft.approvalTimeoutMs !== stored.approvalTimeoutMs) patch.approvalTimeoutMs = draft.approvalTimeoutMs;
   return patch;
 }
 

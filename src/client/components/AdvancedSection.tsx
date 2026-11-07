@@ -14,6 +14,11 @@ import { CopyButton, Field, FormFooter } from './ui.tsx';
  * Bot; the journal fields are adopted by the running Bot in place. The section
  * therefore keeps an explicit 保存 and writes one patch for the fields that moved.
  */
+/** 1800000 → 30 分钟, 5400000 → 90 分钟, 90000 → 1.5 分钟. */
+function minutesText(ms: number): string {
+  return `${Math.round(ms / 600) / 100} 分钟`;
+}
+
 export function AdvancedSection({ settings, journal, disabled, onChanged }: {
   settings: StoreSettings | undefined;
   journal: JournalInfo | undefined;
@@ -36,6 +41,7 @@ export function AdvancedSection({ settings, journal, disabled, onChanged }: {
 
   const summary = [
     stored.wsUrl ? '自定义接入地址' : '默认接入地址',
+    `审批 ${minutesText(stored.approvalTimeoutMs)}内有效`,
     stored.logEnabled ? `对话日志保留 ${stored.logRetentionDays} 天` : '对话日志已关闭',
   ].join(' · ');
   const message = save.error ?? (dirty ? '有未保存的更改' : save.saved ? '已保存。' : undefined);
@@ -67,6 +73,23 @@ export function AdvancedSection({ settings, journal, disabled, onChanged }: {
                 aria-label="WebSocket 地址"
                 onChange={event => setDraft(current => ({ ...current, wsUrl: event.target.value }))}
               />
+            </Field>
+            <Field
+              label="审批有效期"
+              error={errors.approvalTimeoutMs}
+              hint="企业微信里的权限审批卡片在多久内可以点「批准 / 拒绝」，超时后卡片失效，DSH 页面仍可处理。修改即时生效，只影响之后发出的审批。"
+            >
+              <span className="wcb-switch-row">
+                <Input
+                  className="wcb-number"
+                  type="number" min={1} max={1440} step={1}
+                  value={Number.isFinite(draft.approvalTimeoutMs) ? Math.round(draft.approvalTimeoutMs / 600) / 100 : ''}
+                  disabled={disabled}
+                  aria-label="审批有效期（分钟）"
+                  onChange={event => setDraft(current => ({ ...current, approvalTimeoutMs: Math.round(Number(event.target.value) * 60_000) }))}
+                />
+                <span>分钟</span>
+              </span>
             </Field>
             <Field
               label="对话日志"

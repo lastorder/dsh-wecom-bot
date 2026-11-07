@@ -1,7 +1,8 @@
 import z from '@deepseek-ai/schemastery';
 import {
-  DEFAULT_LOG_RETENTION_DAYS, DEFAULT_QUESTION_TIMEOUT_MS, DEFAULT_SECRET_REF,
-  MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS, MIN_QUESTION_TIMEOUT_MS,
+  DEFAULT_APPROVAL_TIMEOUT_MS, DEFAULT_LOG_RETENTION_DAYS, DEFAULT_QUESTION_TIMEOUT_MS, DEFAULT_SECRET_REF,
+  MAX_APPROVAL_TIMEOUT_MS, MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS, MIN_APPROVAL_TIMEOUT_MS,
+  MIN_LOG_RETENTION_DAYS, MIN_QUESTION_TIMEOUT_MS,
   type StoreSettings,
 } from '../shared/protocol.js';
 
@@ -45,6 +46,8 @@ export interface BridgeSettings {
   /** Empty means every Workspace. */
   readonly adminWorkspaces: readonly string[];
   readonly questionTimeoutMs: number;
+  /** How long an approval stays answerable from WeCom. */
+  readonly approvalTimeoutMs: number;
   readonly remoteApprovals: boolean;
 }
 
@@ -93,6 +96,9 @@ export function readBridgeSettings(config: PluginConfig, settings: StoreSettings
     adminWorkspaces: uniqueIds(settings.adminWorkspaces),
     questionTimeoutMs: clamp(
       settings.questionTimeoutMs, MIN_QUESTION_TIMEOUT_MS, MAX_QUESTION_TIMEOUT_MS, DEFAULT_QUESTION_TIMEOUT_MS,
+    ),
+    approvalTimeoutMs: clamp(
+      settings.approvalTimeoutMs, MIN_APPROVAL_TIMEOUT_MS, MAX_APPROVAL_TIMEOUT_MS, DEFAULT_APPROVAL_TIMEOUT_MS,
     ),
     remoteApprovals: settings.remoteApprovals === true,
   };

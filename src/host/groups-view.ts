@@ -1,5 +1,5 @@
 import {
-  DEFAULT_GROUP_ID, isPermissionMode, MAX_GROUPS, MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS,
+  DEFAULT_GROUP_ID, isPermissionMode, MAX_APPROVAL_TIMEOUT_MS, MIN_APPROVAL_TIMEOUT_MS, MAX_GROUPS, MAX_LOG_RETENTION_DAYS, MAX_QUESTION_TIMEOUT_MS, MIN_LOG_RETENTION_DAYS,
   MIN_QUESTION_TIMEOUT_MS, type BindingKind, type BindingRecord, type BindingSessionState, type ContextUsage,
   type GroupMemberView, type GroupRecord, type GroupView, type ModelSelection, type StoreOp,
   type RoutingView, type StoreSettingsPatch,
@@ -189,7 +189,7 @@ export interface StoreOpResult {
 export function validateSettingsPatch(patch: StoreSettingsPatch): StoreSettingsPatch | string {
   const record = patch as Record<string, unknown>;
   const known = new Set([
-    'wsUrl', 'adminUserIds', 'adminWorkspaces', 'questionTimeoutMs', 'remoteApprovals', 'logEnabled', 'logRetentionDays',
+    'wsUrl', 'adminUserIds', 'adminWorkspaces', 'questionTimeoutMs', 'approvalTimeoutMs', 'remoteApprovals', 'logEnabled', 'logRetentionDays',
   ]);
   for (const key of Object.keys(record)) if (!known.has(key)) return `无法识别的设置项：${key}`;
   const clean: Record<string, unknown> = {};
@@ -216,6 +216,13 @@ export function validateSettingsPatch(patch: StoreSettingsPatch): StoreSettingsP
       return `「等待企微回复」需要在 ${MIN_QUESTION_TIMEOUT_MS / 1000}–${MAX_QUESTION_TIMEOUT_MS / 1000} 秒之间。`;
     }
     clean.questionTimeoutMs = Math.round(ms);
+  }
+  if (record.approvalTimeoutMs !== undefined) {
+    const ms = Number(record.approvalTimeoutMs);
+    if (!Number.isFinite(ms) || ms < MIN_APPROVAL_TIMEOUT_MS || ms > MAX_APPROVAL_TIMEOUT_MS) {
+      return `「审批有效期」需要在 ${MIN_APPROVAL_TIMEOUT_MS / 60_000}–${MAX_APPROVAL_TIMEOUT_MS / 60_000} 分钟之间。`;
+    }
+    clean.approvalTimeoutMs = Math.round(ms);
   }
   if (record.remoteApprovals !== undefined) {
     if (typeof record.remoteApprovals !== 'boolean') return '「远程审批」只能是开或关。';

@@ -37,6 +37,21 @@ export function inline(text: string, maxBytes = 300): string {
   return limitBytes(oneLine(text).replace(/[*_`\[\]<>#]/g, char => INLINE_SWAP[char] ?? char), maxBytes);
 }
 
+/** How long a request stays answerable, as a person says it: 45 秒, 30 分钟, 1 小时 30 分钟. */
+export function validityText(ms: number | undefined): string {
+  const seconds = Math.max(0, Math.round((ms ?? 0) / 1000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  return minutes % 60 ? `${hours} 小时 ${minutes % 60} 分钟` : `${hours} 小时`;
+}
+
+/** Card fields are plain text: no Markdown escaping, only one line and a byte budget. */
+function cardText(text: string, maxBytes: number): string {
+  return limitBytes(oneLine(text), maxBytes);
+}
+
 /** Keep Markdown, but drop anything that could act as a tag or mention. */
 export function markdownBody(text: string, maxBytes: number): string {
   return limitBytes(text.replace(/<(?=[@a-zA-Z\/!])/g, '‹'), maxBytes);
@@ -427,7 +442,7 @@ export function approvalNotice(sessionId: string, sessionTitle: string | null, r
   ];
   lines.push('');
   lines.push(nonce
-    ? `回复 /approve ${nonce} 允许本次调用，或 /deny ${nonce} 拒绝；DSH 页面同时可审批，以先处理的结果为准。验证码最长有效 ${Math.round((timeoutMs ?? 0) / 1000)} 秒，请求结束会提前失效。`
+    ? `回复 /approve ${nonce} 允许本次调用，或 /deny ${nonce} 拒绝；DSH 页面同时可审批，以先处理的结果为准。验证码最长有效 ${validityText(timeoutMs)}，请求结束会提前失效。`
     : '请到 DSH 页面审批。');
   lines.push('', quotePointer(sessionId));
   return lines.join('\n');
@@ -451,16 +466,22 @@ const CARD_ACTION = { type: 1 as const, url: 'https://work.weixin.qq.com/' };
  * and in {@link approvalNotice} for keyboards and clients that drop cards.
  */
 export function approvalCard(sessionTitle: string | null, request: ApprovalRequest, nonce: string, timeoutMs?: number): TemplateCard {
-  const reason = request.displayReason?.zh ?? request.displayReason?.en ?? request.reason ?? '';
-  const seconds = Math.round((timeoutMs ?? 0) / 1000);
-  const desc = [
-    reason ? `原因：${inline(reason, 90)}` : '',
-    `会话：${inline(sessionTitle ?? '未命名会话', 40)}`,
-    `验证码 ${nonce} · ${seconds} 秒内有效`,
-  ].filter(Boolean).join(' · ');
+  const reason = oneLine(request.displayReason?.zh ?? request.displayReason?.en ?? request.reason ?? '');
+  // DSH words the reason as 「<what is asked>：<why>」. The ask is a short fact
+  // for the list below; the why is the sentence the administrator decides on.
+  const split = reason.match(/^([^：:]{1,60})[：:]\s*(.+)$/);
+  const ask = split ? split[1]!.trim() : '';
+  const why = split ? split[2]!.trim() : reason;
+  const rows = [
+    ...(ask ? [{ keyname: '权限', value: cardText(ask, 78) }] : []),
+    { keyname: '会话', value: cardText(displayTitle(sessionTitle), 78) },
+    { keyname: '验证码', value: timeoutMs ? `${nonce} · ${validityText(timeoutMs)}内有效` : nonce },
+  ];
   return {
     card_type: 'button_interaction',
-    main_title: { title: `🔐 权限请求：${inline(request.toolName, 60)}`, desc },
+    main_title: { title: `🔐 权限请求 · ${cardText(request.toolName, 48)}`, desc: '请批准或拒绝；DSH 页面同时可处理，先到先得' },
+    ...(why ? { sub_title_text: cardText(why, 330) } : {}),
+    horizontal_content_list: rows,
     button_list: [
       { text: '批准', key: APPROVE_BUTTON, style: 1 },
       { text: '拒绝', key: DENY_BUTTON, style: 2 },
@@ -478,13 +499,13 @@ export function approvalCard(sessionTitle: string | null, request: ApprovalReque
 export function approvalSettledCards(outcome: 'allowed-once' | 'rejected' | string, toolName: string | undefined, taskId: string): TemplateCard[] {
   const allowed = outcome === 'allowed-once';
   const rejected = outcome === 'rejected';
-  const headline = allowed ? '✅ 已批准' : rejected ? '🚫 已拒绝' : '⌛ 已失效';
-  const what = toolName ? `：${inline(toolName, 60)}` : '';
+  const what = toolName ? ` · ${cardText(toolName, 48)}` : '';
+  const headline = `${allowed ? '✅ 已批准' : rejected ? '🚫 已拒绝' : '⌛ 已失效'}${what}`;
   const detail = allowed
-    ? `已允许本次工具调用${what}`
+    ? '已允许本次工具调用'
     : rejected
-      ? `已拒绝本次工具调用${what}`
-      : '这条请求已经处理过或已超时，结果以 DSH 页面为准。';
+      ? '已拒绝本次工具调用'
+      : '请求已处理或已超时，以 DSH 页面为准';
   const base = { card_action: CARD_ACTION, main_title: { title: headline, desc: detail }, task_id: taskId };
   return [
     { card_type: 'text_notice', ...base },

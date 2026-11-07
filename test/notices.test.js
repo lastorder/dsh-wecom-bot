@@ -213,3 +213,31 @@ test('a long session list is truncated but still reports the real total', () => 
   assert.equal(text.split('\n').length <= 45, true);
   assert.ok(byteLength(text) <= MAX_REPLY_BYTES);
 });
+
+test('the approval card shows the decision on its own lines, not one crammed description', async () => {
+  const { approvalCard, approvalSettledCards } = await import('../dist/host/bridge/notices.js');
+  const card = approvalCard('mock 一个权限审批，我来从手机端测试一下', {
+    toolName: 'bash', reason: '允许本次操作使用 danger-full-access 权限：这是你要求的审批模拟：需要在工作区外写入并删除临时文件',
+  }, '85cc9p', 60000);
+  assert.equal(card.main_title.title, '🔐 权限请求 · bash');
+  assert.match(card.sub_title_text, /^这是你要求的审批模拟/, 'the why is the headline sentence');
+  assert.match(card.sub_title_text, /临时文件$/, 'and is not cut short');
+  const rows = Object.fromEntries(card.horizontal_content_list.map(row => [row.keyname, row.value]));
+  assert.equal(rows['权限'], '允许本次操作使用 danger-full-access 权限');
+  assert.match(rows['会话'], /^mock 一个权限审批/);
+  assert.equal(rows['验证码'], '85cc9p · 1 分钟内有效');
+  for (const row of card.horizontal_content_list) assert.ok([...row.keyname].length <= 5);
+  const bare = approvalCard(null, { toolName: 'bash' }, 'abc123', 60000);
+  assert.equal(bare.sub_title_text, undefined);
+  const [settled] = approvalSettledCards('allowed-once', 'plugin_manager', 'apv_x');
+  assert.equal(settled.main_title.title, '✅ 已批准 · plugin_manager', 'tool names keep their underscores');
+});
+
+test('validity is said the way a person says it', async () => {
+  const { validityText, approvalNotice } = await import('../dist/host/bridge/notices.js');
+  assert.equal(validityText(45_000), '45 秒');
+  assert.equal(validityText(1_800_000), '30 分钟');
+  assert.equal(validityText(3_600_000), '1 小时');
+  assert.equal(validityText(5_400_000), '1 小时 30 分钟');
+  assert.match(approvalNotice('session-1', 't', { toolName: 'bash' }, 'a1b2c3', 1_800_000), /最长有效 30 分钟/);
+});

@@ -1189,3 +1189,24 @@ test('two quick taps on one approval card settle it once, with the first verdict
   assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已批准/);
   h.stop();
 });
+
+test('an approval stays open for approvalTimeoutMs, not the question timeout, and the edit is adopted live', async () => {
+  // Questions would give up after 20ms; the approval has half an hour.
+  const h = await harness({ adminUserIds: ['root'], approvalTimeoutMs: 1_800_000 }, {}, { members: [['user', 'root'], ['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi');
+  let fellBack = false;
+  const first = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => { fellBack = true; return 'unavailable'; });
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(fellBack, false, 'the question timeout does not retire an approval');
+  const card = h.client.sends.at(-1).body.template_card;
+  assert.match(card.horizontal_content_list.find(row => row.keyname === '验证码').value, /30 分钟内有效/);
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'deny'));
+  assert.equal(await first, 'rejected');
+
+  // A shorter validity reaches the running bridge for the next approval.
+  h.bridge.updateSettings({ ...h.settings, approvalTimeoutMs: 20 });
+  const second = await h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
+  assert.equal(second, 'unavailable', 'it timed out and fell back to DSH');
+  h.stop();
+});

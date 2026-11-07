@@ -109,6 +109,7 @@ const STATE = {
     adminUserIds: [],
     adminWorkspaces: [],
     questionTimeoutMs: 60000,
+    approvalTimeoutMs: 1800000,
     remoteApprovals: false,
     logEnabled: true,
     logRetentionDays: 14,
@@ -699,7 +700,7 @@ const openAdvanced = async root => {
   return root.find(node => node.props?.['data-section'] === 'advanced');
 };
 
-test('高级设置 saves only endpoint and journal settings; approval controls are absent', async () => {
+test('高级设置 saves only endpoint, approval validity and journal settings', async () => {
   const harness = mount();
   const renderer = await render(harness);
   const root = renderer.root;
@@ -714,7 +715,7 @@ test('高级设置 saves only endpoint and journal settings; approval controls a
 
   assert.equal(queryByLabel(root, '等待企微回复的秒数'), undefined);
   assert.equal(root.findAll(node => node.props?.role === 'switch' && node.props['aria-label'] === '远程审批工具调用').length, 0);
-  assert.equal(text(advanced).includes('审批'), false, 'the card neither offers nor describes approval settings');
+  assert.equal(byLabel(root, '审批有效期（分钟）').props.value, 30, 'the default approval validity is 30 minutes');
   await act(async () => { byLabel(root, '日志保留天数').props.onChange({ target: { value: '30' } }); });
   await act(async () => { advanced.findAll(node => node.type === 'button' && text(node) === '保存')[0].props.onClick(); });
   await flush();

@@ -613,13 +613,13 @@ export function createBridge(deps: BridgeDeps): Bridge {
     }
     const wait = interactions.waitApproval(sessionId, {
       toolName: request.toolName, privateChats: admins, ...(request.callId ? { callId: request.callId } : {}),
-    }, settings.questionTimeoutMs, request.signal, delivery);
+    }, settings.approvalTimeoutMs, request.signal, delivery);
     if (!wait) {
       notify(admins, approvalNotice(sessionId, info.title, request), 'approval', sessionId);
       return next();
     }
-    journal.write({ event: 'dsh.approval', ...meta, remote: true, nonce: wait.nonce, chats: admins, timeoutMs: settings.questionTimeoutMs });
-    notify(admins, approvalNotice(sessionId, info.title, request, wait.nonce, settings.questionTimeoutMs), 'approval-request', sessionId, wait.nonce, approvalCard(info.title, request, wait.nonce, settings.questionTimeoutMs));
+    journal.write({ event: 'dsh.approval', ...meta, remote: true, nonce: wait.nonce, chats: admins, timeoutMs: settings.approvalTimeoutMs });
+    notify(admins, approvalNotice(sessionId, info.title, request, wait.nonce, settings.approvalTimeoutMs), 'approval-request', sessionId, wait.nonce, approvalCard(info.title, request, wait.nonce, settings.approvalTimeoutMs));
     const outcome = await wait.result;
     journal.write({ event: 'dsh.approval.result', ...meta, nonce: wait.nonce, outcome: outcome ?? 'fallback' });
     return outcome ?? next();

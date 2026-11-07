@@ -44,6 +44,10 @@ export const MAX_LABEL_CHARS = 60;
 export const MIN_QUESTION_TIMEOUT_MS = 1000;
 export const MAX_QUESTION_TIMEOUT_MS = 300000;
 export const DEFAULT_QUESTION_TIMEOUT_MS = 60000;
+/** How long a tool approval stays answerable from WeCom: 1 minute – 24 hours, 30 minutes by default. */
+export const MIN_APPROVAL_TIMEOUT_MS = 60_000;
+export const MAX_APPROVAL_TIMEOUT_MS = 24 * 60 * 60_000;
+export const DEFAULT_APPROVAL_TIMEOUT_MS = 30 * 60_000;
 export const MIN_LOG_RETENTION_DAYS = 1;
 export const MAX_LOG_RETENTION_DAYS = 365;
 export const DEFAULT_LOG_RETENTION_DAYS = 14;
@@ -191,6 +195,8 @@ export interface StoreSettings {
   readonly adminWorkspaces: readonly string[];
   /** Legacy serialized value; DSH and WeCom now handle interactions concurrently. */
   readonly questionTimeoutMs: number;
+  /** How long a tool approval card stays answerable from WeCom before it is retired. */
+  readonly approvalTimeoutMs: number;
   /** Legacy serialized value; scoped administrator approvals are always enabled. */
   readonly remoteApprovals: boolean;
   /** Whether the JSONL conversation journal is written. */
