@@ -242,27 +242,33 @@ test('validity is said the way a person says it', async () => {
   assert.match(approvalNotice('session-1', 't', { toolName: 'bash' }, 'a1b2c3', 1_800_000), /最长有效 30 分钟/);
 });
 
-test('a question card is only built for one single-choice question with at most six options', async () => {
+test('a question card is only built for one question with options, buttons up to five', async () => {
   const { questionCardKind, questionCard, questionSettledCards } = await import('../dist/host/bridge/notices.js');
   const { parseCardEvent } = await import('../dist/host/bridge/cards.js');
   const option = n => ({ label: `o${n}` });
-  const six = { id: 'q', question: 'Q?', options: Array.from({ length: 6 }, (_, n) => option(n)) };
+  const six = { id: 'q', question: 'Q?', options: Array.from({ length: 5 }, (_, n) => option(n)) };
   assert.equal(questionCardKind([six]), 'buttons');
-  assert.equal(questionCardKind([{ ...six, options: [...six.options, option(7)] }]), 'checkbox', 'a card carries six buttons; more become a list');
+  assert.equal(questionCardKind([{ ...six, options: [...six.options, option(7)] }]), 'checkbox', 'a card carries six buttons, one is 「自己回答」; more become a list');
   assert.equal(questionCardKind([{ ...six, multiSelect: true }]), 'checkbox', 'a tap cannot pick several');
-  assert.equal(questionCardKind([{ ...six, options: Array.from({ length: 21 }, (_, n) => option(n)) }]), undefined, 'a checkbox card carries twenty');
+  assert.equal(questionCardKind([{ ...six, options: Array.from({ length: 20 }, (_, n) => option(n)) }]), undefined, 'a checkbox card carries twenty entries, one is 「自己回答」');
+  assert.equal(questionCardKind([{ ...six, options: Array.from({ length: 19 }, (_, n) => option(n)) }]), 'checkbox');
   assert.equal(questionCardKind([{ id: 'q', question: 'Q?' }]), undefined, 'free text cannot be typed into a card');
-  assert.equal(questionCardKind([six, six]), undefined);
+  assert.equal(questionCardKind([six, six]), 'dropdowns', 'several single-choice questions share one card');
+  assert.equal(questionCardKind([six, six, six, six]), undefined, 'a card carries three dropdowns');
+  assert.equal(questionCardKind([six, { ...six, multiSelect: true }]), undefined, 'a dropdown cannot take several');
+  assert.equal(questionCardKind([six, { id: 'f', question: 'Q?' }]), undefined, 'nor free text');
+  assert.equal(questionCardKind([six, { ...six, options: Array.from({ length: 10 }, (_, n) => option(n)) }]), undefined, 'a dropdown carries ten entries, one is 请选择');
+  assert.equal(questionCardKind([six, { ...six, options: Array.from({ length: 9 }, (_, n) => option(n)) }]), 'dropdowns');
 
   const card = questionCard('《会话》', six, 'abc123', 1_800_000);
   assert.equal(card.task_id, 'qst_abc123');
-  assert.equal(card.button_list.length, 6);
+  assert.equal(card.button_list.length, 6, 'five options and 「自己回答」');
+  assert.deepEqual(card.button_list.at(-1), { text: '✏️ 自己回答', key: 'other', style: 2 });
   assert.match(card.main_title.desc, /30 分钟内有效 · 验证码 abc123/);
   assert.deepEqual(card.horizontal_content_list.map(row => row.keyname), ['会话'], 'short bare options need no list: the buttons say it all');
   const long = questionCard('《会话》', { ...six, options: six.options.map((o, n) => ({ ...o, label: `一个很长很长的选项名称${n}` })) }, 'abc123', 1_800_000);
-  assert.deepEqual(long.horizontal_content_list.map(row => row.keyname), ['选项1', '选项2', '选项3', '选项4', '选项5', '选项6'],
-    'six long options fill the six rows, and the Session name yields');
-  assert.deepEqual(long.button_list.map(b => b.text), ['选项 1', '选项 2', '选项 3', '选项 4', '选项 5', '选项 6']);
+  assert.deepEqual(long.horizontal_content_list.map(row => row.keyname), ['选项1', '选项2', '选项3', '选项4', '选项5', '会话']);
+  assert.deepEqual(long.button_list.map(b => b.text), ['选项 1', '选项 2', '选项 3', '选项 4', '选项 5', '✏️ 自己回答']);
   const [notice] = questionSettledCards('answered', 'o2', 'qst_abc123');
   assert.equal(notice.main_title.title, '✅ 已回答');
   assert.match(notice.main_title.desc, /o2/);
@@ -302,4 +308,46 @@ test('the ticked options are read from the shape WeCom really sends, and never g
   assert.equal(selectedOptions({ selected_item: [{ option_ids: { option_id: ['x1'] } }] }), undefined, 'ids this plugin never sent are not believed');
   const bare = parseCardEvent({ headers: {}, body: { from: { userid: 'u' }, event: { template_card_event: { event_key: 'submit', task_id: 'qst_a' } } } });
   assert.equal(bare.selected, undefined, 'no selection field means cannot read');
+});
+
+test('a dropdown card starts every question on 请选择, so an untouched one is never an answer', async () => {
+  const { questionCard } = await import('../dist/host/bridge/notices.js');
+  const { chosenOptions } = await import('../dist/host/bridge/cards.js');
+  const ask = [
+    { id: 'a', question: '先选哪个？', options: [{ label: 'x' }, { label: 'y' }] },
+    { id: 'b', question: '再选哪个？', options: [{ label: 'p' }] },
+  ];
+  const card = questionCard('《会话》', ask, 'abc123', 1_800_000);
+  assert.equal(card.card_type, 'multiple_interaction');
+  assert.deepEqual(card.select_list.map(item => item.question_key), ['q0', 'q1']);
+  assert.deepEqual(card.select_list[0].option_list.map(o => o.id), ['none', 'opt_0', 'opt_1']);
+  assert.ok(card.select_list.every(item => item.selected_id === 'none'));
+  // This card type shows only title, description and controls: the questions
+  // must be in the description, or they are not readable at all.
+  assert.equal(card.sub_title_text, undefined);
+  assert.equal(card.horizontal_content_list, undefined);
+  assert.match(card.main_title.desc, /1\. 先选哪个？\n2\. 再选哪个？\n/);
+  assert.match(card.main_title.desc, /每题选一项 · 会话：《会话》 · 30 分钟内有效 · 验证码 abc123\n自己写答案：\/answer abc123 题号 答案$/, 'and says how to write an answer instead');
+  assert.match(card.select_list[0].title, /^1\. 先选哪个/, 'each dropdown repeats the start of its question');
+
+  const items = { selected_item: [
+    { question_key: 'q0', option_ids: { option_id: ['opt_1'] } },
+    { question_key: 'q1', option_ids: { option_id: ['none'] } },
+  ] };
+  assert.deepEqual(chosenOptions(items), { q0: 1, q1: undefined });
+  // Captured from a real multiple_interaction submit.
+  assert.deepEqual(chosenOptions({ selected_item: [
+    { question_key: 'q0', option_ids: { option_id: ['opt_0'] } },
+    { question_key: 'q1', option_ids: { option_id: ['opt_2'] } },
+  ] }), { q0: 0, q1: 2 });
+  // Every question keeps a fair share of the subtitle.
+  const long = { id: 'l', question: '很长'.repeat(80), options: [{ label: 'x' }] };
+  const wide = questionCard(null, [long, long, long], 'abc123', 60_000);
+  const lines = wide.main_title.desc.split('\n');
+  assert.equal(lines.length, 5, 'three questions, the line about the Session and how to type an answer');
+  assert.ok(lines.slice(0, 3).every(line => line.endsWith('…')), 'each is cut, and each equally');
+  assert.ok(byteLength(wide.main_title.desc) <= 290, 'the whole description stays within what WeCom shows');
+  assert.match(lines.at(-1), /^自己写答案：/, 'so the last line is never the one that is lost');
+  assert.equal(chosenOptions(undefined), undefined);
+  assert.equal(chosenOptions({}), undefined);
 });

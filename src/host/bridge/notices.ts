@@ -3,7 +3,7 @@ import type { ApprovalRequest, Question } from '../dsh.js';
 import type { TurnSummary } from '../turns.js';
 import type { OperableGroup } from './directory.js';
 import type { WorkspaceOption } from '../../shared/protocol.js';
-import { APPROVE_BUTTON, DENY_BUTTON, CHECKBOX_KEY, MAX_CARD_BUTTONS, MAX_CHECKBOX_OPTIONS, SETTLED_BUTTON, SUBMIT_BUTTON, approvalTaskId, optionButton, questionTaskId } from './cards.js';
+import { APPROVE_BUTTON, DENY_BUTTON, CHECKBOX_KEY, MAX_CARD_BUTTONS, MAX_CHECKBOX_OPTIONS, MAX_SELECT_OPTIONS, MAX_SELECT_QUESTIONS, OTHER_ID, PLACEHOLDER_OPTION, SETTLED_BUTTON, SUBMIT_BUTTON, approvalTaskId, optionButton, questionKey, questionTaskId } from './cards.js';
 import {
   byteLength, displayPath, displayTitle, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, sessionToken, shortId,
 } from './format.js';
@@ -449,11 +449,18 @@ function optionRow(option: { readonly label: string; readonly description?: stri
  * a checkbox list with a submit button when it takes several answers or has too
  * many options for buttons. Free text cannot be typed into a card.
  */
-export function questionCardKind(questions: readonly Question[]): 'buttons' | 'checkbox' | undefined {
+export function questionCardKind(questions: readonly Question[]): 'buttons' | 'checkbox' | 'dropdowns' | undefined {
+  const count = (question: Question | undefined) => question?.options?.length ?? 0;
+  // Several questions fit one card only as dropdowns: each single choice with a
+  // list short enough for one. A free-text or multi-select one cannot be on it.
+  if (questions.length > 1) {
+    return questions.length <= MAX_SELECT_QUESTIONS
+      && questions.every(question => !question.multiSelect && count(question) >= 1 && count(question) <= MAX_SELECT_OPTIONS)
+      ? 'dropdowns' : undefined;
+  }
   const [only] = questions;
-  const count = only?.options?.length ?? 0;
-  if (questions.length !== 1 || count < 1 || count > MAX_CHECKBOX_OPTIONS) return undefined;
-  return !only!.multiSelect && count <= MAX_CARD_BUTTONS ? 'buttons' : 'checkbox';
+  if (count(only) < 1 || count(only) > MAX_CHECKBOX_OPTIONS - 1) return undefined;
+  return !only!.multiSelect && count(only) <= MAX_CARD_BUTTONS - 1 ? 'buttons' : 'checkbox';
 }
 
 /**
@@ -464,10 +471,59 @@ export function questionCardKind(questions: readonly Question[]): 'buttons' | 'c
  * the same numbers the typed `/answer` reply uses. Free text cannot be typed
  * into a card, so the verification code stays in the subtitle for `/answer`.
  */
-export function questionCard(sessionTitle: string | null, question: Question, nonce: string, timeoutMs: number): TemplateCard {
-  const options = question.options ?? [];
-  if (!question.multiSelect && options.length <= MAX_CARD_BUTTONS) return questionButtonCard(sessionTitle, question, nonce, timeoutMs);
-  return questionCheckboxCard(sessionTitle, question, nonce, timeoutMs);
+export function questionCard(sessionTitle: string | null, asked: Question | readonly Question[], nonce: string, timeoutMs: number): TemplateCard {
+  const questions = Array.isArray(asked) ? asked as readonly Question[] : [asked as Question];
+  const [question] = questions;
+  if (questions.length > 1) return questionDropdownCard(sessionTitle, questions, nonce, timeoutMs);
+  const options = question!.options ?? [];
+  if (!question!.multiSelect && options.length <= MAX_CARD_BUTTONS - 1) return questionButtonCard(sessionTitle, question!, nonce, timeoutMs);
+  return questionCheckboxCard(sessionTitle, question!, nonce, timeoutMs);
+}
+
+/** Several single-choice questions: one dropdown each and a single 「提交」. */
+function questionDropdownCard(sessionTitle: string | null, questions: readonly Question[], nonce: string, timeoutMs: number): TemplateCard {
+  return {
+    card_type: 'multiple_interaction',
+    main_title: { title: '❓ DSH 等待你的回答', desc: describeQuestions(questions, sessionTitle, nonce, timeoutMs, '每题选一项', `自己写答案：/answer ${nonce} 题号 答案`) },
+    select_list: questions.map((question, n) => ({
+      question_key: questionKey(n),
+      // The full text is in the description; the dropdown's own label repeats its start.
+      title: `${n + 1}. ${cardText(question.question, 90)}`,
+      selected_id: PLACEHOLDER_OPTION,
+      option_list: [
+        { id: PLACEHOLDER_OPTION, text: '请选择' },
+        ...(question.options ?? []).map((option, i) => ({ id: optionButton(i), text: cardText(`${i + 1}. ${option.label}`, 60) })),
+      ],
+    })),
+    submit_button: { text: '提交', key: SUBMIT_BUTTON },
+    task_id: questionTaskId(nonce),
+  };
+}
+
+/**
+ * The text a card without a subtitle can carry: the questions in the main
+ * title's description (WeCom wraps it), then the Session, how long it is
+ * answerable and the code for a typed reply. Checkbox and dropdown cards show
+ * nothing but title, description and their controls — a subtitle or row list on
+ * them is silently dropped, which left the question unreadable.
+ *
+ * The description is cut off at roughly 300 bytes with nothing to say so (a
+ * trailing hint went missing at 353), so the whole text is budgeted to
+ * {@link DESCRIPTION_BYTES}: what must be seen goes first, and the questions get
+ * what is left, shared out fairly.
+ */
+const DESCRIPTION_BYTES = 290;
+function describeQuestions(questions: readonly Question[], sessionTitle: string | null, nonce: string, timeoutMs: number, hint?: string, extra?: string): string {
+  const meta = [hint, `会话：${cardText(displayTitle(sessionTitle), 24)}`, `${validityText(timeoutMs)}内有效`, `验证码 ${nonce}`].filter(Boolean).join(' · ');
+  const tail = [meta, extra].filter(Boolean).join('\n');
+  const lines = questions.length;
+  // Newlines between the questions and before the tail, and the numbering prefix.
+  const room = Math.max(DESCRIPTION_BYTES - byteLength(tail) - lines, 24 * lines);
+  const budget = Math.max(24, Math.floor(room / lines) - (lines > 1 ? 4 : 0));
+  const asked = lines === 1
+    ? cardText(questions[0]!.question, budget)
+    : questions.map((question, n) => `${n + 1}. ${cardText(question.question, budget)}`).join('\n');
+  return `${asked}\n${tail}`;
 }
 
 /** Ticking boxes then 「提交」: the options of one question, several answers allowed. */
@@ -476,13 +532,14 @@ function questionCheckboxCard(sessionTitle: string | null, question: Question, n
   const several = question.multiSelect === true;
   return {
     card_type: 'vote_interaction',
-    main_title: { title: '❓ DSH 等待你的回答', desc: `${several ? '可多选 · ' : ''}${validityText(timeoutMs)}内有效 · 验证码 ${nonce}` },
-    sub_title_text: cardText(question.question, 330),
-    horizontal_content_list: [{ keyname: '会话', value: cardText(displayTitle(sessionTitle), 78) }],
+    main_title: { title: '❓ DSH 等待你的回答', desc: describeQuestions([question], sessionTitle, nonce, timeoutMs, several ? '可多选' : '单选') },
     checkbox: {
       question_key: CHECKBOX_KEY,
       mode: several ? 1 : 0,
-      option_list: options.map((option, n) => ({ id: optionButton(n), text: cardText(`${n + 1}. ${option.label}`, 60) })),
+      option_list: [
+        ...options.map((option, n) => ({ id: optionButton(n), text: cardText(`${n + 1}. ${option.label}`, 60) })),
+        { id: OTHER_ID, text: '✏️ 自己回答（单独勾选）' },
+      ],
     },
     submit_button: { text: '提交', key: SUBMIT_BUTTON },
     task_id: questionTaskId(nonce),
@@ -511,7 +568,7 @@ function questionButtonCard(sessionTitle: string | null, question: Question, non
     button_list: options.map((option, n) => ({
       text: short(option.label) ? cardText(option.label, 30) : `选项 ${n + 1}`,
       key: optionButton(n), style: 1,
-    })),
+    })).concat([{ text: '✏️ 自己回答', key: OTHER_ID, style: 2 }]),
     task_id: questionTaskId(nonce),
   };
 }
@@ -521,7 +578,7 @@ export function questionSettledCards(outcome: 'answered' | string, answer: strin
   const answered = outcome === 'answered';
   const headline = answered ? '✅ 已回答' : '⌛ 已失效';
   const detail = answered
-    ? `你选择了：${cardText(answer ?? '', 90)}`
+    ? `你选择了：${cardText(answer ?? '', 120)}`
     : '请求已处理或已超时，以 DSH 页面为准';
   const base = { card_action: CARD_ACTION, main_title: { title: headline, desc: detail }, task_id: taskId };
   return [

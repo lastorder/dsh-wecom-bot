@@ -446,7 +446,9 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
       let answer = textAfterTokens(command.rest, 1);
       if (question && command.args[1] === question.id && command.args.length > 2) answer = textAfterTokens(command.rest, 2);
       if (state.questions.length > 1) {
-        question = state.questions.find(q => q.id === command.args[1]);
+        // The dropdown card numbers its questions 1, 2, 3 and never shows ids.
+        question = state.questions.find(q => q.id === command.args[1])
+          ?? (/^[1-9]$/.test(command.args[1] ?? '') ? state.questions[Number(command.args[1]) - 1] : undefined);
         answer = textAfterTokens(command.rest, 2);
       }
       if (!question) {

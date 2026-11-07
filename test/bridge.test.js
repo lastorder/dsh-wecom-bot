@@ -17,7 +17,7 @@ import { createSessionTitler } from '../dist/host/session-title.js';
 import { summarizeTurn } from '../dist/host/turns.js';
 import { createWorkspaceService } from '../dist/host/workspaces.js';
 import {
-  approvalNonce, baseSettings, cardClick, cardSubmit, fakeClient, fakeHost, finishedSession, frame, memoryJournal,
+  approvalNonce, baseSettings, cardClick, cardSubmit, cardSubmitDropdowns, fakeClient, fakeHost, finishedSession, frame, memoryJournal,
   scratchDirectory, scratchRoot, settle, until, TEST_WORKSPACE_PATH,
 } from './helpers.js';
 
@@ -1255,8 +1255,8 @@ test('a single-choice question is a card with one button per option, and a tap a
   const card = sent.body.template_card;
   assert.equal(card.card_type, 'button_interaction');
   assert.match(card.task_id, /^qst_[a-z0-9]{6}$/);
-  assert.deepEqual(card.button_list.map(button => [button.text, button.key]), [['方案 A', 'opt_0'], ['选项 2', 'opt_1']],
-    'a long option is labelled by number; the full list sits in rows');
+  assert.deepEqual(card.button_list.map(button => [button.text, button.key]), [['方案 A', 'opt_0'], ['选项 2', 'opt_1'], ['✏️ 自己回答', 'other']],
+    'a long option is labelled by number; the full list sits in rows; the last button lets a person type');
   const rows = Object.fromEntries(card.horizontal_content_list.map(row => [row.keyname, row.value]));
   assert.equal(rows['选项2'], '一个名字特别特别长的方案 B — 更稳妥', 'the full option is a row, not a clipped quote');
   assert.ok(Object.values(rows).every(value => value.length <= 26), 'no row is longer than WeCom shows');
@@ -1351,8 +1351,10 @@ test('a multi-select question is a checkbox card; 提交 answers with the ticked
   const card = h.client.sends.at(-1).body.template_card;
   assert.equal(card.card_type, 'vote_interaction');
   assert.equal(card.checkbox.mode, 1, 'several may be ticked');
-  assert.deepEqual(card.checkbox.option_list.map(o => o.id), ['opt_0', 'opt_1', 'opt_2']);
+  assert.deepEqual(card.checkbox.option_list.map(o => o.id), ['opt_0', 'opt_1', 'opt_2', 'other']);
   assert.equal(card.submit_button.key, 'submit');
+  assert.match(card.main_title.desc, /^要哪些？\n可多选 · 会话：/, 'a checkbox card has no subtitle: the question is in the description');
+  assert.equal(card.sub_title_text, undefined);
 
   h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['opt_2', 'opt_0'], { chat: 'alice', user: 'alice' }));
   assert.deepEqual(await ask, { answers: [{ id: 'tools', selected: ['a', 'c'] }] }, 'in the card\'s own order, not the tap order');
@@ -1396,4 +1398,158 @@ test('a checkbox card that is submitted empty, over-ticked or unreadable is neve
   h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['opt_5'], mine));
   assert.deepEqual(await ask, { answers: [{ id: 'one', selected: ['o5'] }] });
   h.stop();
+});
+
+const TWO = {
+  agent: { id: 'session-created-1' },
+  questions: [
+    { id: 'where', question: '放哪里？', options: [{ label: '北京' }, { label: '上海' }] },
+    { id: 'when', question: '什么时候？', options: [{ label: '今天' }, { label: '明天' }, { label: '后天' }] },
+  ],
+};
+
+test('several single-choice questions are one dropdown card, answered by one 提交', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const ask = h.bridge.onQuestion(TWO, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  assert.equal(card.card_type, 'multiple_interaction');
+  const mine = { chat: 'alice', user: 'alice' };
+  const updates = h.client.cardUpdates.length;
+  const sends = h.client.sends.length;
+
+  // A dropdown left on 请选择 is asked for, never filled with the first option.
+  h.client.emit('event.template_card_event', cardSubmitDropdowns(card.task_id, { q0: 'opt_1', q1: 'none' }, mine));
+  await settle();
+  assert.equal(h.client.cardUpdates.length, updates, 'the card keeps its controls');
+  assert.match(h.client.sends.slice(sends).at(-1).body.markdown.content, /还没有选择：问题 2/);
+  // A frame without any selection is not guessed at either.
+  h.client.emit('event.template_card_event', cardSubmitDropdowns(card.task_id, undefined, mine));
+  await settle();
+  assert.match(h.client.sends.at(-1).body.markdown.content, /没能读取/);
+  assert.equal(h.journal.find('wecom.card.unreadable').length, 2);
+
+  h.client.emit('event.template_card_event', cardSubmitDropdowns(card.task_id, { q0: 'opt_1', q1: 'opt_2' }, mine));
+  assert.deepEqual(await ask, { answers: [{ id: 'where', selected: ['上海'] }, { id: 'when', selected: ['后天'] }] });
+  assert.match(h.client.cardUpdates.at(-1).card.main_title.desc, /1\. 上海；2\. 后天/);
+  h.stop();
+});
+
+test('「自己回答」: the next plain message is the answer, not a prompt', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const prompts = h.ctx.prompts.length;
+  const ask = h.bridge.onQuestion(CHOICE, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  const updates = h.client.cardUpdates.length;
+  const sends = h.client.sends.length;
+
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'other', { chat: 'alice', user: 'alice' }));
+  await settle();
+  assert.match(h.client.sends.slice(sends).at(-1).body.markdown.content, /请直接回复你的答案/);
+  assert.equal(h.client.cardUpdates.length, updates, 'the card keeps its buttons: they can still pick an option');
+
+  await h.send('1', { chat: 'alice', user: 'alice' });
+  assert.deepEqual(await ask, { answers: [{ id: 'pick', selected: [], custom: '1' }] },
+    'typed text is the answer as written, even when it looks like an option number');
+  assert.equal(h.ctx.prompts.length, prompts, 'and it never reached the Session as a prompt');
+  assert.match(lastReply(h), /已提交/);
+  assert.equal(h.journal.find('dsh.question.answer').at(-1).source, 'typed');
+  h.stop();
+});
+
+test('「自己回答」 is one message, one person, and dies with the question or a command', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice'], ['user', 'bob']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  await h.send('hi', { chat: 'bob', user: 'bob' });
+  const ask = h.bridge.onQuestion(CHOICE, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.find(send => send.chat === 'alice').body.template_card;
+  const mine = { chat: 'alice', user: 'alice' };
+
+  // A command instead of an answer drops the intent: the next plain message is
+  // no answer, and is told how to answer instead of being sent anywhere.
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'other', mine));
+  await settle();
+  await h.send('/sessions', mine);
+  const prompts = h.ctx.prompts.length;
+  await h.send('继续聊别的', mine);
+  assert.equal(h.ctx.prompts.length, prompts, 'nothing is sent to DSH while it waits for the answer');
+  assert.match(lastReply(h), /正在等待回答提问/);
+  assert.match(lastReply(h), /自己回答/, 'and the way to type an answer is named');
+  assert.equal(h.journal.find('dsh.question.answer').filter(r => r.source === 'typed').length, 0, 'no longer armed');
+
+  // Somebody else's message never answers it.
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'other', mine));
+  await settle();
+  await h.send('我是 bob', { chat: 'bob', user: 'bob' });
+  await h.send('这才是答案', mine);
+  assert.deepEqual(await ask, { answers: [{ id: 'pick', selected: [], custom: '这才是答案' }] });
+
+  // Answering with a tap clears the intent: the next message is an ordinary one.
+  const again = h.bridge.onQuestion(CHOICE, async () => ({ answers: [] }));
+  await settle();
+  const second = h.client.sends.filter(send => send.chat === 'alice' && send.body.template_card).at(-1).body.template_card;
+  h.client.emit('event.template_card_event', cardClick(second.task_id, 'other', mine));
+  await settle();
+  h.client.emit('event.template_card_event', cardClick(second.task_id, 'opt_0', mine));
+  assert.deepEqual(await again, { answers: [{ id: 'pick', selected: ['方案 A'] }] });
+  const before = h.ctx.prompts.length;
+  await h.send('新的话题', mine);
+  assert.equal(h.ctx.prompts.length, before + 1, 'it goes to the Session, not swallowed as an answer');
+  h.stop();
+});
+
+test('a checkbox card: 「自己回答」 ticked alone arms the chat, ticked with others it is refused', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const ask = h.bridge.onQuestion(MULTI, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  const mine = { chat: 'alice', user: 'alice' };
+  const sends = h.client.sends.length;
+
+  h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['opt_0', 'other'], mine));
+  await settle();
+  assert.match(h.client.sends.slice(sends).at(-1).body.markdown.content, /单独勾选/);
+  await h.send('不该算答案', mine);
+  assert.equal(h.journal.find('dsh.question.answer').filter(r => r.source === 'typed').length, 0, 'it was not armed');
+
+  h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['other'], mine));
+  await settle();
+  await h.send('a 和 d', mine);
+  assert.deepEqual(await ask, { answers: [{ id: 'tools', selected: [], custom: 'a 和 d' }] });
+  h.stop();
+});
+
+test('on a dropdown card an answer can be typed by question number', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const ask = h.bridge.onQuestion(TWO, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  const code = card.task_id.slice(4);
+  assert.match(card.main_title.desc, new RegExp(`/answer ${code} 题号 答案`));
+  await h.send(`/answer ${code} 1 杭州`, { chat: 'alice', user: 'alice' });
+  await h.send(`/answer ${code} 2 2`, { chat: 'alice', user: 'alice' });
+  assert.deepEqual(await ask, { answers: [{ id: 'where', selected: [], custom: '杭州' }, { id: 'when', selected: ['明天'] }] });
+  h.stop();
+});
+
+test('every card description stays within what WeCom shows, however long the questions are', async () => {
+  const { questionCard } = await import('../dist/host/bridge/notices.js');
+  const { byteLength } = await import('../dist/host/bridge/format.js');
+  const long = text => ({ id: text, question: '一个相当长的问题'.repeat(40), options: [{ label: 'a' }, { label: 'b' }] });
+  for (const asked of [[long('a')], [{ ...long('b'), multiSelect: true }], [long('c'), long('d')], [long('e'), long('f'), long('g')]]) {
+    const card = questionCard('一个非常非常非常长的会话标题'.repeat(5), asked, 'abc123', 1_800_000);
+    assert.ok(byteLength(card.main_title.desc) <= 300, `${card.card_type}: ${byteLength(card.main_title.desc)} bytes`);
+    assert.match(card.main_title.desc, /验证码 abc123/, 'the code is never the part that is cut');
+  }
 });

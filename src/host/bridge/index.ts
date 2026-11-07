@@ -22,10 +22,10 @@ import { createSessionDirectory, type SessionDirectory } from './directory.js';
 import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, extractSessionPointer } from './format.js';
 import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.js';
 import { approvalCard, approvalSettledCards, questionCard, questionCardKind, questionSettledCards } from './notices.js';
-import { parseCardEvent } from './cards.js';
+import { parseCardEvent, questionKey } from './cards.js';
 import { createInteractionRegistry } from './interactions.js';
 import {
-  adminUnassignedText, approvalNotice, code, promptFailedNotice, questionNotice, reviewNotice, routingChangedText,
+  adminUnassignedText, approvalNotice, code, interactionIgnoredText, interactionSubmittedText, promptFailedNotice, questionNotice, reviewNotice, routingChangedText,
   sessionErrorNotice, sessionLabel, title, turnCompleteNotice, unauthorizedText,
 } from './notices.js';
 import { ackSummary, createOutbox, type NoticeKind } from './outbox.js';
@@ -273,7 +273,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
       await reply(message, round, [
         title('⏸', '该会话正在等待回答提问'),
         '',
-        `请先用 ${code('/answer 验证码 选项')} 作答；普通消息不会被当作答案。`,
+        '普通消息不会被当作答案。要回答：点提问卡片上的选项，或点「✏️ 自己回答」后再发文字；',
+        `也可以回复 ${code('/answer 验证码 序号或文字')}。`,
       ].join('\n'));
       rounds.complete(round, 'blocked', { response: { reason: 'question-pending' } });
       return;
@@ -456,6 +457,15 @@ export function createBridge(deps: BridgeDeps): Bridge {
     await applyQuotedSession(message, round);
     if (stale(ticket)) return;
     const command = parseCommand(content);
+    // A person who tapped 「自己回答」 is answering with this very message —
+    // unless they chose to send a command instead, which drops the intent.
+    const armed = interactions.takeArmed(message.chat, message.user);
+    if (armed && !command) {
+      round.command = 'answer';
+      await answerArmed(message, round, armed, content);
+      rounds.complete(round, 'command');
+      return;
+    }
     if (command) {
       round.command = command.name;
       await runCommand(commandServices, { message, round, reply: text => reply(message, round, text) }, command);
@@ -463,6 +473,28 @@ export function createBridge(deps: BridgeDeps): Bridge {
       return;
     }
     await submitPrompt(message, round, content);
+  }
+
+  /** The message that follows a tap on 「自己回答」: a free-text answer, never a prompt. */
+  async function answerArmed(message: InboundMessage, round: Round, armed: { readonly nonce: string; readonly questionId: string }, content: string): Promise<void> {
+    const state = interactions.findQuestion(armed.nonce);
+    if (!state?.active()) {
+      // The question was answered elsewhere or timed out: say so rather than
+      // sending an answer to nobody as a brand new prompt.
+      await reply(message, round, interactionIgnoredText());
+      return;
+    }
+    const target = await currentTarget(message);
+    const mayAnswer = target.sessionId === state.sessionId
+      || (policy.isAdmin(message.user) && message.chatType === 'single' && await directory.permitted(state.sessionId));
+    if (closed || !mayAnswer || !state.active()) {
+      await reply(message, round, interactionIgnoredText());
+      return;
+    }
+    journal.write({ event: 'dsh.question.answer', source: 'typed', roundId: round.id, sessionId: state.sessionId, questionId: armed.questionId, answer: { id: armed.questionId, selected: [], custom: content } });
+    const result = await state.submit({ answers: [{ id: armed.questionId, selected: [], custom: content }] });
+    await reply(message, round, result === 'closed' ? interactionIgnoredText()
+      : result === 'submitted' ? interactionSubmittedText('question') : title('✅', '答案已提交给 DSH'));
   }
 
   const notifiedEnds = new WeakSet<object>();
@@ -516,7 +548,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
     journal.write({ event: 'dsh.question', sessionId, nonce: wait.nonce, questions: request.questions, chats, timeoutMs: settings.answerTimeoutMs });
     // One question with options is answered on a card; anything else keeps the typed reply.
     const card = questionCardKind(request.questions)
-      ? questionCard(info.title, request.questions[0]!, wait.nonce, settings.answerTimeoutMs) : undefined;
+      ? questionCard(info.title, request.questions, wait.nonce, settings.answerTimeoutMs) : undefined;
     notify(chats, questionNotice(sessionId, info.title, request.questions, wait.nonce, settings.answerTimeoutMs), 'question', sessionId, wait.nonce, card);
     const answer = await wait.result;
     journal.write({ event: 'dsh.question.result', sessionId, nonce: wait.nonce, outcome: answer ? 'answered' : 'fallback', ...(answer ? { answer } : {}) });
@@ -624,6 +656,26 @@ export function createBridge(deps: BridgeDeps): Bridge {
       journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'already-submitting' });
       return;
     }
+    // 「自己回答」: a card cannot take typed text, so the person's next plain
+    // message in this chat becomes the answer. The card keeps its controls, so
+    // they can still change their mind and tap an option.
+    if (state && !closed && state.questions.length === 1 && (event.action === 'other' || (event.action === 'submit' && event.other))) {
+      const question = state.questions[0]!;
+      const boundHere = router.forSession(state.sessionId).some(binding => binding.id === event.chatId);
+      const adminHere = chatType === 'single' && policy.isAdmin(event.userId) && await directory.permitted(state.sessionId);
+      if (!(boundHere || adminHere) || !state.active()) {
+        journal.write({ event: 'wecom.card.rejected', ...meta, reason: 'not-bound-to-this-chat' });
+        return;
+      }
+      const alone = event.action === 'other' || !(event.selected?.length);
+      const text = alone
+        ? `${title('✏️', '请直接回复你的答案')}\n> 你发的下一条消息会作为答案提交给 DSH，不会当作新的提问；也可以回到卡片上选一个选项。`
+        : `${title('⚠️', '「自己回答」请单独勾选')}\n> 取消其他选项后再点「提交」，或直接回复 ${code(`/answer ${state.nonce} 你的答案`)}。`;
+      if (alone) interactions.arm(event.chatId, event.userId, { nonce: state.nonce, questionId: question.id });
+      journal.write({ event: 'dsh.question.armed', ...meta, sessionId: state.sessionId, questionId: question.id, armed: alone });
+      await client.sendMessage(event.chatId, { msgtype: 'markdown', markdown: { content: text } }).catch(() => undefined);
+      return;
+    }
     let outcome = 'ignored';
     let label: string | undefined;
     if (state?.active() && !closed) {
@@ -650,11 +702,26 @@ export function createBridge(deps: BridgeDeps): Bridge {
           labels = picked.map(index => options[index]!.label);
         }
       }
-      label = labels?.join('、');
+      // Several questions on one dropdown card: every dropdown must be set.
+      let answers: { id: string; selected: string[] }[] | undefined;
+      if (state.questions.length > 1 && event.action === 'submit') {
+        const missing = state.questions.flatMap((q, n) => event.chosen?.[questionKey(n)] !== undefined && q.options?.[event.chosen[questionKey(n)]!] ? [] : [n + 1]);
+        const hint = event.chosen === undefined ? '没能读取卡片上的选择，请改为回复文字作答'
+          : missing.length ? `还没有选择：问题 ${missing.join('、')}` : undefined;
+        if (hint) {
+          journal.write({ event: 'wecom.card.unreadable', level: event.chosen === undefined ? 'warn' : 'info', ...meta, sessionId: state.sessionId, reason: hint, frame: frame.body });
+          await client.sendMessage(event.chatId, { msgtype: 'markdown', markdown: { content: `${title('⚠️', hint)}\n> ${event.chosen === undefined ? `也可以回复 ${code(`/answer ${state.nonce} 题目ID 序号`)}。` : '每道题都选好后再点「提交」。'}` } }).catch(() => undefined);
+          return;
+        }
+        answers = state.questions.map((q, n) => ({ id: q.id, selected: [q.options![event.chosen![questionKey(n)]!]!.label] }));
+        label = answers.map((answer, n) => `${n + 1}. ${answer.selected[0]}`).join('；');
+      }
+      if (labels) label = labels.join('、');
       const boundHere = router.forSession(state.sessionId).some(binding => binding.id === event.chatId);
       const adminHere = chatType === 'single' && policy.isAdmin(event.userId) && await directory.permitted(state.sessionId);
-      if (question && labels && (boundHere || adminHere) && state.active() && !closed) {
-        const submission = await state.submit({ answers: [{ id: question.id, selected: labels }] });
+      const submitted = answers ?? (question && labels ? [{ id: question.id, selected: labels }] : undefined);
+      if (submitted && (boundHere || adminHere) && state.active() && !closed) {
+        const submission = await state.submit({ answers: submitted });
         outcome = submission === 'closed' ? 'ignored' : 'answered';
       }
     }

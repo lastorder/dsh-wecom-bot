@@ -361,3 +361,18 @@ export function cardSubmit(taskId, selected, { chat = 'root', user = 'root' } = 
     },
   };
 }
+
+/** A tap on 「提交」 of a dropdown card: one chosen option id per question key (`none` = left on 请选择). */
+export function cardSubmitDropdowns(taskId, chosen, { chat = 'root', user = 'root' } = {}) {
+  const card = { card_type: 'multiple_interaction', event_key: 'submit', task_id: taskId };
+  if (chosen !== undefined) {
+    card.selected_items = { selected_item: Object.entries(chosen).map(([key, id]) => ({ question_key: key, option_ids: { option_id: [id] } })) };
+  }
+  return {
+    headers: { req_id: `submit_${taskId}` },
+    body: {
+      msgtype: 'event', chatid: chat, chattype: 'single', from: { userid: user },
+      event: { eventtype: 'template_card_event', template_card_event: card },
+    },
+  };
+}

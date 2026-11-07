@@ -46,6 +46,11 @@ export interface PendingApproval extends PendingState<ApprovalOutcome> {
   finish(value: ApprovalOutcome | null): void;
 }
 
+export interface ArmedAnswer {
+  readonly nonce: string;
+  readonly questionId: string;
+}
+
 export interface Wait<T> {
   readonly nonce: string;
   readonly result: Promise<T | null>;
@@ -67,6 +72,12 @@ export interface InteractionRegistry {
   findQuestion(nonce: string): PendingQuestion | undefined;
   findApproval(nonce: string): PendingApproval | undefined;
   hasQuestion(sessionId: string): boolean;
+  /**
+   * The person tapped 「自己回答」: their next plain message in this chat is the
+   * answer to this question, once. Armed state dies with the question.
+   */
+  arm(chat: string, user: string, entry: ArmedAnswer): void;
+  takeArmed(chat: string, user: string): ArmedAnswer | undefined;
   isPending(nonce: string): boolean;
   /** Bounded, expiring tombstones distinguish a late attempt from an unknown nonce. */
   wasClosed(nonce: string): boolean;
@@ -77,6 +88,8 @@ export function createInteractionRegistry(): InteractionRegistry {
   const questions = new Map<string, PendingQuestion>();
   const approvals = new Map<string, PendingApproval>();
   const terminal = new Map<string, number>();
+  const armed = new Map<string, ArmedAnswer>();
+  const armedKey = (chat: string, user: string) => `${chat}\u0000${user}`;
   const normalized = (nonce: string) => nonce.trim().toLowerCase();
   const prune = (): void => {
     const cutoff = Date.now() - 15 * 60_000;
@@ -106,6 +119,8 @@ export function createInteractionRegistry(): InteractionRegistry {
         signal?.removeEventListener('abort', abort);
         if (map.get(key) === state) map.delete(key);
         terminal.set(nonce, Date.now());
+        // Nobody is still about to type an answer to a question that is over.
+        for (const [key, entry] of armed) if (entry.nonce === nonce) armed.delete(key);
         prune();
         resolve(value);
       };
@@ -151,6 +166,13 @@ export function createInteractionRegistry(): InteractionRegistry {
         }), delivery);
       return { nonce, result };
     },
+    arm(chat, user, entry) { armed.set(armedKey(chat, user), entry); },
+    takeArmed(chat, user) {
+      const key = armedKey(chat, user);
+      const entry = armed.get(key);
+      armed.delete(key);
+      return entry;
+    },
     findQuestion, findApproval,
     hasQuestion: sessionId => [...questions.values()].some(state => state.sessionId === sessionId),
     isPending: nonce => Boolean(findQuestion(nonce)?.active() || findApproval(nonce)?.active()),
@@ -158,6 +180,7 @@ export function createInteractionRegistry(): InteractionRegistry {
     cancelAll() {
       for (const state of [...questions.values()]) state.finish(null);
       for (const state of [...approvals.values()]) state.finish(null);
+      armed.clear();
     },
   };
 }
