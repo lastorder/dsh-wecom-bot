@@ -403,15 +403,22 @@ export function interactionSubmittedText(kind: 'question' | 'approval'): string 
   return [title('📨', kind === 'question' ? '答案已提交' : '审批结果已提交'), '> DSH 页面与企业微信同时可操作，以先处理的结果为准；提交回执不代表本入口一定先完成。'].join('\n');
 }
 
-export function questionNotice(sessionId: string, sessionTitle: string | null, questions: readonly Question[], nonce: string, timeoutMs: number): string {
+/** The questions with their options, in full — the one part no card can always carry. */
+function questionBlocks(questions: readonly Question[], numbered = false): string {
   const single = questions.length === 1;
-  const blocks = questions.map(question => {
+  return questions.map((question, index) => {
     const options = (question.options ?? []).map((option, n) =>
       `   ${n + 1}. ${inline(option.label, 200)}${option.description ? ` — ${inline(option.description, 300)}` : ''}`);
     // A question is told apart by its id when there are several: the reply names it.
-    const head = single ? '' : `${code(inline(question.id, 60))} `;
+    // On a card the questions are told apart by number (the dropdowns are numbered
+    // too); in a typed reply by the id the reply must name.
+    const head = single ? '' : numbered ? `**问题 ${index + 1}**：` : `${code(inline(question.id, 60))} `;
     return [`${head}${inline(question.question, 600)}${question.multiSelect ? '（可多选）' : ''}`, ...options].join('\n');
-  });
+  }).join('\n\n');
+}
+
+export function questionNotice(sessionId: string, sessionTitle: string | null, questions: readonly Question[], nonce: string, timeoutMs: number): string {
+  const single = questions.length === 1;
   const first = questions[0];
   const hasOptions = questions.some(question => (question.options ?? []).length > 0);
   const example = single
@@ -423,11 +430,27 @@ export function questionNotice(sessionId: string, sessionTitle: string | null, q
   return [
     `${title('❓', 'DSH 等待你的回答')} · ${sessionLabel(sessionTitle)}`,
     '',
-    blocks.join('\n\n'),
+    questionBlocks(questions),
     '',
     `> ${how}。`,
     `> DSH 页面也可同时回答，以先处理的结果为准；${validityText(timeoutMs)}内有效，请求结束会提前失效。`,
     quotePointer(sessionId),
+  ].join('\n');
+}
+
+/**
+ * The full text of a question whose card cannot hold it. A checkbox or dropdown
+ * card shows about 300 bytes and no option descriptions, so it is sent after
+ * this message and only carries the controls.
+ */
+export function questionBodyNotice(sessionTitle: string | null, questions: readonly Question[]): string {
+  const several = questions.length > 1;
+  return [
+    `${title('❓', 'DSH 等待你的回答')} · ${sessionLabel(sessionTitle)}`,
+    '',
+    questionBlocks(questions, true),
+    '',
+    `> 请在下面的卡片上作答${several ? '，每题选一项后点「提交」' : ''}。`,
   ].join('\n');
 }
 

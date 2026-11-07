@@ -1553,3 +1553,50 @@ test('every card description stays within what WeCom shows, however long the que
     assert.match(card.main_title.desc, /验证码 abc123/, 'the code is never the part that is cut');
   }
 });
+
+test('a checkbox or dropdown card is preceded by the whole question in text; a button card is not', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const longQuestion = '一个要说得很清楚的问题，'.repeat(20);
+
+  const sends = h.client.sends.length;
+  const ask = h.bridge.onQuestion({
+    agent: { id: 'session-created-1' },
+    questions: [{ id: 'q', question: longQuestion, multiSelect: true, options: [{ label: 'a', description: '这是 a 的说明' }, { label: 'b' }] }],
+  }, async () => ({ answers: [] }));
+  await settle();
+  const [body, card] = h.client.sends.slice(sends);
+  assert.ok(body.body.markdown.content.includes(longQuestion.slice(0, 150)), 'the question is in the message in full, not cut at the card\'s budget');
+  assert.match(body.body.markdown.content, /a — 这是 a 的说明/, 'so are the option descriptions a list card cannot show');
+  assert.match(body.body.markdown.content, /请在下面的卡片上作答/);
+  assert.equal(card.body.template_card.card_type, 'vote_interaction', 'the controls come right after');
+  assert.equal(h.client.sends.length, sends + 2);
+  h.stop();
+  await ask;
+
+  const g = await harness({}, {}, { members: [['user', 'alice']] });
+  g.client.emit('authenticated');
+  await g.send('hi', { chat: 'alice', user: 'alice' });
+  const before = g.client.sends.length;
+  const two = g.bridge.onQuestion(TWO, async () => ({ answers: [] }));
+  await settle();
+  const sent = g.client.sends.slice(before);
+  assert.equal(sent.length, 2);
+  assert.match(sent[0].body.markdown.content, /每题选一项后点「提交」/);
+  assert.match(sent[0].body.markdown.content, /\*\*问题 1\*\*：.*\n.*\n.*\n\n\*\*问题 2\*\*：/, 'numbered like the dropdowns, not by internal ids');
+  assert.doesNotMatch(sent[0].body.markdown.content, /`where`|`when`/);
+  assert.equal(sent[1].body.template_card.card_type, 'multiple_interaction');
+  g.stop();
+  await two;
+
+  const b = await harness({}, {}, { members: [['user', 'alice']] });
+  b.client.emit('authenticated');
+  await b.send('hi', { chat: 'alice', user: 'alice' });
+  const start = b.client.sends.length;
+  const one = b.bridge.onQuestion(CHOICE, async () => ({ answers: [] }));
+  await settle();
+  assert.equal(b.client.sends.length, start + 1, 'buttons show the question themselves: one message');
+  b.stop();
+  await one;
+});

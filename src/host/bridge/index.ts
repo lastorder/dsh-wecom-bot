@@ -21,7 +21,7 @@ import { parseCommand, runCommand, type CommandServices, type TargetInfo } from 
 import { createSessionDirectory, type SessionDirectory } from './directory.js';
 import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, extractSessionPointer } from './format.js';
 import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.js';
-import { approvalCard, approvalSettledCards, questionCard, questionCardKind, questionSettledCards } from './notices.js';
+import { approvalCard, approvalSettledCards, questionBodyNotice, questionCard, questionCardKind, questionSettledCards } from './notices.js';
 import { parseCardEvent, questionKey } from './cards.js';
 import { createInteractionRegistry } from './interactions.js';
 import {
@@ -547,8 +547,13 @@ export function createBridge(deps: BridgeDeps): Bridge {
     if (!wait) return next();
     journal.write({ event: 'dsh.question', sessionId, nonce: wait.nonce, questions: request.questions, chats, timeoutMs: settings.answerTimeoutMs });
     // One question with options is answered on a card; anything else keeps the typed reply.
-    const card = questionCardKind(request.questions)
-      ? questionCard(info.title, request.questions, wait.nonce, settings.answerTimeoutMs) : undefined;
+    const kind = questionCardKind(request.questions);
+    const card = kind ? questionCard(info.title, request.questions, wait.nonce, settings.answerTimeoutMs) : undefined;
+    // A checkbox or dropdown card cannot hold the whole question (see
+    // `questionBodyNotice`): say it in full first, then send the controls.
+    if (kind === 'checkbox' || kind === 'dropdowns') {
+      notify(chats, questionBodyNotice(info.title, request.questions), 'question', sessionId, wait.nonce);
+    }
     notify(chats, questionNotice(sessionId, info.title, request.questions, wait.nonce, settings.answerTimeoutMs), 'question', sessionId, wait.nonce, card);
     const answer = await wait.result;
     journal.write({ event: 'dsh.question.result', sessionId, nonce: wait.nonce, outcome: answer ? 'answered' : 'fallback', ...(answer ? { answer } : {}) });
