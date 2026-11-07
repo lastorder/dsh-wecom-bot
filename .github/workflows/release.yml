@@ -82,9 +82,34 @@ jobs:
         # runs automatically as part of `npm stage publish`, so a broken
         # tagged commit never reaches the stage queue even if something
         # upstream of this step were skipped.
+        #
+        # Staging signs a provenance statement and writes it to Sigstore's
+        # public transparency log. That log is a third-party service: v1.2.1
+        # failed here with `TLOG_CREATE_ENTRY_ERROR (502) Bad Gateway` after a
+        # ~100 s wait, with nothing wrong in the package. A 5xx from the log
+        # (or a dropped connection) is transient, so the stage is retried a few
+        # times with a growing pause. Only the transparency-log / gateway class
+        # of failures is retried: an auth, trust-config or "version exists"
+        # error fails at once, as it must not be hammered.
         run: |
           npm install -g npm@latest
-          npm stage publish
+          set -o pipefail
+          log="$RUNNER_TEMP/stage.log"
+          attempt=1
+          max=4
+          while true; do
+            if npm stage publish 2>&1 | tee "$log"; then
+              break
+            fi
+            if [ "$attempt" -ge "$max" ] || ! grep -Eq 'TLOG_CREATE_ENTRY_ERROR|\(50[234]\)|ETIMEDOUT|ECONNRESET|EAI_AGAIN' "$log"; then
+              echo "::error::npm stage publish failed (attempt $attempt of $max)"
+              exit 1
+            fi
+            delay=$((attempt * 45))
+            echo "::warning::Transient failure staging on npm (attempt $attempt of $max); retrying in ${delay}s"
+            sleep "$delay"
+            attempt=$((attempt + 1))
+          done
 
       - name: Pack a tarball for the GitHub Release
         run: npm pack --ignore-scripts

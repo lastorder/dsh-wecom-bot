@@ -635,6 +635,23 @@ export function approvalNotice(sessionId: string, sessionTitle: string | null, r
 }
 
 /**
+ * What the person whose Session is blocked hears: they cannot approve (only
+ * scoped administrators can), but they should see what is being asked and that
+ * somebody else has been asked. No `/use` pointer — it is an administrator command.
+ */
+export function approvalWaitingNotice(sessionTitle: string | null, request: ApprovalRequest): string {
+  const reason = request.displayReason?.zh ?? request.displayReason?.en ?? request.reason ?? '';
+  return [
+    `${title('⏳', 'DSH 需要权限，正在等待管理员审批')} · ${sessionLabel(sessionTitle)}`,
+    '',
+    `- ${field('工具', code(inline(request.toolName, 120)))}`,
+    ...(reason ? [`- ${field('原因', inline(reason, 600))}`] : []),
+    '',
+    '你没有审批权限，已通知管理员；批准后会话会自动继续，无需重复发送。',
+  ].join('\n');
+}
+
+/**
  * Where a tap on the card body (not a button) leads.
  *
  * WeCom validates `card_action` when a card is *replaced*: without it the

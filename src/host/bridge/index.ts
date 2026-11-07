@@ -29,7 +29,7 @@ import { createCardMemory, type CardMemo, type CardMemory } from './card-memory.
 import { parseCardEvent, questionKey } from './cards.js';
 import { createInteractionRegistry, type ArmedAnswer } from './interactions.js';
 import {
-  adminUnassignedText, approvalNotice, code, interactionIgnoredText, interactionSubmittedText, promptFailedNotice, questionNotice, reviewNotice, routingChangedText,
+  adminUnassignedText, approvalNotice, approvalWaitingNotice, code, interactionIgnoredText, interactionSubmittedText, promptFailedNotice, questionNotice, reviewNotice, routingChangedText,
   sessionErrorNotice, sessionLabel, title, turnCompleteNotice, typeAnswerPrompt, unauthorizedText,
 } from './notices.js';
 import { ackSummary, createOutbox, type NoticeKind } from './outbox.js';
@@ -814,8 +814,13 @@ export function createBridge(deps: BridgeDeps): Bridge {
       return next();
     }
     const meta = { sessionId, toolName: request.toolName, ...(request.callId ? { callId: request.callId } : {}) };
+    // Whoever the Session is bound to and is not an administrator cannot approve,
+    // but is told what is being asked and that an administrator has been asked.
+    const waiting = [...new Set(router.forSession(sessionId).map(binding => binding.id))].filter(chat => !admins.includes(chat));
+    const tellWaiting = (nonce?: string) => notify(waiting, approvalWaitingNotice(info.title, request), 'approval-waiting', sessionId, nonce);
     if (deps.notificationOnly) {
       journal.write({ event: 'dsh.approval', ...meta, remote: false, chats: admins });
+      tellWaiting();
       notify(admins, approvalNotice(sessionId, info.title, request), 'approval', sessionId);
       return next();
     }
@@ -823,10 +828,13 @@ export function createBridge(deps: BridgeDeps): Bridge {
       toolName: request.toolName, privateChats: admins, ...(request.callId ? { callId: request.callId } : {}),
     }, settings.approvalTimeoutMs, request.signal, delivery);
     if (!wait) {
+      tellWaiting();
       notify(admins, approvalNotice(sessionId, info.title, request), 'approval', sessionId);
       return next();
     }
     journal.write({ event: 'dsh.approval', ...meta, remote: true, nonce: wait.nonce, chats: admins, timeoutMs: settings.approvalTimeoutMs });
+    // Tied to the nonce: if the request is settled before this is sent, it is dropped.
+    tellWaiting(wait.nonce);
     notify(admins, approvalNotice(sessionId, info.title, request, wait.nonce, settings.approvalTimeoutMs), 'approval-request', sessionId, wait.nonce, approvalCard(info.title, request, wait.nonce, settings.approvalTimeoutMs),
       approvalMemo(info.title, request, wait.nonce, Date.now()));
     const outcome = await wait.result;

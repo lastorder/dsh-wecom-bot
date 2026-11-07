@@ -1051,15 +1051,56 @@ test('tool approvals are announced to administrators only', async () => {
   const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'root'], ['user', 'alice']] });
   h.client.emit('authenticated');
   await h.send('hi');
+  const before = h.client.sends.length;
   const pending = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
   await settle();
-  assert.deepEqual(sentChats(h), ['root'], 'the member whose Session it is never receives it');
-  const card = h.client.sends.at(-1).body.template_card;
+  const cards = h.client.sends.slice(before).filter(send => send.body.template_card);
+  assert.deepEqual(cards.map(send => send.chat), ['root'], 'the member whose Session it is never receives the approval card');
+  const card = cards[0].body.template_card;
   assert.equal(card.card_type, 'button_interaction', 'administrators get a button card');
   assert.deepEqual(card.button_list.map(button => button.text), ['批准', '拒绝']);
   assert.ok(card.task_id.startsWith('apv_'));
   h.stop();
   assert.equal(await pending, 'unavailable');
+});
+
+test('a member who cannot approve is told what is asked and that an administrator is being waited for', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'root'], ['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi');
+  const before = h.client.sends.length;
+  const approval = h.bridge.onApproval({
+    agent: { id: 'session-created-1' }, toolName: 'bash', reason: '运行命令：需要执行 npm test',
+  }, async () => 'unavailable');
+  await settle();
+  const sent = h.client.sends.slice(before);
+  const mine = sent.filter(send => send.chat === 'alice');
+  assert.equal(mine.length, 1, 'the member hears exactly once');
+  assert.equal(mine[0].body.template_card, undefined, 'and gets plain text, never buttons');
+  const text = mine[0].body.markdown.content;
+  assert.match(text, /等待管理员审批/);
+  assert.match(text, /bash/);
+  assert.match(text, /npm test/);
+  assert.doesNotMatch(text, /\/approve|\/deny/, 'the member is not offered a way to approve');
+  assert.equal(sent.filter(send => send.chat === 'root' && send.body.template_card).length, 1, 'the administrator still gets the card');
+  const card = sent.find(send => send.chat === 'root').body.template_card;
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'approve', { chat: 'root', user: 'root' }));
+  assert.equal(await approval, 'allowed-once');
+  h.stop();
+});
+
+test('an administrator is not told twice, and a settled request is not announced as still waiting', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'root']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'root', user: 'root' });
+  const before = h.client.sends.length;
+  const approval = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
+  await settle();
+  assert.deepEqual(h.client.sends.slice(before).map(send => send.chat), ['root'], 'an administrator owning the Session gets only the card');
+  const card = h.client.sends.at(-1).body.template_card;
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'approve', { chat: 'root', user: 'root' }));
+  assert.equal(await approval, 'allowed-once');
+  h.stop();
 });
 
 test('an approval is only offered to administrators whose scope covers the Session', async () => {

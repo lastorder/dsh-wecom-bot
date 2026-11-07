@@ -12,7 +12,7 @@ import { limitBytes, MAX_NOTICE_BYTES } from './format.js';
  */
 
 export type NoticeKind =
-  | 'turn-complete' | 'session-error' | 'question' | 'review' | 'approval' | 'approval-request' | 'prompt-failed'
+  | 'turn-complete' | 'session-error' | 'question' | 'review' | 'approval' | 'approval-request' | 'approval-waiting' | 'prompt-failed'
   /** Sent by the page when an operator authorizes a sender. */
   | 'authorized'
   /** Sent by the page when an operator moves a sender to another group. */

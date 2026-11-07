@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { byteLength, extractSessionPointer, MAX_NOTICE_BYTES, MAX_REPLY_BYTES } from '../dist/host/bridge/format.js';
 import {
-  adminGrantedNotice, adminOnlyText, adminPrivateOnlyText, adminUnassignedText, approvalNotice, authorizedNotice, compactedText,
+  adminGrantedNotice, adminOnlyText, adminPrivateOnlyText, adminUnassignedText, approvalNotice, approvalWaitingNotice, authorizedNotice, compactedText,
   deleteWarningText, deletedText, groupAssignedNotice, groupSessionRefusalText, HELP_TEXT, newSessionText,
   nothingToCompactText, promptFailedNotice, questionNotice, quotePointer, reviewNotice, sessionListText,
   questionAccessRefusalText, routingChangedText, turnCompleteNotice, unauthorizedText, workspaceListText,
@@ -60,6 +60,7 @@ test('every template fits the reply budget', () => {
     ], 'a1b2c3', 60000),
     reviewNotice('session-9f3a1c7b2d4e', '修复登录 Bug'),
     approvalNotice('session-9f3a1c7b2d4e', '修复登录 Bug', { toolName: 'bash', reason: 'x'.repeat(2000) }, 'a1b2c3', 60000),
+    approvalWaitingNotice('修复登录 Bug', { toolName: 'bash', reason: 'x'.repeat(2000) }),
     promptFailedNotice('session-9f3a1c7b2d4e', '修复登录 Bug'),
   ];
   for (const text of texts) {
@@ -89,7 +90,7 @@ test('a hint is the only /use occurrence the quote parser can pick up', () => {
   assert.deepEqual(listing.listing, ['session-9f3a1c7b2d4e', 'session-77aa88bb99cc']);
   assert.equal(extractSessionPointer(listing.text), undefined);
   for (const text of [
-    HELP_TEXT, adminOnlyText(), adminPrivateOnlyText(), unauthorizedText(), authorizedNotice('默认分组'),
+    HELP_TEXT, adminOnlyText(), adminPrivateOnlyText(), approvalWaitingNotice('修复登录 Bug', { toolName: 'bash' }), unauthorizedText(), authorizedNotice('默认分组'),
     groupAssignedNotice('朋友'), adminGrantedNotice(), adminUnassignedText(), routingChangedText(), questionAccessRefusalText(),
   ]) {
     assert.equal(extractSessionPointer(text), undefined);
