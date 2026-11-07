@@ -541,13 +541,29 @@ export function createBridge(deps: BridgeDeps): Bridge {
     // A card is replaced for every recipient of that chat, so a tap by anybody
     // else must not touch it: rewriting the card would wipe live buttons the
     // administrator still needs.
-    if (!state || !admin || !state.privateChats.has(event.chatId)) {
+    //
+    // A request that is already closed (answered on the DSH page, by text, or
+    // timed out) has no pending state left, but its card is still live on the
+    // phone. An administrator tapping it deserves a dead card, not silence.
+    const stale = !state && admin && interactions.wasClosed(event.nonce);
+    if (!stale && (!state || !admin || !state.privateChats.has(event.chatId))) {
       journal.write({ event: 'wecom.card.rejected', ...meta, admin, reason: 'not-the-asking-administrator' });
       return;
     }
+    // Another tap is already submitting: it will settle the card itself, and a
+    // second replacement would overwrite its verdict with “expired”.
+    if (state && !state.active()) {
+      journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'already-submitting' });
+      return;
+    }
     let outcome = 'ignored';
-    if (state.active() && !closed) {
+    if (state?.active() && !closed) {
       const permitted = await directory.permitted(state.sessionId);
+      if (permitted && !state.active() && !closed) {
+        // Lost the race while checking scope: whoever won settles the card.
+        journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'already-submitting' });
+        return;
+      }
       if (permitted && state.active() && !closed) {
         const verdict = event.action === 'approve' ? 'allowed-once' : 'rejected';
         const submission = await state.submit(verdict);

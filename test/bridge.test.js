@@ -1143,3 +1143,49 @@ test('a card button from a stranger, or from a foreign card, resolves nothing', 
   assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已拒绝/);
   h.stop();
 });
+
+test('an administrator tapping a card whose request already closed gets a dead card; a stranger does not', async () => {
+  const h = await harness({ remoteApprovals: true, adminUserIds: ['root'] }, {}, {
+    members: [['user', 'root'], ['user', 'alice']],
+  });
+  h.client.emit('authenticated');
+  await h.send('hi');
+  const pending = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
+  await settle();
+  const notice = h.client.sends.at(-1);
+  const taskId = notice.body.template_card.task_id;
+  await h.send(`/approve ${approvalNonce(notice)}`, { chat: 'root', user: 'root' });
+  assert.equal(await pending, 'allowed-once');
+  const updates = h.client.cardUpdates.length;
+
+  h.client.emit('event.template_card_event', cardClick(taskId, 'approve', { chat: 'alice', user: 'alice' }));
+  await settle();
+  assert.equal(h.client.cardUpdates.length, updates, 'a stranger never rewrites a card');
+
+  h.client.emit('event.template_card_event', cardClick(taskId, 'approve'));
+  await settle();
+  assert.equal(h.client.cardUpdates.length, updates + 1, 'the stale buttons are replaced');
+  const card = h.client.cardUpdates.at(-1).card;
+  assert.equal(card.button_list, undefined);
+  assert.match(card.main_title.title, /已失效/);
+  h.stop();
+});
+
+test('two quick taps on one approval card settle it once, with the first verdict', async () => {
+  const h = await harness({ remoteApprovals: true, adminUserIds: ['root'] }, {}, {
+    members: [['user', 'root'], ['user', 'alice']],
+  });
+  h.client.emit('authenticated');
+  await h.send('hi');
+  const pending = h.bridge.onApproval({ agent: { id: 'session-created-1' }, toolName: 'bash' }, async () => 'unavailable');
+  await settle();
+  const taskId = h.client.sends.at(-1).body.template_card.task_id;
+  const updates = h.client.cardUpdates.length;
+  h.client.emit('event.template_card_event', cardClick(taskId, 'approve'));
+  h.client.emit('event.template_card_event', cardClick(taskId, 'deny'));
+  assert.equal(await pending, 'allowed-once');
+  await settle();
+  assert.equal(h.client.cardUpdates.length, updates + 1, 'the losing tap does not overwrite the verdict');
+  assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已批准/);
+  h.stop();
+});
