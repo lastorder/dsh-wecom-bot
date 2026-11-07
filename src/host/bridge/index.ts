@@ -21,7 +21,7 @@ import { parseCommand, runCommand, type CommandServices, type TargetInfo } from 
 import { createSessionDirectory, type SessionDirectory } from './directory.js';
 import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, extractSessionPointer } from './format.js';
 import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.js';
-import { approvalCard, approvalSettledCards, questionCard, questionFitsCard, questionSettledCards } from './notices.js';
+import { approvalCard, approvalSettledCards, questionCard, questionCardKind, questionSettledCards } from './notices.js';
 import { parseCardEvent } from './cards.js';
 import { createInteractionRegistry } from './interactions.js';
 import {
@@ -514,8 +514,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
     const wait = interactions.waitQuestion(sessionId, request.questions, settings.answerTimeoutMs, request.signal, delivery, chats);
     if (!wait) return next();
     journal.write({ event: 'dsh.question', sessionId, nonce: wait.nonce, questions: request.questions, chats, timeoutMs: settings.answerTimeoutMs });
-    // One single-choice question is answered with a tap; anything else keeps the typed reply.
-    const card = questionFitsCard(request.questions)
+    // One question with options is answered on a card; anything else keeps the typed reply.
+    const card = questionCardKind(request.questions)
       ? questionCard(info.title, request.questions[0]!, wait.nonce, settings.answerTimeoutMs) : undefined;
     notify(chats, questionNotice(sessionId, info.title, request.questions, wait.nonce, settings.answerTimeoutMs), 'question', sessionId, wait.nonce, card);
     const answer = await wait.result;
@@ -628,11 +628,33 @@ export function createBridge(deps: BridgeDeps): Bridge {
     let label: string | undefined;
     if (state?.active() && !closed) {
       const question = state.questions[0];
-      label = state.questions.length === 1 && event.option !== undefined ? question?.options?.[event.option]?.label : undefined;
+      const options = question?.options ?? [];
+      let labels: string[] | undefined;
+      if (state.questions.length === 1 && question) {
+        if (event.action === 'option' && event.option !== undefined && options[event.option]) {
+          labels = [options[event.option]!.label];
+        } else if (event.action === 'submit') {
+          // WeCom's selection field is not typed by the SDK: never guess an
+          // answer from a frame this plugin cannot read, say so and keep the
+          // question open for the typed reply.
+          const picked = (event.selected ?? []).filter(index => options[index]);
+          const hint = event.selected === undefined
+            ? '没能读取卡片上的选择，请改为回复文字作答'
+            : !picked.length ? '还没有勾选任何选项'
+              : !question.multiSelect && picked.length > 1 ? '这道题只能选择一个选项' : undefined;
+          if (hint) {
+            journal.write({ event: 'wecom.card.unreadable', level: event.selected === undefined ? 'warn' : 'info', ...meta, sessionId: state.sessionId, reason: hint, frame: frame.body });
+            await client.sendMessage(event.chatId, { msgtype: 'markdown', markdown: { content: `${title('⚠️', hint)}\n> 也可以回复 ${code(`/answer ${state.nonce} 序号`)}。` } }).catch(() => undefined);
+            return;
+          }
+          labels = picked.map(index => options[index]!.label);
+        }
+      }
+      label = labels?.join('、');
       const boundHere = router.forSession(state.sessionId).some(binding => binding.id === event.chatId);
       const adminHere = chatType === 'single' && policy.isAdmin(event.userId) && await directory.permitted(state.sessionId);
-      if (question && label !== undefined && (boundHere || adminHere) && state.active() && !closed) {
-        const submission = await state.submit({ answers: [{ id: question.id, selected: [label] }] });
+      if (question && labels && (boundHere || adminHere) && state.active() && !closed) {
+        const submission = await state.submit({ answers: [{ id: question.id, selected: labels }] });
         outcome = submission === 'closed' ? 'ignored' : 'answered';
       }
     }

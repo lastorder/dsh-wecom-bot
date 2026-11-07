@@ -17,7 +17,7 @@ import { createSessionTitler } from '../dist/host/session-title.js';
 import { summarizeTurn } from '../dist/host/turns.js';
 import { createWorkspaceService } from '../dist/host/workspaces.js';
 import {
-  approvalNonce, baseSettings, cardClick, fakeClient, fakeHost, finishedSession, frame, memoryJournal,
+  approvalNonce, baseSettings, cardClick, cardSubmit, fakeClient, fakeHost, finishedSession, frame, memoryJournal,
   scratchDirectory, scratchRoot, settle, until, TEST_WORKSPACE_PATH,
 } from './helpers.js';
 
@@ -508,7 +508,7 @@ test('a single question is answered from the bound chat with the short code', as
   h.stop();
 });
 
-test('a multi-choice question stays a typed reply that names its code, ids and examples', async () => {
+test('several questions stay a typed reply that names its code, ids and examples', async () => {
   const h = await harness({ answerTimeoutMs: 1_800_000 });
   h.client.emit('authenticated');
   await h.send('hi');
@@ -1274,11 +1274,10 @@ test('a single-choice question is a card with one button per option, and a tap a
   h.stop();
 });
 
-test('only a single-choice question with few options becomes a card', async () => {
+test('a question without options, or with more than twenty, stays a typed reply', async () => {
   const shapes = [
-    { id: 'm', question: 'Q?', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }] },
     { id: 'f', question: 'Q?' },
-    { id: 'many', question: 'Q?', options: Array.from({ length: 7 }, (_, n) => ({ label: `o${n}` })) },
+    { id: 'too-many', question: 'Q?', options: Array.from({ length: 21 }, (_, n) => ({ label: `o${n}` })) },
   ];
   for (const question of shapes) {
     const h = await harness({}, {}, { members: [['user', 'alice']] });
@@ -1335,5 +1334,66 @@ test('tapping a question card that already closed gets a dead card', async () =>
   await settle();
   assert.equal(h.client.cardUpdates.length, updates + 1);
   assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已失效/);
+  h.stop();
+});
+
+const MULTI = {
+  agent: { id: 'session-created-1' },
+  questions: [{ id: 'tools', question: '要哪些？', multiSelect: true, options: [{ label: 'a' }, { label: 'b' }, { label: 'c' }] }],
+};
+
+test('a multi-select question is a checkbox card; 提交 answers with the ticked options', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const ask = h.bridge.onQuestion(MULTI, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  assert.equal(card.card_type, 'vote_interaction');
+  assert.equal(card.checkbox.mode, 1, 'several may be ticked');
+  assert.deepEqual(card.checkbox.option_list.map(o => o.id), ['opt_0', 'opt_1', 'opt_2']);
+  assert.equal(card.submit_button.key, 'submit');
+
+  h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['opt_2', 'opt_0'], { chat: 'alice', user: 'alice' }));
+  assert.deepEqual(await ask, { answers: [{ id: 'tools', selected: ['a', 'c'] }] }, 'in the card\'s own order, not the tap order');
+  assert.match(h.client.cardUpdates.at(-1).card.main_title.desc, /a、c/);
+  h.stop();
+});
+
+test('a checkbox card that is submitted empty, over-ticked or unreadable is never guessed at', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const ask = h.bridge.onQuestion({
+    agent: { id: 'session-created-1' },
+    questions: [{ id: 'one', question: '选一个', options: Array.from({ length: 8 }, (_, n) => ({ label: `o${n}` })) }],
+  }, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  assert.equal(card.card_type, 'vote_interaction', 'more than six options cannot be buttons');
+  assert.equal(card.checkbox.mode, 0, 'but it is still single choice');
+  const updates = h.client.cardUpdates.length;
+  const sends = h.client.sends.length;
+  const mine = { chat: 'alice', user: 'alice' };
+
+  h.client.emit('event.template_card_event', cardSubmit(card.task_id, [], mine));
+  h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['opt_1', 'opt_2'], mine));
+  h.client.emit('event.template_card_event', cardSubmit(card.task_id, undefined, mine));
+  h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['not-ours'], mine));
+  await settle();
+  assert.equal(h.client.cardUpdates.length, updates, 'the card keeps its controls');
+  const hints = h.client.sends.slice(sends).map(send => send.body.markdown.content);
+  assert.equal(hints.length, 4, 'each refused submit is told why, in a message');
+  // The taps are handled concurrently, so the hints are checked as a set.
+  const count = pattern => hints.filter(text => pattern.test(text)).length;
+  assert.equal(count(/还没有勾选/), 1);
+  assert.equal(count(/只能选择一个/), 1);
+  assert.equal(count(/没能读取/), 2, 'a frame without a selection, and an option id this card never had, are not believed');
+  assert.ok(hints.every(text => /\/answer [a-z0-9]{6} 序号/.test(text)), 'and shown the typed way out');
+  assert.equal(h.journal.find('wecom.card.unreadable').length, 4);
+  assert.ok(h.journal.find('wecom.card.unreadable').some(r => r.frame), 'the raw frame is kept to see what WeCom sent');
+
+  h.client.emit('event.template_card_event', cardSubmit(card.task_id, ['opt_5'], mine));
+  assert.deepEqual(await ask, { answers: [{ id: 'one', selected: ['o5'] }] });
   h.stop();
 });

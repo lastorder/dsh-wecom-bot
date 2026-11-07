@@ -3,7 +3,7 @@ import type { ApprovalRequest, Question } from '../dsh.js';
 import type { TurnSummary } from '../turns.js';
 import type { OperableGroup } from './directory.js';
 import type { WorkspaceOption } from '../../shared/protocol.js';
-import { APPROVE_BUTTON, DENY_BUTTON, MAX_CARD_BUTTONS, SETTLED_BUTTON, approvalTaskId, optionButton, questionTaskId } from './cards.js';
+import { APPROVE_BUTTON, DENY_BUTTON, CHECKBOX_KEY, MAX_CARD_BUTTONS, MAX_CHECKBOX_OPTIONS, SETTLED_BUTTON, SUBMIT_BUTTON, approvalTaskId, optionButton, questionTaskId } from './cards.js';
 import {
   byteLength, displayPath, displayTitle, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, sessionToken, shortId,
 } from './format.js';
@@ -443,11 +443,17 @@ function optionRow(option: { readonly label: string; readonly description?: stri
   return byteLength(full) <= ROW_BYTES ? full : label;
 }
 
-/** Whether one tap can answer these questions: one single-choice question with few enough options. */
-export function questionFitsCard(questions: readonly Question[]): boolean {
+/**
+ * Which card, if any, can carry these questions: one question only, with
+ * buttons when a tap can answer it (single choice, six options at most), and
+ * a checkbox list with a submit button when it takes several answers or has too
+ * many options for buttons. Free text cannot be typed into a card.
+ */
+export function questionCardKind(questions: readonly Question[]): 'buttons' | 'checkbox' | undefined {
   const [only] = questions;
   const count = only?.options?.length ?? 0;
-  return questions.length === 1 && !only!.multiSelect && count >= 1 && count <= MAX_CARD_BUTTONS;
+  if (questions.length !== 1 || count < 1 || count > MAX_CHECKBOX_OPTIONS) return undefined;
+  return !only!.multiSelect && count <= MAX_CARD_BUTTONS ? 'buttons' : 'checkbox';
 }
 
 /**
@@ -459,6 +465,31 @@ export function questionFitsCard(questions: readonly Question[]): boolean {
  * into a card, so the verification code stays in the subtitle for `/answer`.
  */
 export function questionCard(sessionTitle: string | null, question: Question, nonce: string, timeoutMs: number): TemplateCard {
+  const options = question.options ?? [];
+  if (!question.multiSelect && options.length <= MAX_CARD_BUTTONS) return questionButtonCard(sessionTitle, question, nonce, timeoutMs);
+  return questionCheckboxCard(sessionTitle, question, nonce, timeoutMs);
+}
+
+/** Ticking boxes then 「提交」: the options of one question, several answers allowed. */
+function questionCheckboxCard(sessionTitle: string | null, question: Question, nonce: string, timeoutMs: number): TemplateCard {
+  const options = question.options ?? [];
+  const several = question.multiSelect === true;
+  return {
+    card_type: 'vote_interaction',
+    main_title: { title: '❓ DSH 等待你的回答', desc: `${several ? '可多选 · ' : ''}${validityText(timeoutMs)}内有效 · 验证码 ${nonce}` },
+    sub_title_text: cardText(question.question, 330),
+    horizontal_content_list: [{ keyname: '会话', value: cardText(displayTitle(sessionTitle), 78) }],
+    checkbox: {
+      question_key: CHECKBOX_KEY,
+      mode: several ? 1 : 0,
+      option_list: options.map((option, n) => ({ id: optionButton(n), text: cardText(`${n + 1}. ${option.label}`, 60) })),
+    },
+    submit_button: { text: '提交', key: SUBMIT_BUTTON },
+    task_id: questionTaskId(nonce),
+  };
+}
+
+function questionButtonCard(sessionTitle: string | null, question: Question, nonce: string, timeoutMs: number): TemplateCard {
   const options = question.options ?? [];
   const short = (label: string): boolean => [...label].length <= 8;
   // The buttons already say everything when every option is short and bare.
@@ -490,7 +521,7 @@ export function questionSettledCards(outcome: 'answered' | string, answer: strin
   const answered = outcome === 'answered';
   const headline = answered ? '✅ 已回答' : '⌛ 已失效';
   const detail = answered
-    ? `你选择了：${cardText(answer ?? '', 60)}`
+    ? `你选择了：${cardText(answer ?? '', 90)}`
     : '请求已处理或已超时，以 DSH 页面为准';
   const base = { card_action: CARD_ACTION, main_title: { title: headline, desc: detail }, task_id: taskId };
   return [

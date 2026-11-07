@@ -344,3 +344,20 @@ export function cardClick(taskId, eventKey, { chat = 'root', user = 'root' } = {
     },
   };
 }
+
+/**
+ * A tap on 「提交」 of a checkbox card. `selected` is `undefined` for a frame
+ * that carries no selection field at all, otherwise the ticked option ids in the
+ * shape WeCom documents for card callbacks.
+ */
+export function cardSubmit(taskId, selected, { chat = 'root', user = 'root' } = {}) {
+  const card = { card_type: 'vote_interaction', event_key: 'submit', task_id: taskId };
+  if (selected !== undefined) card.selected_items = { selected_item: [{ question_key: 'pick', option_ids: { option_id: selected } }] };
+  return {
+    headers: { req_id: `submit_${taskId}` },
+    body: {
+      msgtype: 'event', chatid: chat, chattype: 'single', from: { userid: user },
+      event: { eventtype: 'template_card_event', template_card_event: card },
+    },
+  };
+}

@@ -243,15 +243,16 @@ test('validity is said the way a person says it', async () => {
 });
 
 test('a question card is only built for one single-choice question with at most six options', async () => {
-  const { questionFitsCard, questionCard, questionSettledCards } = await import('../dist/host/bridge/notices.js');
+  const { questionCardKind, questionCard, questionSettledCards } = await import('../dist/host/bridge/notices.js');
   const { parseCardEvent } = await import('../dist/host/bridge/cards.js');
   const option = n => ({ label: `o${n}` });
   const six = { id: 'q', question: 'Q?', options: Array.from({ length: 6 }, (_, n) => option(n)) };
-  assert.equal(questionFitsCard([six]), true);
-  assert.equal(questionFitsCard([{ ...six, options: [...six.options, option(7)] }]), false, 'a card carries six buttons');
-  assert.equal(questionFitsCard([{ ...six, multiSelect: true }]), false, 'a tap cannot pick several');
-  assert.equal(questionFitsCard([{ id: 'q', question: 'Q?' }]), false, 'free text cannot be typed into a card');
-  assert.equal(questionFitsCard([six, six]), false);
+  assert.equal(questionCardKind([six]), 'buttons');
+  assert.equal(questionCardKind([{ ...six, options: [...six.options, option(7)] }]), 'checkbox', 'a card carries six buttons; more become a list');
+  assert.equal(questionCardKind([{ ...six, multiSelect: true }]), 'checkbox', 'a tap cannot pick several');
+  assert.equal(questionCardKind([{ ...six, options: Array.from({ length: 21 }, (_, n) => option(n)) }]), undefined, 'a checkbox card carries twenty');
+  assert.equal(questionCardKind([{ id: 'q', question: 'Q?' }]), undefined, 'free text cannot be typed into a card');
+  assert.equal(questionCardKind([six, six]), undefined);
 
   const card = questionCard('《会话》', six, 'abc123', 1_800_000);
   assert.equal(card.task_id, 'qst_abc123');
@@ -284,4 +285,21 @@ test('an option row keeps the option name whole and drops a description that wou
   const rows = Object.fromEntries(card.horizontal_content_list.map(row => [row.keyname, row.value]));
   assert.equal(rows['选项1'], '这是一个特别特别长的选项乙', 'the description that does not fit is left out');
   assert.equal(rows['选项2'], '短 — 说明', 'one that fits is kept');
+});
+
+test('the ticked options are read from the shape WeCom really sends, and never guessed otherwise', async () => {
+  const { parseCardEvent, selectedOptions } = await import('../dist/host/bridge/cards.js');
+  // Captured from a real vote_interaction submit.
+  const real = { eventtype: 'template_card_event', template_card_event: {
+    card_type: 'vote_interaction', event_key: 'submit', task_id: 'qst_zgqfs4',
+    selected_items: { selected_item: [{ question_key: 'pick', option_ids: { option_id: ['opt_0', 'opt_2', 'opt_3'] } }] },
+  } };
+  const event = parseCardEvent({ headers: {}, body: { from: { userid: 'u' }, event: real } });
+  assert.deepEqual([event.kind, event.action, event.selected], ['question', 'submit', [0, 2, 3]]);
+  assert.deepEqual(selectedOptions({ selected_item: [{ question_key: 'pick', option_ids: { option_id: [] } }] }), [], 'nothing ticked is empty, not unreadable');
+  assert.deepEqual(selectedOptions({ selected_item: [{ question_key: 'pick', option_ids: { option_id: 'opt_1' } }] }), [1], 'a lone id may arrive as a string');
+  assert.equal(selectedOptions(undefined), undefined);
+  assert.equal(selectedOptions({ selected_item: [{ option_ids: { option_id: ['x1'] } }] }), undefined, 'ids this plugin never sent are not believed');
+  const bare = parseCardEvent({ headers: {}, body: { from: { userid: 'u' }, event: { template_card_event: { event_key: 'submit', task_id: 'qst_a' } } } });
+  assert.equal(bare.selected, undefined, 'no selection field means cannot read');
 });
