@@ -21,7 +21,11 @@ import { parseCommand, runCommand, type CommandServices, type TargetInfo } from 
 import { createSessionDirectory, type SessionDirectory } from './directory.js';
 import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, extractSessionPointer } from './format.js';
 import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.js';
-import { approvalCard, approvalSettledCards, questionBodyNotice, questionCard, questionCardKind, questionSettledCards } from './notices.js';
+import {
+  approvalCard, approvalMemo, approvalSettledCards, closureOutcome, describeAnswers, questionBodyNotice, questionCard, questionCardKind,
+  questionMemo, questionSettledCards,
+} from './notices.js';
+import { createCardMemory, type CardMemo, type CardMemory } from './card-memory.js';
 import { parseCardEvent, questionKey } from './cards.js';
 import { createInteractionRegistry, type ArmedAnswer } from './interactions.js';
 import {
@@ -68,6 +72,8 @@ export interface BridgeDeps {
   readonly brokeredInteractions?: boolean;
   /** A deployment without the shared broker can notify, but must not claim dual-channel decisions. */
   readonly notificationOnly?: boolean;
+  /** What was sent on each card, so a retired card can keep its content (default: this process only). */
+  readonly cards?: CardMemory;
 }
 
 export interface Bridge {
@@ -122,6 +128,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
   });
   const selection = createSelectionStore();
   const interactions = createInteractionRegistry();
+  const cards = deps.cards ?? createCardMemory();
   const outbox = createOutbox({ client, journal, log, status, allow: async notice => {
     if (!notice.sessionId) return notice.kind !== 'admin' || policy.isAdmin(notice.chat);
     const admin = policy.isAdmin(notice.chat);
@@ -212,7 +219,8 @@ export function createBridge(deps: BridgeDeps): Bridge {
     return unique;
   }
 
-  function notify(chats: readonly string[], text: string, kind: NoticeKind, sessionId?: string, interactionNonce?: string, card?: TemplateCard): void {
+  function notify(chats: readonly string[], text: string, kind: NoticeKind, sessionId?: string, interactionNonce?: string, card?: TemplateCard, memo?: CardMemo): void {
+    if (card && memo) chats.forEach((_, index) => cards.remember(index ? `${card.task_id}_${index}` : card.task_id!, memo));
     chats.forEach((chat, index) => outbox.enqueue({
       chat, text, kind, ...(sessionId ? { sessionId } : {}), ...(interactionNonce ? { interactionNonce } : {}),
       // WeCom refuses a task_id it has seen (errcode 42014), so every chat the
@@ -571,10 +579,22 @@ export function createBridge(deps: BridgeDeps): Bridge {
     if (kind === 'checkbox' || kind === 'dropdowns') {
       notify(chats, questionBodyNotice(info.title, request.questions), 'question', sessionId, wait.nonce);
     }
-    notify(chats, questionNotice(sessionId, info.title, request.questions, wait.nonce, settings.answerTimeoutMs), 'question', sessionId, wait.nonce, card);
+    notify(chats, questionNotice(sessionId, info.title, request.questions, wait.nonce, settings.answerTimeoutMs), 'question', sessionId, wait.nonce, card,
+      card ? questionMemo(info.title, request.questions, wait.nonce, Date.now()) : undefined);
     const answer = await wait.result;
     journal.write({ event: 'dsh.question.result', sessionId, nonce: wait.nonce, outcome: answer ? 'answered' : 'fallback', ...(answer ? { answer } : {}) });
-    return answer ?? next();
+    const said = answer ? describeAnswers(request.questions, answer.answers) : '';
+    if (answer) {
+      cards.close(wait.nonce, said ? { outcome: 'answered', summary: said } : { outcome: 'closed' });
+      return answer;
+    }
+    // Nobody here decided (timed out, or the DSH page took it): the cards are
+    // dead from now on, and say what the DSH page answers once it does.
+    cards.close(wait.nonce, { outcome: 'closed' });
+    const settled = await next();
+    const later = describeAnswers(request.questions, settled.answers);
+    if (later) cards.close(wait.nonce, { outcome: 'answered', summary: later });
+    return settled;
   }
 
   /**
@@ -615,7 +635,9 @@ export function createBridge(deps: BridgeDeps): Bridge {
       journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'already-submitting' });
       return;
     }
-    let outcome = 'ignored';
+    // A card whose request is gone still has its record: how it ended, and what it said.
+    const memo = cards.recall(event.taskId);
+    let outcome = state ? 'ignored' : closureOutcome(memo?.closed).outcome;
     if (state?.active() && !closed) {
       const permitted = await directory.permitted(state.sessionId);
       if (permitted && !state.active() && !closed) {
@@ -630,7 +652,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       }
     }
     journal.write({ event: 'dsh.approval.answer', ...meta, sessionId: state?.sessionId, toolName: state?.toolName, outcome, admin });
-    await settleCard(frame, event.chatId, meta, approvalSettledCards(outcome, state?.toolName, event.taskId));
+    await settleCard(frame, event.chatId, meta, approvalSettledCards(outcome, state?.toolName, event.taskId, memo));
   }
 
   /**
@@ -682,7 +704,9 @@ export function createBridge(deps: BridgeDeps): Bridge {
         return;
       }
       journal.write({ event: 'wecom.card.stale', ...meta, closed: interactions.wasClosed(event.nonce) });
-      await settleCard(frame, event.chatId, meta, questionSettledCards('expired', undefined, event.taskId));
+      const memo = cards.recall(event.taskId);
+      const ended = closureOutcome(memo?.closed);
+      await settleCard(frame, event.chatId, meta, questionSettledCards(ended.outcome, ended.summary, event.taskId, memo));
       return;
     }
     if (!entitled || !state.chats.has(event.chatId)) {
@@ -771,7 +795,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
     const submission = await state.submit({ answers: plan.answers });
     const outcome = submission === 'closed' ? 'ignored' : 'answered';
     journal.write({ event: 'dsh.question.answer', ...meta, source: 'card', sessionId: state.sessionId, questionId: questions[0]?.id, outcome, ...(outcome === 'answered' ? { answer: plan.summary } : {}) });
-    await settleCard(frame, event.chatId, meta, questionSettledCards(outcome, plan.summary, event.taskId));
+    await settleCard(frame, event.chatId, meta, questionSettledCards(outcome, plan.summary, event.taskId, cards.recall(event.taskId)));
   }
 
   async function onApproval(request: ApprovalRequest, next: () => Promise<ApprovalOutcome>, delivery?: InteractionDelivery): Promise<ApprovalOutcome> {
@@ -803,10 +827,18 @@ export function createBridge(deps: BridgeDeps): Bridge {
       return next();
     }
     journal.write({ event: 'dsh.approval', ...meta, remote: true, nonce: wait.nonce, chats: admins, timeoutMs: settings.approvalTimeoutMs });
-    notify(admins, approvalNotice(sessionId, info.title, request, wait.nonce, settings.approvalTimeoutMs), 'approval-request', sessionId, wait.nonce, approvalCard(info.title, request, wait.nonce, settings.approvalTimeoutMs));
+    notify(admins, approvalNotice(sessionId, info.title, request, wait.nonce, settings.approvalTimeoutMs), 'approval-request', sessionId, wait.nonce, approvalCard(info.title, request, wait.nonce, settings.approvalTimeoutMs),
+      approvalMemo(info.title, request, wait.nonce, Date.now()));
     const outcome = await wait.result;
     journal.write({ event: 'dsh.approval.result', ...meta, nonce: wait.nonce, outcome: outcome ?? 'fallback' });
-    return outcome ?? next();
+    if (outcome) {
+      cards.close(wait.nonce, { outcome });
+      return outcome;
+    }
+    cards.close(wait.nonce, { outcome: 'closed' });
+    const settled = await next();
+    cards.close(wait.nonce, { outcome: settled });
+    return settled;
   }
 
   function start(): () => void {

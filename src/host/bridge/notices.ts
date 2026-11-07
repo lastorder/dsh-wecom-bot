@@ -1,5 +1,6 @@
 import type { TemplateCard } from '@wecom/aibot-node-sdk';
-import type { ApprovalRequest, Question } from '../dsh.js';
+import type { ApprovalRequest, Question, QuestionAnswerItem } from '../dsh.js';
+import type { CardClosure, CardMemo, CardRow } from './card-memory.js';
 import type { TurnSummary } from '../turns.js';
 import type { OperableGroup } from './directory.js';
 import type { WorkspaceOption } from '../../shared/protocol.js';
@@ -609,25 +610,6 @@ function questionButtonCard(sessionTitle: string | null, question: Question, non
   };
 }
 
-/** What replaces a question card once it is settled; same fallbacks as {@link approvalSettledCards}. */
-export function questionSettledCards(outcome: 'answered' | string, answer: string | undefined, taskId: string): TemplateCard[] {
-  const answered = outcome === 'answered';
-  const headline = answered ? '✅ 已回答' : '⌛ 已失效';
-  const detail = answered
-    ? `你选择了：${cardText(answer ?? '', 120)}`
-    : '请求已处理或已超时，以 DSH 页面为准';
-  const base = { card_action: CARD_ACTION, main_title: { title: headline, desc: detail }, task_id: taskId };
-  return [
-    { card_type: 'text_notice', ...base },
-    {
-      card_type: 'button_interaction',
-      ...base,
-      main_title: { title: headline, desc: `${detail} · 按钮不再可用` },
-      button_list: [{ text: answered ? '已回答' : '已失效', key: SETTLED_BUTTON, style: 4 }],
-    },
-  ];
-}
-
 export function reviewNotice(sessionId: string, sessionTitle: string | null): string {
   return [
     `${title('👀', 'DSH 等待审阅')} · ${sessionLabel(sessionTitle)}`,
@@ -669,23 +651,29 @@ const CARD_ACTION = { type: 1 as const, url: 'https://work.weixin.qq.com/' };
  * was announced; the text form (`/approve <nonce>`) stays in the description
  * and in {@link approvalNotice} for keyboards and clients that drop cards.
  */
-export function approvalCard(sessionTitle: string | null, request: ApprovalRequest, nonce: string, timeoutMs?: number): TemplateCard {
+/** What an approval says: the ask (a short fact), the why (the sentence decided on), and the Session. */
+function approvalParts(sessionTitle: string | null, request: ApprovalRequest): { readonly why: string; readonly rows: CardRow[] } {
   const reason = oneLine(request.displayReason?.zh ?? request.displayReason?.en ?? request.reason ?? '');
   // DSH words the reason as 「<what is asked>：<why>」. The ask is a short fact
   // for the list below; the why is the sentence the administrator decides on.
   const split = reason.match(/^([^：:]{1,60})[：:]\s*(.+)$/);
   const ask = split ? split[1]!.trim() : '';
-  const why = split ? split[2]!.trim() : reason;
-  const rows = [
-    ...(ask ? [{ keyname: '权限', value: cardText(ask, 78) }] : []),
-    { keyname: '会话', value: cardText(displayTitle(sessionTitle), 78) },
-    { keyname: '验证码', value: timeoutMs ? `${nonce} · ${validityText(timeoutMs)}内有效` : nonce },
-  ];
+  return {
+    why: split ? split[2]!.trim() : reason,
+    rows: [
+      ...(ask ? [{ keyname: '权限', value: cardText(ask, 78) }] : []),
+      { keyname: '会话', value: cardText(displayTitle(sessionTitle), 78) },
+    ],
+  };
+}
+
+export function approvalCard(sessionTitle: string | null, request: ApprovalRequest, nonce: string, timeoutMs?: number): TemplateCard {
+  const { why, rows } = approvalParts(sessionTitle, request);
   return {
     card_type: 'button_interaction',
     main_title: { title: `🔐 权限请求 · ${cardText(request.toolName, 48)}`, desc: '请批准或拒绝；DSH 页面同时可处理，先到先得' },
     ...(why ? { sub_title_text: cardText(why, 330) } : {}),
-    horizontal_content_list: rows,
+    horizontal_content_list: [...rows, { keyname: '验证码', value: timeoutMs ? `${nonce} · ${validityText(timeoutMs)}内有效` : nonce }],
     button_list: [
       { text: '批准', key: APPROVE_BUTTON, style: 1 },
       { text: '拒绝', key: DENY_BUTTON, style: 2 },
@@ -694,32 +682,100 @@ export function approvalCard(sessionTitle: string | null, request: ApprovalReque
   };
 }
 
+/** What to remember of an approval card, to keep its content when it is retired. */
+export function approvalMemo(sessionTitle: string | null, request: ApprovalRequest, nonce: string, at: number): CardMemo {
+  const { why, rows } = approvalParts(sessionTitle, request);
+  return { kind: 'approval', nonce, at, toolName: cardText(request.toolName, 48), rows, ...(why ? { sub: cardText(why, 330) } : {}) };
+}
+
+/** What to remember of a question card: the questions in full, the options, the Session. */
+export function questionMemo(sessionTitle: string | null, questions: readonly Question[], nonce: string, at: number): CardMemo {
+  const session = { keyname: '会话', value: cardText(displayTitle(sessionTitle), 78) };
+  if (questions.length === 1) {
+    const options = questions[0]!.options ?? [];
+    // Five options and the Session fill the six rows a card may have.
+    return {
+      kind: 'question', nonce, at, sub: cardText(questions[0]!.question, 330),
+      rows: [...options.slice(0, MAX_CARD_BUTTONS - 1).map((option, n) => ({ keyname: `选项${n + 1}`, value: optionRow(option) })), session],
+    };
+  }
+  const budget = Math.floor(330 / questions.length) - 6;
+  return {
+    kind: 'question', nonce, at, rows: [session],
+    sub: questions.map((question, n) => `${n + 1}. ${cardText(question.question, budget)}`).join('\n'),
+  };
+}
+
+/** The answers in words: 「方案 A」, 「自己回答：杭州」, or numbered by question when there are several. */
+export function describeAnswers(questions: readonly Question[], answers: readonly QuestionAnswerItem[]): string {
+  const say = (item: QuestionAnswerItem | undefined): string =>
+    item ? [...item.selected, ...(item.custom ? [`自己回答：${oneLine(item.custom)}`] : [])].join('、') : '';
+  if (questions.length === 1) return say(answers.find(item => item.id === questions[0]!.id) ?? answers[0]);
+  const parts = questions.map((question, n) => [n + 1, say(answers.find(item => item.id === question.id))] as const);
+  return parts.every(([, said]) => !said) ? '' : parts.map(([n, said]) => `${n}. ${said || '（未回答）'}`).join('；');
+}
+
 /**
  * The cards that replace the buttons once the request is settled, in the order
  * they are tried. WeCom has no disabled button, so "greyed out" means the card
  * is replaced by one without live buttons; the inert button card is the shape
  * to fall back on if the plain notice is ever rejected.
  */
-export function approvalSettledCards(outcome: 'allowed-once' | 'rejected' | string, toolName: string | undefined, taskId: string): TemplateCard[] {
+/**
+ * The candidates that replace a tapped or outdated card, in the order they are
+ * tried. WeCom has no disabled button, so "greyed out" means a card without
+ * live buttons — and what the card said is kept: the question or reason as the
+ * subtitle and the facts as rows, so it reads as a record, not a blank.
+ */
+function settledCandidates(headline: string, detail: string, taskId: string, inertButton: string, memo?: CardMemo): TemplateCard[] {
+  const base = { card_action: CARD_ACTION, main_title: { title: headline, desc: detail }, task_id: taskId };
+  const kept = memo && (memo.sub || memo.rows.length)
+    ? [{
+      card_type: 'text_notice',
+      ...base,
+      ...(memo.sub ? { sub_title_text: memo.sub } : {}),
+      ...(memo.rows.length ? { horizontal_content_list: memo.rows.slice(0, MAX_CARD_BUTTONS).map(row => ({ keyname: row.keyname, value: row.value })) } : {}),
+    }]
+    : [];
+  return [
+    ...kept,
+    // If WeCom refuses the fuller card, the plain one still retires the buttons.
+    { card_type: 'text_notice', ...base },
+    {
+      card_type: 'button_interaction',
+      ...base,
+      main_title: { title: headline, desc: `${detail} · 按钮不再可用` },
+      button_list: [{ text: inertButton, key: SETTLED_BUTTON, style: 4 }],
+    },
+  ];
+}
+
+export function approvalSettledCards(outcome: 'allowed-once' | 'rejected' | string, toolName: string | undefined, taskId: string, memo?: CardMemo): TemplateCard[] {
   const allowed = outcome === 'allowed-once';
   const rejected = outcome === 'rejected';
-  const what = toolName ? ` · ${cardText(toolName, 48)}` : '';
+  const tool = toolName ?? memo?.toolName;
+  const what = tool ? ` · ${cardText(tool, 48)}` : '';
   const headline = `${allowed ? '✅ 已批准' : rejected ? '🚫 已拒绝' : '⌛ 已失效'}${what}`;
   const detail = allowed
     ? '已允许本次工具调用'
     : rejected
       ? '已拒绝本次工具调用'
       : '请求已处理或已超时，以 DSH 页面为准';
-  const base = { card_action: CARD_ACTION, main_title: { title: headline, desc: detail }, task_id: taskId };
-  return [
-    { card_type: 'text_notice', ...base },
-    {
-      card_type: 'button_interaction',
-      ...base,
-      main_title: { title: headline, desc: `${detail} · 按钮不再可用` },
-      button_list: [{ text: allowed ? '已批准' : rejected ? '已拒绝' : '已失效', key: SETTLED_BUTTON, style: 4 }],
-    },
-  ];
+  return settledCandidates(headline, detail, taskId, allowed ? '已批准' : rejected ? '已拒绝' : '已失效', memo);
+}
+
+export function questionSettledCards(outcome: 'answered' | string, answer: string | undefined, taskId: string, memo?: CardMemo): TemplateCard[] {
+  const answered = outcome === 'answered' && Boolean(answer);
+  const headline = answered ? '✅ 已回答' : '⌛ 已失效';
+  const detail = answered
+    ? `${memo?.closed ? '回答：' : '你选择了：'}${cardText(answer ?? '', 120)}`
+    : '请求已处理或已超时，以 DSH 页面为准';
+  return settledCandidates(headline, detail, taskId, answered ? '已回答' : '已失效', memo);
+}
+
+/** How a request ended, for a card that outlived it: what it was settled with and what to say. */
+export function closureOutcome(closed: CardClosure | undefined): { readonly outcome: string; readonly summary?: string } {
+  return closed ? { outcome: closed.outcome, ...(closed.summary ? { summary: closed.summary } : {}) } : { outcome: 'expired' };
 }
 
 export function promptFailedNotice(sessionId: string, sessionTitle: string | null): string {

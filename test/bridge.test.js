@@ -1192,7 +1192,8 @@ test('an administrator tapping a card whose request already closed gets a dead c
   assert.equal(h.client.cardUpdates.length, updates + 1, 'the stale buttons are replaced');
   const card = h.client.cardUpdates.at(-1).card;
   assert.equal(card.button_list, undefined);
-  assert.match(card.main_title.title, /已失效/);
+  assert.match(card.main_title.title, /已批准 · bash/, 'it says how the request ended, not just that it is over');
+  assert.equal(card.card_type, 'text_notice');
   h.stop();
 });
 
@@ -1332,7 +1333,11 @@ test('tapping a question card that already closed gets a dead card', async () =>
   h.client.emit('event.template_card_event', cardClick(card.task_id, 'opt_1', { chat: 'alice', user: 'alice' }));
   await settle();
   assert.equal(h.client.cardUpdates.length, updates + 1);
-  assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已失效/);
+  const dead = h.client.cardUpdates.at(-1).card;
+  assert.match(dead.main_title.title, /已回答/);
+  assert.match(dead.main_title.desc, /方案 A/, 'what was answered is kept');
+  assert.match(dead.sub_title_text, /用哪种方案/, 'and so is the question');
+  assert.equal(dead.button_list, undefined);
   h.stop();
 });
 
@@ -1724,5 +1729,82 @@ test('an approval for two administrators is a card for each', async () => {
   const [first, other] = cards;
   h.client.emit('event.template_card_event', cardClick(other.body.template_card.task_id, 'approve', { chat: other.chat, user: other.chat }));
   assert.equal(await approval, 'allowed-once');
+  h.stop();
+});
+
+test('a retired question card keeps what it said, however the request ended', async () => {
+  const h = await harness({ answerTimeoutMs: 40 }, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const mine = { chat: 'alice', user: 'alice' };
+  let later;
+  // Nobody answers here in time: the DSH page does, a moment afterwards.
+  const ask = h.bridge.onQuestion(CHOICE, () => new Promise(resolve => { later = resolve; }));
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  await new Promise(resolve => setTimeout(resolve, 80));
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'opt_0', mine));
+  await settle();
+  const timedOut = h.client.cardUpdates.at(-1).card;
+  assert.match(timedOut.main_title.title, /已失效/);
+  assert.match(timedOut.sub_title_text, /用哪种方案/, 'the question stays readable');
+  const rows = Object.fromEntries(timedOut.horizontal_content_list.map(row => [row.keyname, row.value]));
+  assert.equal(rows['选项1'], '方案 A', 'and so do the options');
+  assert.ok(rows['会话']);
+  assert.equal(timedOut.button_list, undefined, 'but nothing can be tapped');
+  assert.equal(timedOut.task_id, card.task_id);
+
+  // Once the DSH page has answered, the same card says what it answered.
+  later({ answers: [{ id: 'pick', selected: ['方案 A'] }] });
+  await ask;
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'opt_1', mine));
+  await settle();
+  const answered = h.client.cardUpdates.at(-1).card;
+  assert.match(answered.main_title.title, /已回答/);
+  assert.match(answered.main_title.desc, /方案 A/);
+  assert.match(answered.sub_title_text, /用哪种方案/);
+  h.stop();
+});
+
+test('a retired approval keeps its reason, and says what was decided', async () => {
+  const h = await harness({ adminUserIds: ['root'] }, {}, { members: [['user', 'root'], ['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const approval = h.bridge.onApproval({
+    agent: { id: 'session-created-1' }, toolName: 'bash',
+    reason: '允许本次操作使用 danger-full-access 权限：需要在工作区外写一个临时文件',
+  }, async () => 'unavailable');
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'deny'));
+  assert.equal(await approval, 'rejected');
+  // A second tap, long after: the record, not a blank.
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'approve'));
+  await settle();
+  const dead = h.client.cardUpdates.at(-1).card;
+  assert.match(dead.main_title.title, /已拒绝 · bash/);
+  assert.equal(dead.sub_title_text, '需要在工作区外写一个临时文件');
+  assert.equal(dead.horizontal_content_list.find(row => row.keyname === '权限').value, '允许本次操作使用 danger-full-access 权限');
+  assert.equal(dead.horizontal_content_list.find(row => row.keyname === '验证码'), undefined, 'a code that no longer works is not repeated');
+  h.stop();
+});
+
+test('typed and mixed answers are recorded on the cards too', async () => {
+  const h = await harness({}, {}, { members: [['user', 'alice']] });
+  h.client.emit('authenticated');
+  await h.send('hi', { chat: 'alice', user: 'alice' });
+  const mine = { chat: 'alice', user: 'alice' };
+  const ask = h.bridge.onQuestion(TWO, async () => ({ answers: [] }));
+  await settle();
+  const card = h.client.sends.at(-1).body.template_card;
+  h.client.emit('event.template_card_event', cardSubmitDropdowns(card.task_id, { q0: 'opt_0', q1: 'other' }, mine));
+  await settle();
+  await h.send('大后天', mine);
+  await ask;
+  h.client.emit('event.template_card_event', cardSubmitDropdowns(card.task_id, { q0: 'opt_1', q1: 'opt_1' }, mine));
+  await settle();
+  const dead = h.client.cardUpdates.at(-1).card;
+  assert.match(dead.main_title.desc, /1\. 北京；2\. 自己回答：大后天/);
+  assert.match(dead.sub_title_text, /1\. 放哪里？\n2\. 什么时候？/, 'both questions are still there');
   h.stop();
 });

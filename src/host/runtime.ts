@@ -1,4 +1,6 @@
+import { join } from 'node:path';
 import { WSClient } from '@wecom/aibot-node-sdk';
+import { createCardMemory } from './bridge/card-memory.js';
 import { createBridge, type Bridge, type BridgeClient } from './bridge/index.js';
 import { adminGrantedNotice, authorizedNotice, groupAssignedNotice } from './bridge/notices.js';
 import { createAccessPolicy } from './bridge/policy.js';
@@ -103,6 +105,15 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       journal.write({ event: 'binding.store.error', level: 'warn', stage, error });
     },
   });
+  // What each card said, kept across restarts so a late tap on an old card can
+  // retire it with its content instead of a bare 「已失效」.
+  const cards = createCardMemory({
+    file: join(pluginHome(), 'cards.json'),
+    onError: (error, stage) => {
+      log.warn(`WeCom card memory ${stage} failed`);
+      journal.write({ event: 'cards.store.error', level: 'warn', stage, error });
+    },
+  });
   const workspaces = createWorkspaceService({
     registry: () => {
       const registry = ctx.get?.('workspaceRegistry') as WorkspaceRegistry | undefined;
@@ -194,7 +205,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     // the bridge dials out with the defaults (no administrators) before adopting
     // the real block a moment later — visible in the journal as a `rebuilt`
     // followed by a `kept`. `load()` is memoized, so this costs one read.
-    await store.load();
+    await Promise.all([store.load(), cards.load()]);
     if (disposed) return;
     const settings: BridgeSettings = readBridgeSettings(config, store.settings());
     if (settings.wsUrl && !isTrustedWsUrl(settings.wsUrl)) {
@@ -256,7 +267,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
     });
     const created = createBridge({
       ctx, client, settings, router, log, journal, observations, rounds, catalogs, status, scrub,
-      ops: sessionOps, workspaces,
+      ops: sessionOps, workspaces, cards,
       brokeredInteractions: Boolean(interactionTransport), notificationOnly: !interactionTransport,
     });
     stopBridge = created.start();
@@ -374,6 +385,7 @@ export function createRuntime(options: RuntimeOptions): Runtime {
       teardown();
       rounds.closeAll('interrupted');
       await store.flush();
+      await cards.flush();
     },
     routingView,
     async applyOps(ops) {
