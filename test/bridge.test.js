@@ -1259,6 +1259,7 @@ test('a single-choice question is a card with one button per option, and a tap a
     'a long option is labelled by number; the full list sits in rows');
   const rows = Object.fromEntries(card.horizontal_content_list.map(row => [row.keyname, row.value]));
   assert.equal(rows['选项2'], '一个名字特别特别长的方案 B — 更稳妥', 'the full option is a row, not a clipped quote');
+  assert.ok(Object.values(rows).every(value => value.length <= 26), 'no row is longer than WeCom shows');
   assert.equal(card.quote_area, undefined);
   assert.match(card.main_title.desc, /验证码 [a-z0-9]{6}/, 'the code for a typed reply is on the card');
   assert.match(card.sub_title_text, /用哪种方案/);

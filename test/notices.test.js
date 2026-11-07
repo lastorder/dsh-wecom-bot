@@ -274,3 +274,14 @@ test('a question card is only built for one single-choice question with at most 
   assert.equal(click('apv_abc123', 'approve').action, 'approve');
   assert.equal(click('foreign', 'opt_1').nonce, '');
 });
+
+test('an option row keeps the option name whole and drops a description that would be clipped', async () => {
+  const { questionCard } = await import('../dist/host/bridge/notices.js');
+  const card = questionCard(null, { id: 'q', question: 'Q?', options: [
+    { label: '这是一个特别特别长的选项乙', description: '长标签，按钮应显示为选项二，后面还有很多很多说明文字' },
+    { label: '短', description: '说明' },
+  ] }, 'abc123', 60_000);
+  const rows = Object.fromEntries(card.horizontal_content_list.map(row => [row.keyname, row.value]));
+  assert.equal(rows['选项1'], '这是一个特别特别长的选项乙', 'the description that does not fit is left out');
+  assert.equal(rows['选项2'], '短 — 说明', 'one that fits is kept');
+});

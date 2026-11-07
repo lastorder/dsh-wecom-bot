@@ -5,7 +5,7 @@ import type { OperableGroup } from './directory.js';
 import type { WorkspaceOption } from '../../shared/protocol.js';
 import { APPROVE_BUTTON, DENY_BUTTON, MAX_CARD_BUTTONS, SETTLED_BUTTON, approvalTaskId, optionButton, questionTaskId } from './cards.js';
 import {
-  displayPath, displayTitle, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, sessionToken, shortId,
+  byteLength, displayPath, displayTitle, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, sessionToken, shortId,
 } from './format.js';
 
 /**
@@ -431,6 +431,18 @@ export function questionNotice(sessionId: string, sessionTitle: string | null, q
   ].join('\n');
 }
 
+/**
+ * One option as a row value. WeCom shows two lines (about 26 characters) and
+ * clips the rest, so the option's own name always comes first and complete; the
+ * description is added only when it still fits, never as a clipped half sentence.
+ */
+const ROW_BYTES = 78;
+function optionRow(option: { readonly label: string; readonly description?: string }): string {
+  const label = cardText(option.label, ROW_BYTES);
+  const full = option.description ? `${label} — ${oneLine(option.description)}` : label;
+  return byteLength(full) <= ROW_BYTES ? full : label;
+}
+
 /** Whether one tap can answer these questions: one single-choice question with few enough options. */
 export function questionFitsCard(questions: readonly Question[]): boolean {
   const [only] = questions;
@@ -456,7 +468,7 @@ export function questionCard(sessionTitle: string | null, question: Question, no
   const rows = options.some(option => !short(option.label) || option.description)
     ? options.map((option, n) => ({
       keyname: `选项${n + 1}`,
-      value: cardText(`${option.label}${option.description ? ` — ${option.description}` : ''}`, 120),
+      value: optionRow(option),
     }))
     : [];
   if (rows.length < MAX_CARD_BUTTONS) rows.push({ keyname: '会话', value: cardText(displayTitle(sessionTitle), 78) });
