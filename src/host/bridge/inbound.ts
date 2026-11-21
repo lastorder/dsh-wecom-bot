@@ -23,7 +23,7 @@ export interface InboundMessage {
 
 /** WeCom quotes carry the quoted content, not its id — flatten whatever text
  * it holds (text, or the text items of a mixed message) so the bridge can
- * look for its own `/use <token>` hint inside it. */
+ * look for its own `定位码 <token>` hint inside it. */
 function flattenQuote(quote: unknown): string | undefined {
   if (!quote || typeof quote !== 'object') return undefined;
   const q = quote as { msgtype?: unknown; text?: { content?: unknown }; mixed?: { msg_item?: unknown } };

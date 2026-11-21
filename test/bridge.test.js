@@ -104,6 +104,8 @@ async function harness(settings = {}, hostOptions = {}, extra = {}) {
 }
 
 const lastReply = h => h.client.replies.at(-1)?.content ?? '';
+/** The last card WeCom would show, whether it was the passive reply or a push. */
+const lastCard = h => h.client.cards.at(-1)?.card;
 const sentChats = h => h.client.sends.map(send => send.chat);
 
 test('an authorized member gets a Session in their group Workspace on first contact', async () => {
@@ -240,8 +242,10 @@ test('an administrator can use commands without implicit group membership', asyn
 });
 
 test('a settings edit reaches the running bridge immediately, administrator commands included', async () => {
+  const alpha = join(scratchRoot, 'settings-edit-alpha');
+  mkdirSync(alpha, { recursive: true });
   const h = await harness({}, {
-    workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1'] }],
+    workspaces: [{ id: 'w1', path: alpha, title: 'Alpha', sessionIds: ['s1'] }],
   }, { members: [['user', 'newcomer']] });
   await h.send('/whoami', { chat: 'newcomer', user: 'newcomer' });
   assert.match(lastReply(h), /\*\*管理员\*\*：否/);
@@ -320,13 +324,15 @@ test('administrators receive notifications for their Workspace scope only', asyn
 
 test('only administrators may list or switch Sessions; everyone else stays on their own', async () => {
   const h = await harness({}, { workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1', 's2'] }] });
-  await h.send('/sessions');
+  await h.send('/session');
+  assert.match(lastReply(h), /只有插件配置里列出的管理员/);
+  await h.send('/session s1');
   assert.match(lastReply(h), /只有插件配置里列出的管理员/);
   await h.send('/use s1');
-  assert.match(lastReply(h), /只有插件配置里列出的管理员/);
+  assert.match(lastReply(h), /命令已更新/);
   await h.send('继续自己的工作');
   assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1', 'still the personal Session');
-  const quoted = '> 引用这条消息，或发送 /use s1，可直接定位到该会话。';
+  const quoted = '> 引用（回复）这条消息即可继续该会话（定位码 s1）。';
   await h.send('看看这个', { quote: quoted });
   assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1', 'a quote cannot move a non-admin');
   assert.equal(h.journal.find('wecom.quote').at(-1).outcome, 'not-admin');
@@ -334,14 +340,16 @@ test('only administrators may list or switch Sessions; everyone else stays on th
 });
 
 test('an administrator command is refused in a group chat, whoever sends it', async () => {
+  const alpha = join(scratchRoot, 'group-refusal-alpha');
+  mkdirSync(alpha, { recursive: true });
   const h = await harness({ adminUserIds: ['root'] }, {
-    workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1'] }],
+    workspaces: [{ id: 'w1', path: alpha, title: 'Alpha', sessionIds: ['s1'] }],
   }, { members: [['user', 'root'], ['user', 'alice'], ['group', 'group-1']] });
   await h.send('大家好', { chat: 'group-1', user: 'root' });
   const created = h.ctx.creates.length;
   // The Session in a group chat is shared, so these commands are not run there
   // — not even for the administrator who would be allowed in a single chat.
-  for (const command of ['/new', '/workspaces', '/sessions', '/use 1', '/reset']) {
+  for (const command of ['/new', '/session', '/reset']) {
     await h.send(command, { chat: 'group-1', user: 'root' });
     assert.match(lastReply(h), /管理员命令只能在单聊中使用/, command);
   }
@@ -352,8 +360,13 @@ test('an administrator command is refused in a group chat, whoever sends it', as
   assert.match(lastReply(h), /需要管理员权限/);
   assert.equal(h.ctx.creates.length, created);
 
-  // In a single chat the same administrator command goes through.
+  // In a single chat the same administrator command goes through: it first
+  // asks which Workspace on a card, and the numbered fallback completes the choice.
   await h.send('/new', { chat: 'root', user: 'root' });
+  const picker = lastCard(h);
+  assert.match(picker.main_title.title, /选择 Workspace/);
+  assert.match(picker.horizontal_content_list.map(row => row.value).join('\n'), /Alpha/);
+  await h.send('/new 1', { chat: 'root', user: 'root' });
   assert.match(lastReply(h), /已创建并切换到新会话/);
   assert.equal(h.ctx.creates.length, created + 1);
   h.stop();
@@ -363,10 +376,11 @@ test('an administrator can switch Sessions, and /reset returns to their own memb
   const h = await harness({ adminUserIds: ['root'] }, {
     workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1', 's2'] }],
   }, { members: [['user', 'root']] });
-  await h.send('/sessions', { chat: 'root', user: 'root' });
-  assert.match(lastReply(h), /可切换的会话/);
-  assert.match(lastReply(h), /Alpha 任务/);
-  await h.send('/use s1', { chat: 'root', user: 'root' });
+  await h.send('/session', { chat: 'root', user: 'root' });
+  const sessionPicker = lastCard(h);
+  assert.equal(sessionPicker.main_title.title, '🗂 选择会话');
+  assert.match(sessionPicker.horizontal_content_list.map(row => row.value).join('\n'), /Alpha 任务/);
+  await h.send('/session s1', { chat: 'root', user: 'root' });
   assert.match(lastReply(h), /已切换到《Alpha 任务》/);
   await h.send('操作别人的会话', { chat: 'root', user: 'root' });
   assert.equal(h.ctx.prompts.at(-1).sessionId, 's1');
@@ -384,11 +398,11 @@ test('an administrator may quote a notice to jump to that Session; a bad quote c
   const h = await harness({ adminUserIds: ['root'] }, {
     workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1', 's2'] }],
   }, { members: [] });
-  await h.send('/use s2', { chat: 'root', user: 'root' });
+  await h.send('/session s2', { chat: 'root', user: 'root' });
   assert.match(lastReply(h), /已切换到《Beta 任务》/);
   await h.send('继续', { chat: 'root', user: 'root' });
   assert.equal(h.ctx.prompts.at(-1).sessionId, 's2');
-  await h.send('继续', { chat: 'root', user: 'root', quote: '> 发送 /use zzzzzz999999 可定位到该会话。' });
+  await h.send('继续', { chat: 'root', user: 'root', quote: '> 引用（回复）这条消息即可继续该会话（定位码 zzzzzz999999）。' });
   assert.equal(h.ctx.prompts.at(-1).sessionId, 's2', 'an unresolvable quote keeps the selection');
   assert.equal(h.journal.find('wecom.quote').at(-1).outcome, 'not-found');
   h.stop();
@@ -628,7 +642,7 @@ test('each remote approval has a fresh code; an old code cannot approve a later 
   h.stop();
 });
 
-test('every per-Session notice carries a /use token that resolves back to it', async () => {
+test('every per-Session notice carries a locator code that resolves back to it', async () => {
   const h = await harness({ adminUserIds: ['root'] }, {
     workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s2'] }],
   });
@@ -636,7 +650,8 @@ test('every per-Session notice carries a /use token that resolves back to it', a
   await h.endTurn('s2', { text: '完成' });
   const text = h.client.sends.at(-1).body.markdown.content;
   const token = extractSessionPointer(text);
-  assert.ok(token, 'the notice carries a /use hint');
+  assert.ok(token, 'the notice carries a locator code');
+  assert.match(text, /定位码/);
   assert.notEqual(token, 'session-');
   h.stop();
 });
@@ -682,7 +697,7 @@ test('an administrator cannot implicitly authorize a group chat or switch it thr
   assert.equal(h.store.get('group:group-1'), undefined);
   assert.equal(h.ctx.creates.length, 0);
   await h.authorize('group', 'group-1');
-  await h.send('群的消息', { chat: 'group-1', user: 'root', quote: '> 发送 /use s1 可定位到该会话。' });
+  await h.send('群的消息', { chat: 'group-1', user: 'root', quote: '> 引用（回复）这条消息即可继续该会话（定位码 s1）。' });
   assert.equal(h.ctx.prompts.at(-1).sessionId, 'session-created-1');
   h.stop();
 });
@@ -692,7 +707,7 @@ test('demotion or a narrower scope invalidates a prompt still awaiting its reply
     const h = await harness({ adminUserIds: ['root'] }, {
       workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1'] }],
     }, { members: [['user', 'root']] });
-    await h.send('/use s1', { chat: 'root', user: 'root' });
+    await h.send('/session s1', { chat: 'root', user: 'root' });
     let release;
     h.client.replyStream = () => new Promise(resolve => { release = resolve; });
     h.client.emit('message', frame('must not reach the foreign Session', { chat: 'root', user: 'root' }));
@@ -804,7 +819,7 @@ test('demotion discards an administrator switch instead of resurrecting it after
   const h = await harness({ adminUserIds: ['root'] }, {
     workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1'] }],
   }, { members: [['user', 'root']] });
-  await h.send('/use s1', { chat: 'root', user: 'root' });
+  await h.send('/session s1', { chat: 'root', user: 'root' });
   h.bridge.updateSettings({ ...h.settings, adminUserIds: [] });
   h.bridge.updateSettings(h.settings);
   await h.send('continue', { chat: 'root', user: 'root' });
@@ -1010,7 +1025,7 @@ test('/compact in a group chat gives the same group-specific refusal', async () 
   h.stop();
 });
 
-test('/workspaces lists every Workspace, remembers the choice, and /sessions follows it', async () => {
+test('/new and /session pick a Workspace and a Session from cards', async () => {
   // A Workspace must resolve to a real directory: `/new` creates a Session there.
   const alpha = join(scratchRoot, 'alpha');
   const beta = join(scratchRoot, 'beta');
@@ -1022,28 +1037,267 @@ test('/workspaces lists every Workspace, remembers the choice, and /sessions fol
       { id: 'w2', path: beta, title: 'Beta', sessionIds: ['s2'] },
     ],
   }, { members: [['user', 'root']] });
+  h.client.emit('authenticated');
+  const root = { chat: 'root', user: 'root' };
 
-  await h.send('/workspaces', { chat: 'root', user: 'root' });
-  assert.match(lastReply(h), /Alpha/);
-  assert.match(lastReply(h), /Beta/);
-  assert.match(lastReply(h), /\/workspaces 序号/);
+  await h.send('/new', root);
+  const newPicker = lastCard(h);
+  assert.equal(newPicker.card_type, 'button_interaction');
+  assert.match(newPicker.task_id, /^adm_/);
+  assert.match(newPicker.main_title.title, /选择 Workspace/);
+  assert.match(newPicker.main_title.desc, /共 2 个/);
+  assert.equal(h.client.replies.at(-1)?.card, newPicker, 'the card is the passive reply itself');
+  assert.equal(h.client.sends.length, 0, 'and no second message repeats the list as text');
+  const rows = newPicker.horizontal_content_list.map(row => row.value).join('\n');
+  assert.match(rows, /Alpha/);
+  assert.match(rows, /Beta/);
+  assert.equal(h.ctx.creates.length, 0, 'nothing is created before the Workspace is chosen');
 
-  await h.send('/workspaces 1', { chat: 'root', user: 'root' });
-  assert.match(lastReply(h), /默认 Workspace 已设为 Alpha/);
-  assert.equal(h.store.adminWorkspace('root'), alpha);
+  h.client.emit('event.template_card_event', cardClick(newPicker.task_id, 'opt_1', root));
+  await until(() => h.ctx.creates.length === 1
+    && h.client.sends.some(send => /已创建并切换到新会话/.test(send.body.markdown?.content ?? '')));
+  assert.equal(h.ctx.creates[0].workspaceId, 'w2', 'created in the chosen Workspace');
+  assert.equal(h.store.adminWorkspace('root'), beta, 'the last chosen Workspace is remembered');
+  assert.ok(h.client.cardUpdates.some(update => /已创建/.test(update.card.main_title.title)));
 
-  await h.send('/sessions', { chat: 'root', user: 'root' });
-  assert.match(lastReply(h), /Alpha 任务/);
-  assert.doesNotMatch(lastReply(h), /Beta 任务/, 'only the chosen Workspace is listed');
+  const sendsBefore = h.client.sends.length;
+  await h.send('/session', root);
+  const workspaceCard = lastCard(h);
+  assert.match(workspaceCard.main_title.title, /选择 Workspace/);
+  assert.match(workspaceCard.sub_title_text, /当前：/, 'the current Session is named on the card');
+  assert.match(workspaceCard.main_title.desc, /共 2 个/);
+  assert.match(
+    workspaceCard.horizontal_content_list.map(row => row.value).join('\n'),
+    /Beta（当前）/,
+    'the Workspace the current Session lives in is marked',
+  );
+  assert.equal(h.client.sends.length, sendsBefore, 'a picker never precedes its card with a text list');
+  const beforeContinuation = h.client.sends.length;
+  h.client.emit('event.template_card_event', cardClick(workspaceCard.task_id, 'opt_0', root));
+  await until(() => h.client.cards.length >= 3);
+  const sessionCard = lastCard(h);
+  assert.equal(sessionCard.card_type, 'button_interaction', 'Alpha has one Session');
+  assert.equal(sessionCard.main_title.title, '🗂 选择会话');
+  const sessionRows = sessionCard.horizontal_content_list.map(row => row.value).join('\n');
+  assert.match(sessionRows, /Alpha 任务/);
+  assert.equal(h.client.sends.at(-1).body.template_card, sessionCard, 'the Session list is one card, not text plus a card');
+  assert.ok(
+    h.client.sends.slice(beforeContinuation).every(send => send.body.template_card),
+    'the Workspace tap answers with the next card only',
+  );
+  h.client.emit('event.template_card_event', cardClick(sessionCard.task_id, 'opt_0', root));
+  await until(() => h.client.sends.some(send => /已切换到《Alpha 任务》/.test(send.body.markdown?.content ?? '')));
+  assert.ok(h.client.cardUpdates.some(update => /已切换/.test(update.card.main_title.title)));
 
+  await h.send('继续这个会话', root);
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 's1', 'the switch is what the next message uses');
+  h.stop();
+});
+
+test('a refused picker card falls back to the numbered list, and only then', async () => {
+  const alpha = join(scratchRoot, 'fallback-alpha');
+  const beta = join(scratchRoot, 'fallback-beta');
+  mkdirSync(alpha, { recursive: true });
+  mkdirSync(beta, { recursive: true });
+  const h = await harness({ adminUserIds: ['root'] }, {
+    workspaces: [
+      { id: 'w1', path: alpha, title: 'Alpha', sessionIds: [] },
+      { id: 'w2', path: beta, title: 'Beta', sessionIds: [] },
+    ],
+  }, { members: [['user', 'root']] });
+  h.client.emit('authenticated');
+  h.client.replyTemplateCard = async () => { throw new Error('errcode=42045, template card refused'); };
   await h.send('/new', { chat: 'root', user: 'root' });
-  assert.equal(h.ctx.creates.at(-1).workspaceId, 'w1', 'the new Session lands in the chosen Workspace');
+  assert.match(lastReply(h), /选择 Workspace/);
+  assert.match(lastReply(h), /1\. Alpha/);
+  assert.match(lastReply(h), /\/new 序号/);
+  assert.equal(h.client.cards.length, 0, 'the refused card is not counted as delivered');
+  assert.equal(h.journal.find('wecom.reply').at(-1).fallback, 'markdown');
+  h.stop();
+});
 
-  await h.send('/workspaces 0', { chat: 'root', user: 'root' });
-  assert.match(lastReply(h), /已取消 Workspace 限定/);
-  assert.equal(h.store.adminWorkspace('root'), '');
-  await h.send('/sessions', { chat: 'root', user: 'root' });
-  assert.match(lastReply(h), /Beta 任务/, 'an unlimited administrator sees everything again');
+test('typed /new and /session fallbacks use the numbers the cards showed', async () => {
+  const alpha = join(scratchRoot, 'typed-alpha');
+  const beta = join(scratchRoot, 'typed-beta');
+  mkdirSync(alpha, { recursive: true });
+  mkdirSync(beta, { recursive: true });
+  const h = await harness({ adminUserIds: ['root'] }, {
+    workspaces: [
+      { id: 'w1', path: alpha, title: 'Alpha', sessionIds: ['s1'] },
+      { id: 'w2', path: beta, title: 'Beta', sessionIds: ['s2'] },
+    ],
+  }, { members: [['user', 'root']] });
+  h.client.emit('authenticated');
+  const root = { chat: 'root', user: 'root' };
+
+  await h.send('/new', root);
+  await h.send('/new 1', root);
+  assert.equal(h.ctx.creates.at(-1).workspaceId, 'w1');
+
+  await h.send('/session', root);
+  await h.send('/session 2', root);
+  const sessionCard = lastCard(h);
+  assert.equal(sessionCard.main_title.title, '🗂 选择会话');
+  assert.match(sessionCard.horizontal_content_list.map(row => row.value).join('\n'), /Beta 任务/);
+  await h.send('/session s2', root);
+  assert.match(lastReply(h), /已切换到《Beta 任务》/);
+  await h.send('继续', root);
+  assert.equal(h.ctx.prompts.at(-1).sessionId, 's2');
+  h.stop();
+});
+
+test('a picker card only answers to its own administrator in their private chat', async () => {
+  const alpha = join(scratchRoot, 'authz-alpha');
+  const beta = join(scratchRoot, 'authz-beta');
+  mkdirSync(alpha, { recursive: true });
+  mkdirSync(beta, { recursive: true });
+  const h = await harness({ adminUserIds: ['root', 'other'] }, {
+    workspaces: [
+      { id: 'w1', path: alpha, title: 'Alpha', sessionIds: [] },
+      { id: 'w2', path: beta, title: 'Beta', sessionIds: [] },
+    ],
+  }, { members: [['user', 'root'], ['user', 'other'], ['user', 'alice']] });
+  h.client.emit('authenticated');
+  const root = { chat: 'root', user: 'root' };
+  await h.send('/new', root);
+  const card = lastCard(h);
+
+  // A member, and another administrator in their own private chat, can tap the
+  // forwarded card: neither may act for the administrator who asked.
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'opt_0', { chat: 'alice', user: 'alice' }));
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'opt_1', { chat: 'other', user: 'other' }));
+  await settle();
+  assert.equal(h.ctx.creates.length, 0, 'only the asking administrator decides');
+  assert.ok(h.journal.find('wecom.card.rejected').length >= 2);
+
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'opt_1', root));
+  await settle();
+  assert.equal(h.ctx.creates.length, 1);
+  assert.equal(h.ctx.creates[0].workspaceId, 'w2');
+  h.stop();
+});
+
+test('a picker card can be cancelled, and a superseded card is retired without acting', async () => {
+  const alpha = join(scratchRoot, 'cancel-alpha');
+  const beta = join(scratchRoot, 'cancel-beta');
+  mkdirSync(alpha, { recursive: true });
+  mkdirSync(beta, { recursive: true });
+  const h = await harness({ adminUserIds: ['root'] }, {
+    workspaces: [
+      { id: 'w1', path: alpha, title: 'Alpha', sessionIds: [] },
+      { id: 'w2', path: beta, title: 'Beta', sessionIds: [] },
+    ],
+  }, { members: [['user', 'root']] });
+  h.client.emit('authenticated');
+  const root = { chat: 'root', user: 'root' };
+
+  await h.send('/new', root);
+  const cancelled = lastCard(h);
+  h.client.emit('event.template_card_event', cardClick(cancelled.task_id, 'cancel', root));
+  await settle();
+  assert.equal(h.ctx.creates.length, 0, 'cancel never creates');
+  assert.ok(h.client.cardUpdates.some(update => /已取消/.test(update.card.main_title.title)));
+
+  // Asking again replaces the previous picker; its old buttons are dead.
+  await h.send('/new', root);
+  const superseded = lastCard(h);
+  await h.send('/new', root);
+  const updates = h.client.cardUpdates.length;
+  h.client.emit('event.template_card_event', cardClick(superseded.task_id, 'opt_0', root));
+  await settle();
+  assert.equal(h.ctx.creates.length, 0, 'the old card cannot create after a newer /new');
+  assert.equal(h.client.cardUpdates.length, updates + 1);
+  assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已取消/);
+  h.stop();
+});
+
+test('a routing edit retires a pending picker instead of letting it move the chat', async () => {
+  const alpha = join(scratchRoot, 'routing-alpha');
+  const beta = join(scratchRoot, 'routing-beta');
+  mkdirSync(alpha, { recursive: true });
+  mkdirSync(beta, { recursive: true });
+  const h = await harness({ adminUserIds: ['root'] }, {
+    workspaces: [
+      { id: 'w1', path: alpha, title: 'Alpha', sessionIds: [] },
+      { id: 'w2', path: beta, title: 'Beta', sessionIds: [] },
+    ],
+  }, { members: [['user', 'root']] });
+  h.client.emit('authenticated');
+  const root = { chat: 'root', user: 'root' };
+  await h.send('/new', root);
+  const card = lastCard(h);
+
+  h.bridge.resetRouting('root');
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'opt_0', root));
+  await settle();
+  assert.equal(h.ctx.creates.length, 0, 'a routing edit wins over the old card');
+  assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已取消/);
+  h.stop();
+});
+
+test('/new refuses when the notification scope covers no Workspace', async () => {
+  const alpha = join(scratchRoot, 'scopeless-alpha');
+  mkdirSync(alpha, { recursive: true });
+  const h = await harness({ adminUserIds: ['root'], adminWorkspaces: ['/somewhere/else'] }, {
+    workspaces: [{ id: 'w1', path: alpha, title: 'Alpha', sessionIds: [] }],
+  }, { members: [['user', 'root']] });
+  const root = { chat: 'root', user: 'root' };
+  await h.send('/new', root);
+  assert.match(lastReply(h), /没有可用的 Workspace/);
+  assert.match(lastReply(h), /通知范围/);
+  assert.equal(h.ctx.creates.length, 0);
+  h.stop();
+});
+
+test('a scope edit retires a pending picker instead of retrying it under new powers', async () => {
+  const alpha = join(scratchRoot, 'scope-edit-alpha');
+  const beta = join(scratchRoot, 'scope-edit-beta');
+  mkdirSync(alpha, { recursive: true });
+  mkdirSync(beta, { recursive: true });
+  const h = await harness({ adminUserIds: ['root'] }, {
+    workspaces: [
+      { id: 'w1', path: alpha, title: 'Alpha', sessionIds: [] },
+      { id: 'w2', path: beta, title: 'Beta', sessionIds: [] },
+    ],
+  }, { members: [['user', 'root']] });
+  h.client.emit('authenticated');
+  const root = { chat: 'root', user: 'root' };
+  await h.send('/new', root);
+  const card = lastCard(h);
+
+  h.bridge.updateSettings({ ...h.settings, adminWorkspaces: ['/somewhere/else'] });
+  h.client.emit('event.template_card_event', cardClick(card.task_id, 'opt_0', root));
+  await settle();
+  assert.equal(h.ctx.creates.length, 0);
+  assert.match(h.client.cardUpdates.at(-1).card.main_title.title, /已取消/);
+  h.stop();
+});
+
+test('a Workspace list longer than one card is split, and a global index picks the right Workspace', async () => {
+  const directories = Array.from({ length: 20 }, (_, index) => {
+    const path = join(scratchRoot, `split-${index}`);
+    mkdirSync(path, { recursive: true });
+    return path;
+  });
+  const h = await harness({ adminUserIds: ['root'] }, {
+    workspaces: directories.map((path, index) => ({
+      id: `w${index + 1}`, path, title: `Workspace ${index + 1}`, sessionIds: [],
+    })),
+  }, { members: [['user', 'root']] });
+  h.client.emit('authenticated');
+  const root = { chat: 'root', user: 'root' };
+  await h.send('/new', root);
+
+  const cards = h.client.cards.map(entry => entry.card);
+  assert.equal(cards.length, 2, 'nineteen options, then one');
+  assert.equal(cards[0].card_type, 'vote_interaction');
+  assert.deepEqual(cards[1].checkbox.option_list.map(option => option.id), ['opt_19']);
+
+  h.client.emit('event.template_card_event', cardSubmit(cards[1].task_id, ['opt_19'], root));
+  await settle();
+  assert.equal(h.ctx.creates.length, 1);
+  assert.equal(h.ctx.creates[0].workspaceId, 'w20');
+  assert.equal(h.store.adminWorkspace('root'), directories[19]);
   h.stop();
 });
 
@@ -1521,7 +1775,7 @@ test('「自己回答」 is one message, one person, and dies with the question 
   // no answer, and is told how to answer instead of being sent anywhere.
   h.client.emit('event.template_card_event', cardClick(card.task_id, 'other', mine));
   await settle();
-  await h.send('/sessions', mine);
+  await h.send('/session', mine);
   const prompts = h.ctx.prompts.length;
   await h.send('继续聊别的', mine);
   assert.equal(h.ctx.prompts.length, prompts, 'nothing is sent to DSH while it waits for the answer');

@@ -17,7 +17,8 @@ import type { InteractionDelivery } from '../interaction-transport.js';
 import type { Router } from '../routing.js';
 import type { SessionOperations } from '../session-ops.js';
 import type { WorkspaceService } from '../workspaces.js';
-import { parseCommand, runCommand, type CommandServices, type TargetInfo } from './commands.js';
+import { parseCommand, runCommand, createSessionForAdmin, sessionsForWorkspace, switchSessionForAdmin, type CommandServices, type TargetInfo } from './commands.js';
+import { createAdminActionRegistry } from './admin-actions.js';
 import { createSessionDirectory, type SessionDirectory } from './directory.js';
 import { byteLength, limitBytes, MAX_INBOUND_BYTES, MAX_REPLY_BYTES, extractSessionPointer } from './format.js';
 import { createReplayGuard, parseInbound, type InboundMessage } from './inbound.js';
@@ -29,8 +30,9 @@ import { createCardMemory, type CardMemo, type CardMemory } from './card-memory.
 import { parseCardEvent, questionKey } from './cards.js';
 import { createInteractionRegistry, type ArmedAnswer } from './interactions.js';
 import {
-  adminUnassignedText, approvalNotice, approvalWaitingNotice, code, interactionIgnoredText, interactionSubmittedText, promptFailedNotice, questionNotice, reviewNotice, routingChangedText,
-  sessionErrorNotice, sessionLabel, title, turnCompleteNotice, typeAnswerPrompt, unauthorizedText,
+  adminSelectionHintText, adminSettledCards, adminUnassignedText, approvalNotice, approvalWaitingNotice, code, inline, interactionIgnoredText,
+  interactionSubmittedText, newSessionText, promptFailedNotice, questionNotice, reviewNotice, routingChangedText,
+  sessionErrorNotice, sessionLabel, sessionSwitchedText, title, turnCompleteNotice, typeAnswerPrompt, unauthorizedText,
 } from './notices.js';
 import { ackSummary, createOutbox, type NoticeKind } from './outbox.js';
 import { createAccessPolicy } from './policy.js';
@@ -50,7 +52,7 @@ import { createSelectionStore } from './selection.js';
  * process started.
  */
 
-export type BridgeClient = Pick<WSClient, 'on' | 'connect' | 'disconnect' | 'removeAllListeners' | 'sendMessage' | 'replyStream' | 'updateTemplateCard'>;
+export type BridgeClient = Pick<WSClient, 'on' | 'connect' | 'disconnect' | 'removeAllListeners' | 'sendMessage' | 'replyStream' | 'replyTemplateCard' | 'updateTemplateCard'>;
 
 export interface BridgeDeps {
   readonly ctx: Pick<HostContext, 'on' | 'sessionController'>;
@@ -127,10 +129,11 @@ export function createBridge(deps: BridgeDeps): Bridge {
     allow: entry => policy.adminWorkspaceAllowed(entry.group.path),
   });
   const selection = createSelectionStore();
+  const adminActions = createAdminActionRegistry();
   const interactions = createInteractionRegistry();
   const cards = deps.cards ?? createCardMemory();
   const outbox = createOutbox({ client, journal, log, status, allow: async notice => {
-    if (!notice.sessionId) return notice.kind !== 'admin' || policy.isAdmin(notice.chat);
+    if (!notice.sessionId) return (notice.kind !== 'admin' && notice.kind !== 'admin-card') || policy.isAdmin(notice.chat);
     const admin = policy.isAdmin(notice.chat);
     if (notice.interactionNonce && !interactions.isPending(notice.interactionNonce)) return false;
     // Approval recipients are scoped administrators only, never a bound member.
@@ -246,12 +249,50 @@ export function createBridge(deps: BridgeDeps): Bridge {
     }
   }
 
+  /**
+   * Answer a command with picker cards, one message instead of a text list
+   * followed by a card: the first page is the passive reply itself, and only a
+   * list longer than one card needs more messages. `text` is the numbered
+   * fallback — it is sent only if WeCom refuses the card.
+   */
+  async function replyCards(message: InboundMessage, round: Round, text: string, cards: readonly TemplateCard[]): Promise<void> {
+    if (closed) return;
+    const content = limitBytes(text, MAX_REPLY_BYTES);
+    const [first, ...restCards] = cards;
+    if (!first) { await reply(message, round, content); return; }
+    const streamId = `stream_${randomUUID()}`;
+    const startedAt = Date.now();
+    const meta = { roundId: round.id, chatId: message.chat, userId: message.user, reqId: message.reqId };
+    try {
+      const ack = await client.replyTemplateCard(message.frame, first);
+      rounds.reply(round, `（选择卡片：${first.main_title?.title ?? '选择'}）`);
+      journal.write({ event: 'wecom.reply', ...meta, request: { templateCard: first }, response: ackSummary(ack), durationMs: Date.now() - startedAt });
+    } catch (error) {
+      status.count('failures');
+      log.warn('WeCom card reply failed; sending the numbered list instead');
+      journal.write({ event: 'wecom.reply', level: 'warn', ...meta, request: { templateCard: first }, error, durationMs: Date.now() - startedAt });
+      rounds.reply(round, content);
+      try {
+        const ack = await client.replyStream(message.frame, streamId, content, true);
+        journal.write({ event: 'wecom.reply', ...meta, request: { streamId, content, finish: true }, response: ackSummary(ack), fallback: 'markdown', durationMs: Date.now() - startedAt });
+      } catch (again) {
+        status.count('failures');
+        journal.write({ event: 'wecom.reply', level: 'warn', ...meta, request: { streamId, content, finish: true }, error: again, durationMs: Date.now() - startedAt });
+      }
+      return;
+    }
+    // A list that needs several cards: the reply carried the first, the rest
+    // follow as ordinary card messages.
+    for (const card of restCards) notify([message.chat], content, 'admin-card', undefined, undefined, card);
+  }
+
   const commandServices: CommandServices = {
     // A getter, not the object: `updateSettings` replaces `policy`, and a
     // command must see the administrator list the operator just saved. Holding
     // the original object here made a promotion wait for a plugin restart.
     get policy() { return policy; },
     directory, selection, interactions, journal,
+    adminActions,
     sessionController: ctx.sessionController,
     ops: deps.ops,
     workspaces: deps.workspaces,
@@ -334,7 +375,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
 
   /**
    * Quoting (replying to) one of this Bot's own per-Session notices carries
-   * that notice's embedded `/use <token>` hint back on `quotedText`, even
+   * that notice's embedded locator code (`定位码`) back on `quotedText`, even
    * though the WeCom callback never echoes the quoted message's id. Only an
    * administrator may act on it: for everyone else the message keeps going to
    * their own Session. An unresolved or missing quote changes nothing.
@@ -481,7 +522,11 @@ export function createBridge(deps: BridgeDeps): Bridge {
     }
     if (command) {
       round.command = command.name;
-      await runCommand(commandServices, { message, round, reply: text => reply(message, round, text) }, command);
+      await runCommand(commandServices, {
+        message, round,
+        reply: text => reply(message, round, text),
+        replyCards: (text, cards) => replyCards(message, round, text, cards),
+      }, command);
       rounds.complete(round, 'command');
       return;
     }
@@ -614,6 +659,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       return;
     }
     if (event.kind === 'question') return onQuestionCardEvent(frame, event, meta);
+    if (event.kind === 'admin') return onAdminCardEvent(frame, event, meta);
     const state = interactions.findApproval(event.nonce);
     const admin = settings.adminUserIds.includes(event.userId);
     // A card is replaced for every recipient of that chat, so a tap by anybody
@@ -798,6 +844,150 @@ export function createBridge(deps: BridgeDeps): Bridge {
     await settleCard(frame, event.chatId, meta, questionSettledCards(outcome, plan.summary, event.taskId, cards.recall(event.taskId)));
   }
 
+  /**
+   * An administrator answering a `/new` or `/session` picker card.
+   *
+   * The card's `task_id` carries the nonce of one page of a group, and the
+   * group remembers the choices. A tap is honoured only from the same
+   * administrator in the same private chat; a forwarded copy, a demoted
+   * administrator or a different chat changes nothing. A card that outlived
+   * its group is still replaced by a dead card, so no tap is ever silent.
+   */
+  async function onAdminCardEvent(
+    frame: WsFrame,
+    event: ReturnType<typeof parseCardEvent>,
+    meta: Record<string, unknown>,
+  ): Promise<void> {
+    if (closed) return;
+    const ticket = generation;
+    const tell = (text: string): void => notify([event.chatId], text, 'admin-card');
+    const entitled = policy.isAdmin(event.userId) && event.chatId === event.userId;
+    const found = adminActions.find(event.nonce);
+
+    if (!found) {
+      if (!entitled) {
+        journal.write({ event: 'wecom.card.rejected', ...meta, reason: 'not-the-asking-administrator' });
+        return;
+      }
+      const ended = adminActions.outcome(event.nonce);
+      if (!ended) {
+        journal.write({ event: 'wecom.card.stale', ...meta });
+        await settleCard(frame, event.chatId, meta, adminSettledCards('expired', undefined, event.taskId));
+        return;
+      }
+      if (ended.group.chat !== event.chatId || ended.group.user !== event.userId) {
+        journal.write({ event: 'wecom.card.rejected', ...meta, reason: 'not-the-asking-chat' });
+        return;
+      }
+      journal.write({ event: 'wecom.card.stale', ...meta, outcome: ended.outcome });
+      await settleCard(frame, event.chatId, meta, adminSettledCards(ended.outcome, ended.summary, event.taskId));
+      return;
+    }
+
+    const { group } = found;
+    if (!entitled || group.chat !== event.chatId || group.user !== event.userId) {
+      journal.write({ event: 'wecom.card.rejected', ...meta, reason: 'not-the-asking-administrator' });
+      return;
+    }
+    // A routing edit also invalidates the choice: the next message must not
+    // land in a Session chosen against the old membership.
+    const routing = routingGenerations.get(group.chat) ?? 0;
+    const current = () => !closed && generation === ticket && (routingGenerations.get(group.chat) ?? 0) === routing;
+
+    if (event.action === 'cancel') {
+      if (!adminActions.begin(event.nonce)) {
+        journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'already-submitting' });
+        return;
+      }
+      adminActions.complete(group.id, 'cancelled');
+      tell(title('↩️', '已取消本次选择'));
+      await settleCard(frame, event.chatId, meta, adminSettledCards('cancelled', undefined, event.taskId));
+      return;
+    }
+
+    const options = group.kind === 'workspace' ? group.workspaces : group.sessions;
+    let index: number | undefined;
+    if (event.action === 'option') {
+      index = event.option;
+    } else if (event.action === 'submit') {
+      if (event.selected === undefined) { tell(adminSelectionHintText('unreadable')); return; }
+      if (!event.selected.length) { tell(adminSelectionHintText('none')); return; }
+      if (event.selected.length > 1) { tell(adminSelectionHintText('many')); return; }
+      index = event.selected[0];
+    } else {
+      journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'unknown-button' });
+      return;
+    }
+    if (index === undefined || !Number.isInteger(index) || index < 0 || index >= options.length) {
+      tell(adminSelectionHintText('unreadable'));
+      return;
+    }
+    if (!adminActions.begin(event.nonce)) {
+      journal.write({ event: 'wecom.card.ignored', level: 'debug', ...meta, reason: 'already-submitting' });
+      return;
+    }
+
+    if (group.kind === 'workspace') {
+      const picked = group.workspaces[index]!;
+      if (group.purpose === 'new') {
+        try {
+          const created = await createSessionForAdmin(commandServices, {
+            chat: group.chat, user: group.user, workspace: picked.path,
+          }, current);
+          if (!created || !current()) { adminActions.release(event.nonce); return; }
+          adminActions.complete(group.id, 'created', picked.title);
+          tell(newSessionText(created.workspaceTitle, created.sessionId));
+          await settleCard(frame, event.chatId, meta, adminSettledCards('created', picked.title, event.taskId));
+        } catch (error) {
+          adminActions.release(event.nonce);
+          journal.write({ event: 'wecom.admin.create.failed', level: 'warn', ...meta, error });
+          if (current()) {
+            tell([title('⚠️', '新建会话失败'), '', inline(error instanceof Error ? error.message : String(error), 300)].join('\n'));
+          }
+        }
+        return;
+      }
+      try {
+        const stage = await sessionsForWorkspace(commandServices, {
+          chat: group.chat, user: group.user, workspace: picked, groupId: group.id,
+          ...(group.currentSessionId ? { currentId: group.currentSessionId } : {}),
+        }, current);
+        if (!stage || !current()) return;
+        if (!stage.cards.length) {
+          tell(stage.text);
+        } else {
+          for (const card of stage.cards) {
+            notify([event.chatId], stage.text, 'admin-card', undefined, undefined, card);
+          }
+        }
+        await settleCard(frame, event.chatId, meta, adminSettledCards('selected', picked.title, event.taskId));
+      } catch (error) {
+        adminActions.release(event.nonce);
+        journal.write({ event: 'wecom.admin.sessions.failed', level: 'warn', ...meta, error });
+        if (current()) {
+          tell([title('⚠️', '读取 DSH 会话列表失败'), '', '请稍后重试，或到 DSH 页面查看。'].join('\n'));
+        }
+      }
+      return;
+    }
+
+    const picked = group.sessions[index]!;
+    const switched = await switchSessionForAdmin(commandServices, {
+      chat: group.chat, user: group.user, sessionId: picked.sessionId,
+    }, current);
+    if (!switched) {
+      if (!current()) return;
+      journal.write({ event: 'wecom.admin.switch.refused', ...meta, sessionId: picked.sessionId });
+      adminActions.complete(group.id, 'expired');
+      tell(title('⚠️', '该会话已不可用') + '\n> 它可能已归档，或不在当前管理员的 Workspace 范围内。');
+      await settleCard(frame, event.chatId, meta, adminSettledCards('expired', undefined, event.taskId));
+      return;
+    }
+    adminActions.complete(group.id, 'switched', picked.title ?? picked.sessionId);
+    tell(sessionSwitchedText(picked.title, picked.workspace, picked.sessionId));
+    await settleCard(frame, event.chatId, meta, adminSettledCards('switched', picked.title ?? picked.sessionId, event.taskId));
+  }
+
   async function onApproval(request: ApprovalRequest, next: () => Promise<ApprovalOutcome>, delivery?: InteractionDelivery): Promise<ApprovalOutcome> {
     const sessionId = request.agent?.id;
     if (closed || !sessionId) return next();
@@ -899,6 +1089,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
       generation++;
       lifetime.abort();
       interactions.cancelAll();
+      adminActions.cancelAll();
       outbox.clear();
       offQuestion?.();
       offApproval?.();
@@ -930,6 +1121,9 @@ export function createBridge(deps: BridgeDeps): Bridge {
         // An old nonce must not survive an approval-policy change. Questions
         // keep their original deadline; a new wait reads the new timeout.
         for (const pending of interactions.approvals.values()) pending.finish(null);
+        // Pending administrator pickers belong to the old scope/administrator
+        // list: their cards are retired rather than retried against new powers.
+        adminActions.cancelAll();
       }
       settings = next;
       policy = policyFor();
@@ -937,6 +1131,7 @@ export function createBridge(deps: BridgeDeps): Bridge {
     resetRouting(chat) {
       routingGenerations.set(chat, (routingGenerations.get(chat) ?? 0) + 1);
       selection.clearChat(chat);
+      adminActions.clearChat(chat);
     },
     notify(chat, text, kind) {
       if (closed) return;

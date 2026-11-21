@@ -1,18 +1,20 @@
+import type { TemplateCard } from '@wecom/aibot-node-sdk';
 import type { BindingRecord, GroupRecord, WorkspaceOption } from '../../shared/protocol.js';
 import type { SessionController } from '../dsh.js';
 import type { Journal } from '../journal.js';
 import type { Round } from '../rounds.js';
 import type { SessionOperations } from '../session-ops.js';
 import type { WorkspaceService } from '../workspaces.js';
-import type { SessionDirectory } from './directory.js';
+import { PICKER_LIST_LIMIT, type AdminActionRegistry } from './admin-actions.js';
+import type { OperableGroup, ResolveResult, SessionDirectory } from './directory.js';
 import { formatContext, shortId } from './format.js';
 import type { InboundMessage } from './inbound.js';
 import { parseAnswer, type InteractionRegistry } from './interactions.js';
 import {
-  adminOnlyText, adminPrivateOnlyText, adminUnassignedText, code, compactedText, deleteWarningText, deletedText, field,
-  groupSessionRefusalText, HELP_TEXT, inline,
-  newSessionText, noWorkspaceText, nothingToCompactText, sessionLabel, sessionListText, sessionRef,
-  interactionIgnoredText, interactionSubmittedText, questionAccessRefusalText, title, workspaceListText,
+  adminOnlyText, adminPrivateOnlyText, adminUnassignedText, code, compactedText, currentSessionText, deleteWarningText, deletedText, field,
+  groupSessionRefusalText, HELP_TEXT, inline, interactionIgnoredText, interactionSubmittedText, newSessionText, nothingToCompactText,
+  pickerSummaryText, questionAccessRefusalText, retiredCommandText, sessionLabel, sessionPickerCard, sessionPickerText, sessionRef,
+  sessionSwitchedText, title, workspacePickerCard, workspacePickerText,
 } from './notices.js';
 import type { AccessPolicy } from './policy.js';
 import { sessionTitleFor } from '../session-title.js';
@@ -55,7 +57,7 @@ export interface TargetInfo {
   readonly switched: boolean;
 }
 
-/** The administrator preference the Bot itself writes (`/workspaces`). */
+/** The administrator preference the Bot itself writes (`/new`). */
 export interface AdminWorkspaceStore {
   adminWorkspace(user: string): string;
   setAdminWorkspace(user: string, path: string): Promise<void>;
@@ -72,6 +74,8 @@ export interface CommandServices {
   readonly directory: SessionDirectory;
   readonly selection: SelectionStore;
   readonly interactions: InteractionRegistry;
+  /** Pending `/new` and `/session` picker cards, answered from WeCom. */
+  readonly adminActions: AdminActionRegistry;
   readonly sessionController: SessionController;
   readonly journal: Journal;
   /** DSH operations the Bot exposes: archive, compact, create. */
@@ -91,6 +95,12 @@ export interface CommandScope {
   readonly message: InboundMessage;
   readonly round: Round;
   reply(text: string): Promise<void>;
+  /**
+   * Answer the command with picker card(s): the first page is the passive
+   * reply itself (one WeCom message), further pages follow proactively. `text`
+   * is the numbered fallback, sent only if the card cannot be delivered.
+   */
+  replyCards(text: string, cards: readonly TemplateCard[]): Promise<void>;
 }
 
 const BINDING_LABEL = { user: '个人', group: '群聊' } as const;
@@ -101,9 +111,7 @@ const BINDING_LABEL = { user: '个人', group: '群聊' } as const;
  * administrator: the Session there is shared, and it must not be created,
  * switched or re-pointed — or its tool calls approved — from the group.
  */
-const ADMIN_ONLY_COMMANDS = new Set([
-  'new', 'workspaces', 'ws', 'sessions', 'list', 'ls', 'use', 'reset', 'approve', 'deny',
-]);
+const ADMIN_ONLY_COMMANDS = new Set(['new', 'session', 'reset', 'approve', 'deny']);
 
 /**
  * `**🏷 一句话结论**` plus an optional explanation line — the shape every
@@ -135,6 +143,214 @@ async function workspaceTitle(services: CommandServices, path: string): Promise<
   }
   const listed = services.workspaces.list().find(workspace => workspace.path === path);
   return listed?.title ?? path;
+}
+
+/** Workspaces the administrator's notification/operation scope actually covers. */
+function allowedWorkspaces(services: CommandServices): WorkspaceOption[] {
+  return services.workspaces.list().filter(workspace => services.policy.adminWorkspaceAllowed(workspace.path));
+}
+
+/**
+ * Create a Session in a Workspace and make it the administrator's current one.
+ *
+ * The caller passes `current()`: if an operator edit replaced the bridge, or a
+ * routing change invalidated this chat while DSH was creating the Session, the
+ * new Session must not become a switch. `undefined` says exactly that.
+ */
+export async function createSessionForAdmin(
+  services: CommandServices,
+  input: { readonly chat: string; readonly user: string; readonly workspace: string; readonly roundId?: string },
+  current: () => boolean = () => true,
+): Promise<{ readonly sessionId: string; readonly workspaceTitle: string } | undefined> {
+  const created = await services.ops.create({ workspace: input.workspace, title: sessionTitleFor(input.user) });
+  if (!current()) return undefined;
+  services.selection.set(input.chat, input.user, created.sessionId);
+  try {
+    await services.adminWorkspaces.setAdminWorkspace(input.user, input.workspace);
+  } catch (error) {
+    // The Session exists and is switched; only the remembered default failed.
+    services.journal.write({
+      event: 'wecom.workspace.select', level: 'warn', chatId: input.chat,
+      userId: input.user, workspace: input.workspace, error,
+    });
+  }
+  const title = await workspaceTitle(services, input.workspace);
+  services.journal.write({
+    event: 'wecom.session.new', ...(input.roundId ? { roundId: input.roundId } : {}),
+    chatId: input.chat, userId: input.user, sessionId: created.sessionId, workspace: input.workspace,
+  });
+  return { sessionId: created.sessionId, workspaceTitle: title };
+}
+
+/**
+ * Point an administrator at one Session. Re-checks the live Workspace scope, so
+ * a card sent before a scope edit cannot move them afterwards.
+ */
+export async function switchSessionForAdmin(
+  services: CommandServices,
+  input: { readonly chat: string; readonly user: string; readonly sessionId: string; readonly roundId?: string },
+  current: () => boolean = () => true,
+): Promise<boolean> {
+  const permitted = await services.directory.permitted(input.sessionId);
+  if (!current() || !permitted) return false;
+  services.selection.set(input.chat, input.user, input.sessionId);
+  services.journal.write({
+    event: 'wecom.selection', ...(input.roundId ? { roundId: input.roundId } : {}),
+    chatId: input.chat, userId: input.user, sessionId: input.sessionId,
+  });
+  return true;
+}
+
+/**
+ * The Workspace picker for `/new` or `/session`: one card per page, with the
+ * numbered text built only as the card's fallback. No Workspace means no card —
+ * the text explains why.
+ */
+function workspacePickerStage(
+  services: CommandServices,
+  chat: string,
+  user: string,
+  purpose: 'new' | 'session',
+  workspaces: readonly WorkspaceOption[],
+  currentPath: string,
+  currentSessionId?: string,
+  summary?: string,
+): { readonly text: string; readonly cards: readonly TemplateCard[] } {
+  const text = workspacePickerText(purpose, workspaces, currentPath);
+  // The text lists at most PICKER_LIST_LIMIT rows; the cards must cover
+  // exactly the numbered rows, so a longer list is not silently selectable.
+  const shown = workspaces.slice(0, PICKER_LIST_LIMIT);
+  if (!shown.length) return { text, cards: [] };
+  const opened = services.adminActions.openWorkspace({
+    chat, user, purpose, workspaces: shown, currentPath,
+    ...(currentSessionId ? { currentSessionId } : {}),
+  });
+  const cards = opened.pages.flatMap(page => {
+    const card = workspacePickerCard(
+      opened.group.workspaces,
+      { nonce: page.nonce, offset: page.offset, total: opened.group.workspaces.length },
+      purpose,
+      { selectedPath: currentPath, ...(summary ? { summary } : {}) },
+    );
+    return card ? [card] : [];
+  });
+  return { text, cards };
+}
+
+/**
+ * The Session picker for one list of operable Sessions. Exported because a card
+ * tap loads the Sessions of the chosen Workspace and then needs the same stage
+ * the command would have used.
+ */
+export function sessionPickerStage(
+  services: CommandServices,
+  chat: string,
+  user: string,
+  groups: readonly OperableGroup[],
+  currentId: string | undefined,
+  workspaceTitleText?: string,
+  summary?: string,
+): { readonly text: string; readonly cards: readonly TemplateCard[] } {
+  const { text, sessions } = sessionPickerText(groups, currentId, workspaceTitleText ? { workspaceTitle: workspaceTitleText } : {});
+  if (!sessions.length) return { text, cards: [] };
+  const opened = services.adminActions.openSession({
+    chat, user, sessions,
+    workspaceTitle: workspaceTitleText ?? '',
+    ...(currentId ? { currentSessionId: currentId } : {}),
+  });
+  const cards = opened.pages.flatMap(page => {
+    const card = sessionPickerCard(
+      opened.group.sessions,
+      { nonce: page.nonce, offset: page.offset, total: opened.group.sessions.length },
+      currentId,
+      summary ? { summary } : {},
+    );
+    return card ? [card] : [];
+  });
+  return { text, cards };
+}
+
+/**
+ * Load the Sessions of a Workspace a card (or a typed index) just chose.
+ *
+ * The workspace group is completed as「已选择」 only once the list has loaded;
+ * a failure leaves it active so the administrator can pick another Workspace.
+ * The caller delivers the returned text/cards (passive reply in a command,
+ * proactive message from a card tap) and reports errors.
+ */
+export async function sessionsForWorkspace(
+  services: CommandServices,
+  input: {
+    readonly chat: string;
+    readonly user: string;
+    readonly workspace: WorkspaceOption;
+    readonly groupId: string;
+    readonly currentId?: string;
+  },
+  current: () => boolean,
+): Promise<{ readonly text: string; readonly cards: readonly TemplateCard[] } | undefined> {
+  const groups = await services.directory.groups({ workspacePath: input.workspace.path });
+  if (!current()) return undefined;
+  services.adminActions.complete(input.groupId, 'selected', input.workspace.title);
+  const stage = sessionPickerStage(
+    services, input.chat, input.user, groups, input.currentId, input.workspace.title,
+  );
+  return { text: stage.text, cards: stage.cards };
+}
+
+function resolveFailureText(result: Extract<ResolveResult, { readonly ok: false }>): string {
+  if (result.reason === 'ambiguous') return notice('⚠️', '匹配到多个会话', '请提供更长的会话 ID 前缀。');
+  if (result.reason === 'unavailable') return notice('⚠️', '暂时无法读取 DSH 会话列表', '请稍后重试。');
+  if (result.reason === 'forbidden') return notice('🔒', '该会话不在你的 Workspace 范围内', '请让操作者调整管理员的通知范围。');
+  if (result.hidden === 'archived') return notice('⚠️', '该会话已归档', '归档的会话不能从企业微信操作。');
+  if (result.hidden) return notice('⚠️', '该会话当前不可操作');
+  return notice('⚠️', '找不到该会话', `发送 ${code('/session')} 查看可切换的会话。`);
+}
+
+/** `/session` without a Workspace step: list the Sessions the scope covers. */
+async function showSessions(
+  services: CommandServices,
+  scope: CommandScope,
+  options: {
+    readonly scopePath?: string;
+    readonly currentId?: string;
+    readonly lead?: string;
+    readonly summaryText?: string;
+    readonly current: () => boolean;
+  },
+): Promise<void> {
+  try {
+    const groups = await services.directory.groups(options.scopePath ? { workspacePath: options.scopePath } : undefined);
+    if (!options.current()) return;
+    const title = options.scopePath ? await workspaceTitle(services, options.scopePath) : undefined;
+    if (!options.current()) return;
+    const stage = sessionPickerStage(
+      services, scope.message.chat, scope.message.user, groups, options.currentId, title, options.summaryText,
+    );
+    await scope.replyCards([options.lead, stage.text].filter(Boolean).join('\n\n'), stage.cards);
+  } catch {
+    if (options.current()) await scope.reply(notice('⚠️', '读取 DSH 会话列表失败', '请稍后重试，或到 DSH 页面查看。'));
+  }
+}
+
+/** Resolve a token by Session id prefix, then switch to it. */
+async function switchByToken(
+  services: CommandServices,
+  scope: CommandScope,
+  token: string,
+  current: () => boolean,
+): Promise<void> {
+  const result = await services.directory.resolve(token);
+  if (!current()) return;
+  if (!result.ok) { await scope.reply(resolveFailureText(result)); return; }
+  const ok = await switchSessionForAdmin(services, {
+    chat: scope.message.chat, user: scope.message.user, sessionId: result.session.sessionId, roundId: scope.round.id,
+  }, current);
+  if (!ok) {
+    if (current()) await scope.reply(notice('⚠️', '该会话已不可用', '它可能已归档，或不在当前管理员的 Workspace 范围内。'));
+    return;
+  }
+  await scope.reply(sessionSwitchedText(result.session.title, result.session.workspace, result.session.sessionId));
 }
 
 export async function runCommand(services: CommandServices, scope: CommandScope, command: ParsedCommand): Promise<void> {
@@ -184,7 +400,7 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
       lines.push(
         '',
         isAdmin
-          ? `你是本插件的管理员：可以切换会话、选择默认 Workspace，并按 Workspace 接收通知。`
+          ? `你是本插件的管理员：可以新建和切换会话、按 Workspace 接收通知。`
           : `你不是本插件的管理员：消息只会进入你自己的专属会话，发送 ${code('/delete')} 可以清空它的记忆。`,
         '',
         '分组、Workspace 与模型都可以在 DSH 的插件主页里查看和调整。',
@@ -206,7 +422,7 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
         target.sessionId
           ? bullet('会话', sessionRef(info?.title, target.sessionId))
           : bullet('会话', isAdmin && !target.binding
-            ? '尚未选择（请先新建或选择会话）' : '尚未创建（发送任意消息即会自动创建）'),
+            ? '尚未选择（请先发送 /new 新建或 /session 选择）' : '尚未创建（发送任意消息即会自动创建）'),
         ...(info?.workspace ? [bullet('Workspace', inline(info.workspace, 120))] : []),
         ...(target.sessionId ? [bullet('preset', info?.preset ? code(inline(info.preset, 60)) : 'DSH 默认')] : []),
         ...(info?.model ? [bullet('模型', code(`${info.model.provider}/${info.model.model}`))] : []),
@@ -234,117 +450,148 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
 
     case 'new': {
       if (!isAdmin) { await deny(); return; }
-      const path = preferredWorkspace(services, message.user);
-      try {
-        // `/new` only runs in a single chat (a group is refused above), so the
-        // administrator's own userid is the principal the Session belongs to.
-        const created = await services.ops.create({ workspace: path, title: sessionTitleFor(message.user) });
-        if (!current()) return;
-        selection.set(message.chat, message.user, created.sessionId);
-        const label = await workspaceTitle(services, path);
-        if (!current()) return;
-        services.journal.write({
-          event: 'wecom.session.new', roundId: scope.round.id, chatId: message.chat,
-          userId: message.user, sessionId: created.sessionId, workspace: path,
-        });
-        await reply(newSessionText(label, created.sessionId));
-      } catch (error) {
-        if (current()) await reply(notice('⚠️', '新建会话失败', inline(error instanceof Error ? error.message : String(error), 300)));
-      }
-      return;
-    }
-
-    case 'workspaces':
-    case 'ws': {
-      if (!isAdmin) { await deny(); return; }
-      const selected = preferredWorkspace(services, message.user);
-      const list: readonly WorkspaceOption[] = services.workspaces.list();
       const token = command.args[0];
-      if (!token) {
-        await reply(workspaceListText(list, selected).text);
+      const pending = services.adminActions.byChat(message.chat, message.user);
+      if (token) {
+        const index = /^\d{1,3}$/.test(token) ? Number(token) : undefined;
+        if (index === undefined || !pending || pending.kind !== 'workspace' || pending.purpose !== 'new') {
+          await reply(notice('ℹ️', '请先发送 /new', '先查看 Workspace 列表，再用 /new 序号 选择。'));
+          return;
+        }
+        const picked = pending.workspaces[index - 1];
+        if (!picked) {
+          await reply(notice('⚠️', '没有这个 Workspace', `发送 ${code('/new')} 查看序号。`));
+          return;
+        }
+        if (!services.adminActions.begin(pending.pageNonces[0]!)) {
+          await reply(notice('⏳', '正在处理上一条选择', '请稍候再试。'));
+          return;
+        }
+        try {
+          const created = await createSessionForAdmin(services, {
+            chat: message.chat, user: message.user, workspace: picked.path, roundId: scope.round.id,
+          }, current);
+          if (!created) return;
+          services.adminActions.complete(pending.id, 'created', picked.title);
+          await reply(newSessionText(created.workspaceTitle, created.sessionId));
+        } catch (error) {
+          services.adminActions.release(pending.pageNonces[0]!);
+          if (current()) await reply(notice('⚠️', '新建会话失败', inline(error instanceof Error ? error.message : String(error), 300)));
+        }
         return;
       }
-      if (!list.length) { await reply(noWorkspaceText()); return; }
-      if (token === '0' || token.toLowerCase() === 'all') {
-        await services.adminWorkspaces.setAdminWorkspace(message.user, '');
-        if (!current()) return;
-        await reply(notice('🗂', '已取消 Workspace 限定', `之后的 ${code('/sessions')} 会列出所有 Workspace 的会话，${code('/new')} 使用插件默认 Workspace。`));
+
+      const list = services.workspaces.list();
+      const available = allowedWorkspaces(services);
+      if (available.length <= 1) {
+        const path = available[0]?.path;
+        if (path === undefined && !(list.length === 0 && services.policy.adminWorkspaceAllowed(''))) {
+          await reply(notice('⚠️', '没有可用的 Workspace', '当前通知范围没有覆盖任何 Workspace；请先在插件主页的「管理员 → 通知范围」里至少勾选一个。'));
+          return;
+        }
+        try {
+          const created = await createSessionForAdmin(services, {
+            chat: message.chat, user: message.user, workspace: path ?? '', roundId: scope.round.id,
+          }, current);
+          if (!created || !current()) return;
+          await reply(newSessionText(created.workspaceTitle, created.sessionId));
+        } catch (error) {
+          if (current()) await reply(notice('⚠️', '新建会话失败', inline(error instanceof Error ? error.message : String(error), 300)));
+        }
         return;
       }
-      const index = /^\d{1,3}$/.test(token) ? Number(token) : undefined;
-      const picked = index !== undefined ? list[index - 1] : list.find(workspace => workspace.path === token);
-      if (!picked) {
-        await reply(notice('⚠️', '没有这个 Workspace', `发送 ${code('/workspaces')} 查看序号。`));
-        return;
-      }
-      await services.adminWorkspaces.setAdminWorkspace(message.user, picked.path);
+
+      const stage = workspacePickerStage(
+        services, message.chat, message.user, 'new', available, preferredWorkspace(services, message.user),
+      );
+      await scope.replyCards(stage.text, stage.cards);
+      return;
+    }
+
+    case 'session': {
+      if (!isAdmin) { await deny(); return; }
+      const target = await services.current(message);
+      const info = target.sessionId ? await directory.describe(target.sessionId) : undefined;
       if (!current()) return;
-      services.journal.write({ event: 'wecom.workspace.select', roundId: scope.round.id, chatId: message.chat, userId: message.user, workspace: picked.path });
-      await reply([
-        title('🗂', `默认 Workspace 已设为 ${inline(picked.title, 60)}`),
-        '',
-        bullet('路径', inline(picked.path, 200)),
-        '',
-        `${code('/sessions')} 只列出这个 Workspace 的会话，${code('/new')} 也在这里创建。发送 ${code('/workspaces 0')} 取消限定。`,
-      ].join('\n'));
-      return;
-    }
-
-    case 'sessions':
-    case 'list':
-    case 'ls': {
-      if (!isAdmin) { await deny(); return; }
-      const scopePath = preferredWorkspace(services, message.user);
-      try {
-        const groups = await directory.groups(scopePath ? { workspacePath: scopePath } : undefined);
-        if (!current()) return;
-        const target = await services.current(message);
-        const label = scopePath ? await workspaceTitle(services, scopePath) : undefined;
-        if (!current()) return;
-        const { text, listing } = sessionListText(groups, target.sessionId, 30, label);
-        selection.setListing(message.chat, message.user, listing);
-        await reply(text);
-      } catch {
-        if (current()) await reply(notice('⚠️', '读取 DSH 会话列表失败', '请稍后重试，或到 DSH 页面查看。'));
-      }
-      return;
-    }
-
-    case 'use': {
-      if (!isAdmin) { await deny(); return; }
+      const summary = currentSessionText(info, target.sessionId);
+      const summaryLine = pickerSummaryText(info, target.sessionId);
       const token = command.args[0];
-      if (!token) {
-        await reply(notice('ℹ️', '用法', `${code('/use 序号')} 或 ${code('/use 会话ID前缀')}；先发送 ${code('/sessions')} 查看序号。`));
+      const pending = services.adminActions.byChat(message.chat, message.user);
+
+      if (token) {
+        const index = /^\d{1,3}$/.test(token) ? Number(token) : undefined;
+        if (index !== undefined && pending?.kind === 'workspace' && pending.purpose === 'session') {
+          const picked = pending.workspaces[index - 1];
+          if (!picked) {
+            await reply(notice('⚠️', '没有这个 Workspace', `发送 ${code('/session')} 查看序号。`));
+            return;
+          }
+          if (!services.adminActions.begin(pending.pageNonces[0]!)) {
+            await reply(notice('⏳', '正在处理上一条选择', '请稍候再试。'));
+            return;
+          }
+          try {
+            const stage = await sessionsForWorkspace(services, {
+              chat: message.chat, user: message.user, workspace: picked, groupId: pending.id,
+              ...(target.sessionId ? { currentId: target.sessionId } : {}),
+            }, current);
+            if (!stage) return;
+            await scope.replyCards([summary, stage.text].join('\n\n'), stage.cards);
+          } catch {
+            services.adminActions.release(pending.pageNonces[0]!);
+            if (current()) await reply(notice('⚠️', '读取 DSH 会话列表失败', '请稍后重试，或到 DSH 页面查看。'));
+          }
+          return;
+        }
+        if (index !== undefined) {
+          const picked = pending?.kind === 'session' ? pending.sessions[index - 1] : undefined;
+          if (!picked) {
+            await reply(notice('ℹ️', '请先发送 /session', '先查看会话列表，再用 /session 序号 切换。'));
+            return;
+          }
+          if (!services.adminActions.begin(pending!.pageNonces[0]!)) {
+            await reply(notice('⏳', '正在处理上一条选择', '请稍候再试。'));
+            return;
+          }
+          const ok = await switchSessionForAdmin(services, {
+            chat: message.chat, user: message.user, sessionId: picked.sessionId, roundId: scope.round.id,
+          }, current);
+          if (!ok) {
+            services.adminActions.release(pending!.pageNonces[0]!);
+            if (current()) await reply(notice('⚠️', '该会话已不可用', '它可能已归档，或不在当前管理员的 Workspace 范围内。'));
+            return;
+          }
+          services.adminActions.complete(pending!.id, 'switched', picked.title ?? picked.sessionId);
+          await reply(sessionSwitchedText(picked.title, picked.workspace, picked.sessionId));
+          return;
+        }
+        await switchByToken(services, scope, token, current);
         return;
       }
-      const result = await directory.resolve(token, selection.listing(message.chat, message.user));
-      if (!current()) return;
-      if (!result.ok) {
-        const text = result.reason === 'ambiguous' ? notice('⚠️', '匹配到多个会话', '请提供更长的会话 ID 前缀。')
-          : result.reason === 'unavailable' ? notice('⚠️', '暂时无法读取 DSH 会话列表', '请稍后重试。')
-          : result.reason === 'forbidden' ? notice('🔒', '该会话不在你的 Workspace 范围内', '请让管理员调整管理员 Workspace 设置。')
-          : result.hidden === 'archived' ? notice('⚠️', '该会话已归档', '归档的会话不能从企业微信操作。')
-          : result.hidden ? notice('⚠️', '该会话当前不可操作')
-          : notice('⚠️', '找不到该会话', `发送 ${code('/sessions')} 查看可切换的会话。`);
-        await reply(text);
+
+      const available = allowedWorkspaces(services);
+      if (available.length >= 2) {
+        const stage = workspacePickerStage(
+          services, message.chat, message.user, 'session', available, info?.workspacePath ?? '', target.sessionId, summaryLine,
+        );
+        await scope.replyCards([summary, stage.text].join('\n\n'), stage.cards);
         return;
       }
-      selection.set(message.chat, message.user, result.session.sessionId);
-      services.journal.write({ event: 'wecom.selection', roundId: scope.round.id, chatId: message.chat, userId: message.user, sessionId: result.session.sessionId });
-      await reply([
-        title('🔄', `已切换到${sessionLabel(result.session.title)}`),
-        '',
-        bullet('Workspace', inline(result.session.workspace, 120)),
-        bullet('会话 ID', code(shortId(result.session.sessionId))),
-        '',
-        `现在直接发送消息即可继续该会话；发送 ${code('/reset')} 可以回到自己的专属会话。`,
-      ].join('\n'));
+      const scopePath = available.length === 1 ? available[0]!.path : undefined;
+      await showSessions(services, scope, {
+        ...(scopePath ? { scopePath } : {}),
+        ...(target.sessionId ? { currentId: target.sessionId } : {}),
+        lead: summary,
+        summaryText: summaryLine,
+        current,
+      });
       return;
     }
 
     case 'reset': {
       if (!isAdmin) { await deny(); return; }
       selection.clear(message.chat, message.user);
+      services.adminActions.clearChat(message.chat);
       if (!current()) return;
       const target = await services.current(message);
       if (!target.sessionId) {
@@ -496,6 +743,15 @@ export async function runCommand(services: CommandServices, scope: CommandScope,
           : title(outcome === 'allowed-once' ? '✅' : '🚫', outcome === 'allowed-once' ? '已允许本次工具调用' : '已拒绝本次工具调用'));
       return;
     }
+
+    case 'workspaces':
+    case 'ws':
+    case 'sessions':
+    case 'list':
+    case 'ls':
+    case 'use':
+      await reply(retiredCommandText());
+      return;
 
     default:
       await reply(`${title('❓', '未知命令')} · 发送 ${code('/help')} 查看可用命令。`);

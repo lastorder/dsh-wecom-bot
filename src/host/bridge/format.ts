@@ -50,7 +50,7 @@ function splitSessionId(id: string): { readonly prefix: string; readonly rest: s
     : { prefix: '', rest: id };
 }
 
-/** A short, ellipsis-trimmed fragment for display (`/sessions` rows). Not
+/** A short, ellipsis-trimmed fragment for display (`/session` rows). Not
  * guaranteed to be a valid {@link SessionDirectory.resolve} prefix. */
 export function shortId(id: string): string {
   const { prefix, rest } = splitSessionId(id);
@@ -59,7 +59,7 @@ export function shortId(id: string): string {
 
 /** A plain (no ellipsis) Session id prefix long enough to resolve uniquely
  * through {@link SessionDirectory.resolve} (≥ 6 chars past a shared marker) —
- * safe to paste after `/use`, and what {@link extractSessionPointer} looks
+ * safe to paste after `/session`, and what {@link extractSessionPointer} looks
  * for inside a WeCom "quote" (reply-to) reference. */
 export function sessionToken(id: string, visibleChars = 12): string {
   const { prefix, rest } = splitSessionId(id);
@@ -69,7 +69,9 @@ export function sessionToken(id: string, visibleChars = 12): string {
 // Session ids use only ASCII letters, digits, "-" and "_"; the class below
 // stops at the first other character (Chinese punctuation included — `\S`
 // alone would swallow it, since it matches any non-whitespace character).
-const SESSION_POINTER_RE = /\/use\s+([\w-]{1,80})/;
+// The legacy `/use` form is still parsed: notices sent before the rename stay
+// quotable across an upgrade, even though `/use` itself is retired.
+const SESSION_POINTER_RE = /(?:定位码|\/use)\s+([\w-]{1,80})/;
 
 /** Recovers the {@link sessionToken} embedded in a notice's "quote this
  * message to jump back here" hint, from the quoted text WeCom echoes back

@@ -7,7 +7,7 @@ import { IconChevronRight, IconPlus } from './icons.tsx';
 import { Dialog, Editor, FactRow, FormFooter, Notice, PersonButton, PersonDialog, Section, Select } from './ui.tsx';
 
 /**
- * 管理员: who may switch Sessions (/sessions, /use, /new, /workspaces), approve
+ * 管理员: who may create and switch Sessions (/new, /session), approve
  * tool calls in a private chat, and receive notices from the Workspaces in
  * scope. The list and the scope are the store's settings block, applied live
  * without a reconnect, so every edit here is written on the click — there is
@@ -57,7 +57,7 @@ export function AdminSection({ state, disabled, onChanged }: {
       id="admins"
       title="管理员"
       count={draft.adminUserIds.length ? `${draft.adminUserIds.length} 人` : undefined}
-      description="可以在单聊中切换会话（/sessions、/use、/new、/workspaces）、审批工具调用，并接收通知范围内所有会话的通知。管理员无需加入分组。"
+      description="可以在单聊中新建或切换会话（/new、/session）、审批工具调用，并接收通知范围内所有会话的通知。管理员无需加入分组。"
       actions={
         <Button variant="outline" size="sm" icon={<IconPlus size={14} />} disabled={busy} aria-label="添加管理员" onClick={() => setPicking(true)}>
           添加

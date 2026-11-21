@@ -27,8 +27,8 @@ import { uniqueIds } from './config.js';
  *   - the operator notes (备注), keyed by person rather than by membership, so a
  *     note survives being moved between groups, being removed, and belonging to
  *     no group at all (an administrator);
- *   - each administrator's own preference: the Workspace their `/sessions` and
- *     `/new` commands default to, written by the Bot itself.
+ *   - each administrator's own preference: the Workspace their `/new` command
+ *     last created a Session in, written by the Bot itself.
  *
  * Everything here is written through this one module — the settings page posts
  * ops, and the Bot writes its own preferences — so a write is serialized and

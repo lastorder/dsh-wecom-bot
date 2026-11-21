@@ -16,6 +16,8 @@ export const APPROVE_BUTTON = 'approve';
 export const DENY_BUTTON = 'deny';
 /** The only button left on a settled card: nothing happens when tapped. */
 export const SETTLED_BUTTON = 'settled';
+/** The button that drops an administrator's picker card without choosing. */
+export const CANCEL_BUTTON = 'cancel';
 
 /** Option buttons of a question card are `opt_<0-based index>`. */
 const OPTION_PREFIX = 'opt_';
@@ -37,6 +39,8 @@ export const CHECKBOX_KEY = 'pick';
 
 const TASK_PREFIX = 'apv_';
 const QUESTION_PREFIX = 'qst_';
+/** The `task_id` prefix of an administrator's Workspace/Session picker card. */
+const ADMIN_PREFIX = 'adm_';
 
 /**
  * WeCom echoes `task_id` on every click, so the nonce travels with the card.
@@ -50,16 +54,21 @@ export function questionTaskId(nonce: string): string {
   return `${QUESTION_PREFIX}${nonce}`;
 }
 
+/** A `task_id` for an administrator's picker card; only that administrator taps it. */
+export function adminTaskId(nonce: string): string {
+  return `${ADMIN_PREFIX}${nonce}`;
+}
+
 export function optionButton(index: number): string {
   return `${OPTION_PREFIX}${index}`;
 }
 
 export interface CardEvent {
   /** Which request the card belongs to; undefined for a card this plugin did not send. */
-  readonly kind?: 'approval' | 'question';
+  readonly kind?: 'approval' | 'question' | 'admin';
   /** Which button was tapped; undefined for a card this plugin did not send. */
-  readonly action?: 'approve' | 'deny' | 'option' | 'submit' | 'other';
-  /** For a question card, the 0-based index of the tapped option. */
+  readonly action?: 'approve' | 'deny' | 'option' | 'submit' | 'other' | 'cancel';
+  /** For a question or administrator card, the 0-based index of the tapped option. */
   readonly option?: number;
   /**
    * For a checkbox card's submit: the 0-based options ticked. Undefined when the
@@ -101,10 +110,17 @@ export function parseCardEvent(frame: WsFrame | undefined): CardEvent {
   const userId = typeof body.from?.userid === 'string' ? body.from.userid : typeof body.userid === 'string' ? body.userid : '';
   const chatId = typeof body.chatid === 'string' ? body.chatid : userId;
   const id = typeof taskId === 'string' ? taskId : '';
-  const kind = id.startsWith(TASK_PREFIX) ? 'approval' : id.startsWith(QUESTION_PREFIX) ? 'question' : undefined;
+  const kind = id.startsWith(TASK_PREFIX) ? 'approval'
+    : id.startsWith(QUESTION_PREFIX) ? 'question'
+      : id.startsWith(ADMIN_PREFIX) ? 'admin'
+        : undefined;
   // `<prefix><nonce>` for the first chat, `<prefix><nonce>_<n>` for the others (see `notify`);
   // a nonce never contains an underscore.
-  const nonce = id.slice(kind === 'approval' ? TASK_PREFIX.length : kind === 'question' ? QUESTION_PREFIX.length : id.length).split('_')[0]!;
+  const prefixLength = kind === 'approval' ? TASK_PREFIX.length
+    : kind === 'question' ? QUESTION_PREFIX.length
+      : kind === 'admin' ? ADMIN_PREFIX.length
+        : id.length;
+  const nonce = id.slice(prefixLength).split('_')[0]!;
   // A button only means something on the kind of card that carries it.
   let action: CardEvent['action'];
   let option: number | undefined;
@@ -112,18 +128,19 @@ export function parseCardEvent(frame: WsFrame | undefined): CardEvent {
   let chosen: Record<string, number | typeof OTHER_ID | undefined> | undefined;
   let other = false;
   if (kind === 'approval') action = key === APPROVE_BUTTON ? 'approve' : key === DENY_BUTTON ? 'deny' : undefined;
-  if (kind === 'question' && typeof key === 'string' && /^opt_\d{1,2}$/.test(key)) {
+  if ((kind === 'question' || kind === 'admin') && typeof key === 'string' && /^opt_\d{1,2}$/.test(key)) {
     action = 'option';
     option = Number(key.slice(OPTION_PREFIX.length));
   }
   if (kind === 'question' && key === OTHER_ID) action = 'other';
-  if (kind === 'question' && key === SUBMIT_BUTTON) {
+  if ((kind === 'question' || kind === 'admin') && key === SUBMIT_BUTTON) {
     action = 'submit';
     const items = card.selected_items ?? event.selected_items;
     selected = selectedOptions(items);
     chosen = chosenOptions(items);
     other = tickedOther(items);
   }
+  if (kind === 'admin' && key === CANCEL_BUTTON) action = 'cancel';
   return { ...(kind ? { kind } : {}), ...(action ? { action } : {}), ...(option !== undefined ? { option } : {}), ...(selected ? { selected } : {}), ...(chosen ? { chosen } : {}), ...(other ? { other } : {}), nonce, taskId: id, userId, chatId };
 }
 

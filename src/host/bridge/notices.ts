@@ -2,11 +2,12 @@ import type { TemplateCard } from '@wecom/aibot-node-sdk';
 import type { ApprovalRequest, Question, QuestionAnswerItem } from '../dsh.js';
 import type { CardClosure, CardMemo, CardRow } from './card-memory.js';
 import type { TurnSummary } from '../turns.js';
-import type { OperableGroup } from './directory.js';
+import type { OperableGroup, OperableSession, SessionDescription } from './directory.js';
 import type { WorkspaceOption } from '../../shared/protocol.js';
-import { APPROVE_BUTTON, DENY_BUTTON, CHECKBOX_KEY, MAX_CARD_BUTTONS, MAX_CHECKBOX_OPTIONS, MAX_SELECT_OPTIONS, MAX_SELECT_QUESTIONS, OTHER_ID, PLACEHOLDER_OPTION, SETTLED_BUTTON, SUBMIT_BUTTON, approvalTaskId, optionButton, questionKey, questionTaskId } from './cards.js';
+import { ADMIN_CARD_TTL_MS, PICKER_BUTTON_LIMIT, PICKER_LIST_LIMIT, PICKER_PAGE_SIZE, pickerPages, type AdminCardOutcome } from './admin-actions.js';
+import { APPROVE_BUTTON, DENY_BUTTON, CHECKBOX_KEY, CANCEL_BUTTON, MAX_CARD_BUTTONS, MAX_CHECKBOX_OPTIONS, MAX_SELECT_OPTIONS, MAX_SELECT_QUESTIONS, OTHER_ID, PLACEHOLDER_OPTION, SETTLED_BUTTON, SUBMIT_BUTTON, adminTaskId, approvalTaskId, optionButton, questionKey, questionTaskId } from './cards.js';
 import {
-  byteLength, displayPath, displayTitle, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, sessionToken, shortId,
+  byteLength, displayPath, displayTitle, formatContext, formatDuration, limitBytes, MAX_NOTICE_BYTES, oneLine, sessionToken, shortId,
 } from './format.js';
 
 /**
@@ -89,13 +90,14 @@ export function sessionRef(title: string | null | undefined, sessionId: string):
 
 /**
  * Appended to every per-Session notice: quoting (reply-to) the message in
- * WeCom, or typing `/use` with this token, jumps straight to that Session —
- * overriding whatever was selected before. See
- * {@link extractSessionPointer} in `format.ts` for the matching parse: the
- * token stays outside any inline-code span so the parser always sees it.
+ * WeCom jumps straight to that Session — overriding whatever was selected
+ * before. See {@link extractSessionPointer} in `format.ts` for the matching
+ * parse: the locator code stays outside any inline-code span so the parser
+ * always sees it. It is a fact on the message, never an instruction to type a
+ * command (`/use` no longer exists).
  */
 export function quotePointer(sessionId: string): string {
-  return `> 引用（回复）这条消息，或发送 /use ${sessionToken(sessionId)}，之后直接发消息即可继续这个会话。`;
+  return `> 引用（回复）这条消息，之后直接发消息即可继续这个会话（定位码 ${sessionToken(sessionId)}）。`;
 }
 
 export const HELP_TEXT = [
@@ -115,14 +117,13 @@ export const HELP_TEXT = [
   '- **/help** — 显示这份说明',
   '',
   bold('🔗 引用定位'),
-  '引用（回复）我发出的某条通知，之后的消息就会继续那条通知所属的会话。',
+  '引用（回复）我发出的某条通知，之后的消息就会继续那条通知所属的会话；定位码写在通知末尾。',
   '',
   bold('🔒 管理员命令'),
   '只有插件配置中列出的管理员可以使用，并且只能在单聊里发送：群聊里的会话是所有人共用的，这些命令不会在群里执行。',
-  '- **/new** — 在默认 Workspace 中新建一个会话并切换过去',
-  '- **/workspaces** — 查看 DSH 的 Workspace 列表，并选择你的默认 Workspace',
-  '- **/sessions** — 按 Workspace 列出可切换的会话',
-  `- **/use** — 切换要操作的会话：${code('/use 序号')} 或 ${code('/use 会话ID前缀')}`,
+  '- **/new** — 新建会话：先在卡片上选择 Workspace',
+  '- **/session** — 查看当前会话，并用卡片选择 Workspace 与会话进行切换',
+  `- **/session 序号** — 在最近一次列表中选择；也可以发 ${code('/session 会话ID前缀')}`,
   '- **/reset** — 放弃切换，回到自己的专属会话',
 ].join('\n');
 
@@ -182,7 +183,7 @@ export function adminUnassignedText(): string {
   return [
     title('ℹ️', '尚未加入分组或选择会话'),
     '> 管理员权限不会自动把你加入默认分组。',
-    `请先发送 ${code('/new')} 新建会话，或发送 ${code('/sessions')} 查看并选择会话；也可以在插件主页把自己加入指定分组。`,
+    `请先发送 ${code('/new')} 新建会话，或发送 ${code('/session')} 查看并选择会话；也可以在插件主页把自己加入指定分组。`,
   ].join('\n');
 }
 
@@ -235,39 +236,52 @@ export function adminGrantedNotice(): string {
     '> 管理员命令现在可以使用；工具调用审批通知也会发到你的单聊。',
     '管理员权限不会自动把你加入任何分组；未选择会话时，请先新建或选择一个会话。',
     '',
-    `- ${field('命令', `${code('/new')} 新建会话，${code('/sessions')} 列出会话，${code('/workspaces')} 选择默认 Workspace`)}`,
+    `- ${field('命令', `${code('/new')} 新建会话，${code('/session')} 查看并切换会话`)}`,
     '- **注意**：管理员命令只能在单聊里发送。',
     `> 回复 ${code('/help')} 查看完整说明。`,
   ].join('\n');
 }
 
-/** `/workspaces` reply: the DSH Workspace list and the operator's choice. */
-export function workspaceListText(workspaces: readonly WorkspaceOption[], selected: string): { text: string; listing: string[] } {
-  const listing = workspaces.map(workspace => workspace.path);
+/**
+ * The text form of an administrator's Workspace picker: the fallback when the
+ * card cannot be sent, and the source of the numbers `/new 序号` and
+ * `/session 序号` use. The card already carries every choice, so this is never
+ * sent alongside it.
+ */
+export function workspacePickerText(
+  purpose: 'new' | 'session',
+  workspaces: readonly WorkspaceOption[],
+  selected: string,
+): string {
+  const header = purpose === 'new'
+    ? `${title('🆕', '新建会话')} · 选择 Workspace`
+    : `${title('🗂', '切换会话')} · 选择 Workspace`;
   if (!workspaces.length) {
-    return {
-      text: [
-        title('🗂', 'DSH Workspace'),
-        '',
-        '还没有注册任何 Workspace：DSH 在第一次创建会话时才会注册它。直接发送 /new 可以在插件自带的 Workspace 里建一个，然后这里就会列出来。',
-      ].join('\n'),
-      listing,
-    };
+    return [
+      header,
+      '',
+      '通知范围没有覆盖任何 Workspace。请让操作者在插件主页的「管理员 → 通知范围」里勾选至少一个 Workspace。',
+    ].join('\n');
   }
-  const rows = workspaces.map((workspace, index) => {
-    const mark = selected && workspace.path === selected ? '（当前默认）' : '';
-    return `${index + 1}. ${inline(workspace.title, 60)} — ${inline(displayPath(workspace.path), 120)}${mark}`;
-  });
-  return {
-    text: [
-      `${title('🗂', 'DSH Workspace')} · 共 ${workspaces.length} 个`,
-      '',
-      ...rows,
-      '',
-      `发送 ${code('/workspaces 序号')} 选择默认 Workspace；${code('/sessions')} 与 ${code('/new')} 都在它里面操作。发送 ${code('/workspaces 0')} 取消限定。`,
-    ].join('\n'),
-    listing,
+  const shown = workspaces.slice(0, PICKER_LIST_LIMIT);
+  const mark = (workspace: WorkspaceOption): string => {
+    if (!selected || workspace.path !== selected) return '';
+    return purpose === 'new' ? '（上次使用）' : '（当前）';
   };
+  const rows = shown.map((workspace, index) =>
+    `${index + 1}. ${inline(workspace.title, 60)} — ${inline(displayPath(workspace.path), 120)}${mark(workspace)}`);
+  const hidden = workspaces.length - shown.length;
+  return [
+    `${header} · 共 ${workspaces.length} 个`,
+    '',
+    ...rows,
+    ...(hidden ? ['', `… 另有 ${hidden} 个未显示`] : []),
+    '',
+    purpose === 'new'
+      ? `发送 ${code('/new 序号')} 选择；选择后立即在该 Workspace 新建会话并切换。`
+      : `发送 ${code('/session 序号')} 选择；选择后查看该 Workspace 的会话。`,
+    `> 选择 ${validityText(ADMIN_CARD_TTL_MS)}内有效。`,
+  ].join('\n');
 }
 
 /** `/delete` first reply: what is about to be lost, and how to confirm. */
@@ -313,52 +327,267 @@ export function newSessionText(workspaceTitle: string, sessionId: string): strin
   ].join('\n');
 }
 
-export function noWorkspaceText(): string {
+export function sessionSwitchedText(sessionTitle: string | null, workspace: string, sessionId: string): string {
   return [
-    title('⚠️', '还没有注册任何 Workspace'),
+    title('🔄', `已切换到${sessionLabel(sessionTitle)}`),
     '',
-    '先发送 /new 在插件自带的 Workspace 里建一个会话（DSH 会顺带注册它），再回来选序号。',
+    `- ${field('Workspace', inline(workspace, 120))}`,
+    `- ${field('会话 ID', code(shortId(sessionId)))}`,
+    '',
+    '现在直接发送消息即可继续该会话；发送 /reset 可以回到自己的专属会话。',
   ].join('\n');
 }
 
-export function sessionListText(
-  groups: readonly OperableGroup[], selected: string | undefined, limit = 30, scope?: string,
-): { text: string; listing: string[] } {
-  const listing: string[] = [];
+/**
+ * The one-line history of the current Session: the text fallback of the
+ * `/session` picker. On the card itself only {@link pickerSummaryText} fits.
+ */
+export function currentSessionText(info: SessionDescription | undefined, sessionId: string | undefined): string {
+  if (!sessionId) {
+    return [
+      `${title('🧭', '当前会话')} · 尚未选择`,
+      `> 发送 ${code('/new')} 新建，或从下面的列表里选择一个会话。`,
+    ].join('\n');
+  }
+  const meta = [
+    info?.workspace ? `Workspace ${inline(info.workspace, 120)}` : '',
+    info?.model ? `模型 ${code(`${info.model.provider}/${info.model.model}`)}` : '',
+    info?.context ? `上下文 ${formatContext(info.context.used, info.context.window)}` : '',
+    info?.running === undefined ? '' : info.running ? '运行中' : '空闲',
+  ].filter(Boolean).join(' · ');
+  return [
+    `${title('🧭', '当前会话')} · ${sessionRef(info?.title, sessionId)}`,
+    ...(meta ? [`> ${meta}`] : []),
+  ].join('\n');
+}
+
+/**
+ * The current Session as one line small enough for a card subtitle: title,
+ * model and state. The card carries the choices; this is the context they are
+ * asked in, not the full picture (`/status` still owns that).
+ */
+export function pickerSummaryText(info: SessionDescription | undefined, sessionId: string | undefined): string {
+  if (!sessionId) return '当前：尚未选择会话';
+  const meta = [
+    info?.model ? `${info.model.provider}/${info.model.model}` : '',
+    info?.running === undefined ? '' : info.running ? '运行中' : '空闲',
+  ].filter(Boolean).join(' · ');
+  return `当前：${displayTitle(info?.title)}${meta ? ` · ${meta}` : ''}`;
+}
+
+/** A retired command is still understood, but only to point at its replacement. */
+export function retiredCommandText(): string {
+  return [
+    title('ℹ️', '命令已更新'),
+    '> Workspace 与会话的选择合并到了卡片里。',
+    `- ${field('新建会话', `${code('/new')} 先选择 Workspace`)}`,
+    `- ${field('切换会话', `${code('/session')} 先选择 Workspace，再选择会话`)}`,
+  ].join('\n');
+}
+
+/** A tap that could not be turned into one choice: say what is missing. */
+export function adminSelectionHintText(kind: 'none' | 'many' | 'unreadable'): string {
+  if (kind === 'none') return [title('⚠️', '还没有选择'), '> 选一项后再点「提交」。'].join('\n');
+  if (kind === 'many') return [title('⚠️', '只能选择一个'), '> 取消多余的勾选后再点「提交」。'].join('\n');
+  return [
+    title('⚠️', '没能读取卡片上的选择'),
+    `> 请再点一次；也可以重新发送 ${code('/new')} 或 ${code('/session')}。`,
+  ].join('\n');
+}
+
+/**
+ * The numbered Session list behind one administrator's `/session` cards.
+ *
+ * Returns the rows actually shown, in the same order as the numbers, so the
+ * picker cards can use the same indexes. At most `limit` Sessions are listed;
+ * the rest are only counted. Group headers appear when the list is not
+ * filtered to one Workspace.
+ */
+export function sessionPickerText(
+  groups: readonly OperableGroup[],
+  currentId: string | undefined,
+  options: { readonly limit?: number; readonly workspaceTitle?: string } = {},
+): { text: string; sessions: OperableSession[]; total: number } {
+  const limit = options.limit ?? PICKER_LIST_LIMIT;
+  const workspaceTitle = options.workspaceTitle;
+  const shown: OperableSession[] = [];
   const blocks: string[] = [];
-  let truncated = 0;
+  let total = 0;
   for (const group of groups) {
     const rows: string[] = [];
     for (const session of group.sessions) {
-      if (listing.length >= limit) { truncated++; continue; }
-      listing.push(session.sessionId);
-      const marks = [session.running ? '运行中' : '', session.sessionId === selected ? '当前' : ''].filter(Boolean);
-      rows.push(`${listing.length}. ${inline(displayTitle(session.title), 60)} · ${shortId(session.sessionId)}${marks.length ? `（${marks.join(' · ')}）` : ''}`);
+      total++;
+      if (shown.length >= limit) continue;
+      shown.push(session);
+      const marks = [session.running ? '运行中' : '', session.sessionId === currentId ? '当前' : ''].filter(Boolean);
+      rows.push(`${shown.length}. ${inline(displayTitle(session.title), 60)} · ${shortId(session.sessionId)}${marks.length ? `（${marks.join(' · ')}）` : ''}`);
     }
     if (rows.length) blocks.push([bold(`📁 ${inline(group.title, 60)}`), ...rows].join('\n'));
   }
-  if (!listing.length) {
+  const header = `${title('🗂', '可切换的会话')}${workspaceTitle ? ` · Workspace ${inline(workspaceTitle, 60)}` : ''}`;
+  if (!shown.length) {
     return {
       text: [
-        `${title('🗂', '可切换的会话')}${scope ? ` · ${inline(scope, 60)}` : ''}`,
+        `${header} · 共 0 个`,
         '',
-        scope
-          ? '这个 Workspace 里没有可切换的会话。发送 /workspaces 0 可以取消 Workspace 限定。'
-          : '没有找到可切换的会话。请在 DSH 中创建会话，或检查管理员的 Workspace 范围。',
+        workspaceTitle
+          ? '这个 Workspace 里还没有可切换的会话。发送 /new 可以在 Workspace 里新建一个。'
+          : '没有找到可切换的会话。发送 /new 新建一个，或检查管理员的 Workspace 范围。',
       ].join('\n'),
-      listing,
+      sessions: shown,
+      total,
+    };
+  }
+  const hidden = total - shown.length;
+  return {
+    text: [
+      `${header} · 共 ${total} 个`,
+      '',
+      blocks.join('\n\n'),
+      ...(hidden ? ['', `… 另有 ${hidden} 个未显示`] : []),
+      '',
+      `发送 ${code('/session 序号')} 切换，或 ${code('/session 会话ID前缀')}。`,
+      `> 选择 ${validityText(ADMIN_CARD_TTL_MS)}内有效；发送 ${code('/reset')} 回到自己的专属会话。`,
+    ].join('\n'),
+    sessions: shown,
+    total,
+  };
+}
+
+/** `第 1/2 组 · ` when one list needs several cards, otherwise empty. */
+function pickerPageLabel(offset: number, total: number): string {
+  const pages = pickerPages(total).length;
+  if (pages <= 1) return '';
+  return `第 ${Math.floor(offset / PICKER_PAGE_SIZE) + 1}/${pages} 组 · `;
+}
+
+/** A button label: the number plus a short title, or just the number when the title is long. */
+function shortOptionText(title: string | null | undefined, number: number): string {
+  const text = displayTitle(title);
+  return [...text].length <= 6 ? `${number}. ${text}` : `选项 ${number}`;
+}
+
+function sessionMarks(session: OperableSession, currentId: string | undefined): string {
+  return [session.running ? '运行中' : '', session.sessionId === currentId ? '当前' : ''].filter(Boolean).join(' · ');
+}
+
+/**
+ * One page of an administrator's Workspace picker.
+ *
+ * Up to five choices are buttons (plus 取消); more become a single-select
+ * checkbox whose submit button reports the chosen index. Option ids are the
+ * option's 0-based *global* position, so a page and the typed fallback agree
+ * without translating offsets. The card is the whole answer — the numbers on
+ * it are the same ones `/new 序号` and `/session 序号` take.
+ */
+export function workspacePickerCard(
+  workspaces: readonly WorkspaceOption[],
+  page: { readonly nonce: string; readonly offset: number; readonly total: number },
+  purpose: 'new' | 'session',
+  options: { readonly summary?: string; readonly selectedPath?: string } = {},
+): TemplateCard | undefined {
+  const button = page.total <= PICKER_BUTTON_LIMIT;
+  const size = button ? page.total : PICKER_PAGE_SIZE;
+  const items = workspaces.slice(page.offset, page.offset + size);
+  if (!items.length) return undefined;
+  const mark = (workspace: WorkspaceOption): string =>
+    options.selectedPath && workspace.path === options.selectedPath ? (purpose === 'new' ? '（上次使用）' : '（当前）') : '';
+  const summary = options.summary ? cardText(options.summary, 96) : '';
+  const desc = cardText(
+    [pickerPageLabel(page.offset, page.total), ...(summary ? [summary] : []), `共 ${page.total} 个`, `${validityText(ADMIN_CARD_TTL_MS)}内有效`].join(' · '),
+    90,
+  );
+  if (button) {
+    return {
+      card_type: 'button_interaction',
+      main_title: { title: '🗂 选择 Workspace', desc },
+      sub_title_text: summary || (purpose === 'new' ? '选择后立即在新会话中开始' : '选择后查看其中的会话'),
+      horizontal_content_list: items.map((workspace, index) => ({
+        keyname: `选项${page.offset + index + 1}`,
+        value: cardText(`${workspace.title}${mark(workspace)} — ${displayPath(workspace.path)}`, 78),
+      })),
+      button_list: [
+        ...items.map((workspace, index) => ({
+          text: shortOptionText(workspace.title, page.offset + index + 1),
+          key: optionButton(page.offset + index),
+          style: 1,
+        })),
+        { text: '取消', key: CANCEL_BUTTON, style: 4 },
+      ],
+      task_id: adminTaskId(page.nonce),
     };
   }
   return {
-    text: [
-      `${title('🗂', '可切换的会话')} · 共 ${listing.length + truncated} 个${scope ? ` · ${inline(scope, 60)}` : ''}`,
-      '',
-      blocks.join('\n\n'),
-      '',
-      ...(truncated ? [`… 另有 ${truncated} 个未显示`, ''] : []),
-      `发送 ${code('/use 序号')} 切换会话；发送 ${code('/reset')} 回到自己的专属会话。`,
-    ].join('\n'),
-    listing,
+    card_type: 'vote_interaction',
+    main_title: { title: '🗂 选择 Workspace', desc },
+    checkbox: {
+      question_key: CHECKBOX_KEY,
+      mode: 0,
+      option_list: items.map((workspace, index) => ({
+        id: optionButton(page.offset + index),
+        text: cardText(`${page.offset + index + 1}. ${workspace.title}${mark(workspace)}`, 60),
+      })),
+    },
+    submit_button: { text: '选择', key: SUBMIT_BUTTON },
+    task_id: adminTaskId(page.nonce),
+  };
+}
+
+/** One page of an administrator's Session picker; same shape as the Workspace one. */
+export function sessionPickerCard(
+  sessions: readonly OperableSession[],
+  page: { readonly nonce: string; readonly offset: number; readonly total: number },
+  currentId: string | undefined,
+  options: { readonly summary?: string } = {},
+): TemplateCard | undefined {
+  const button = page.total <= PICKER_BUTTON_LIMIT;
+  const size = button ? page.total : PICKER_PAGE_SIZE;
+  const items = sessions.slice(page.offset, page.offset + size);
+  if (!items.length) return undefined;
+  const summary = options.summary ? cardText(options.summary, 96) : '';
+  const desc = cardText(
+    [pickerPageLabel(page.offset, page.total), ...(summary ? [summary] : []), `共 ${page.total} 个`, `${validityText(ADMIN_CARD_TTL_MS)}内有效`].join(' · '),
+    90,
+  );
+  if (button) {
+    return {
+      card_type: 'button_interaction',
+      main_title: { title: '🗂 选择会话', desc },
+      sub_title_text: summary || '选择后立即切换；运行中的会话也可以切换',
+      horizontal_content_list: items.map((session, index) => {
+        const marks = sessionMarks(session, currentId);
+        return {
+          keyname: `选项${page.offset + index + 1}`,
+          value: cardText(`${displayTitle(session.title)}${marks ? `（${marks}）` : ''}`, 78),
+        };
+      }),
+      button_list: [
+        ...items.map((session, index) => ({
+          text: shortOptionText(session.title, page.offset + index + 1),
+          key: optionButton(page.offset + index),
+          style: 1,
+        })),
+        { text: '取消', key: CANCEL_BUTTON, style: 4 },
+      ],
+      task_id: adminTaskId(page.nonce),
+    };
+  }
+  return {
+    card_type: 'vote_interaction',
+    main_title: { title: '🗂 选择会话', desc },
+    checkbox: {
+      question_key: CHECKBOX_KEY,
+      mode: 0,
+      option_list: items.map((session, index) => {
+        const marks = sessionMarks(session, currentId);
+        return {
+          id: optionButton(page.offset + index),
+          text: cardText(`${page.offset + index + 1}. ${displayTitle(session.title)}${marks ? `（${marks}）` : ''}`, 60),
+        };
+      }),
+    },
+    submit_button: { text: '切换', key: SUBMIT_BUTTON },
+    task_id: adminTaskId(page.nonce),
   };
 }
 
@@ -637,7 +866,7 @@ export function approvalNotice(sessionId: string, sessionTitle: string | null, r
 /**
  * What the person whose Session is blocked hears: they cannot approve (only
  * scoped administrators can), but they should see what is being asked and that
- * somebody else has been asked. No `/use` pointer — it is an administrator command.
+ * somebody else has been asked. No `/session` pointer — it is an administrator command.
  */
 export function approvalWaitingNotice(sessionTitle: string | null, request: ApprovalRequest): string {
   const reason = request.displayReason?.zh ?? request.displayReason?.en ?? request.reason ?? '';
@@ -788,6 +1017,31 @@ export function questionSettledCards(outcome: 'answered' | string, answer: strin
     ? `${memo?.closed ? '回答：' : '你选择了：'}${cardText(answer ?? '', 120)}`
     : '请求已处理或已超时，以 DSH 页面为准';
   return settledCandidates(headline, detail, taskId, answered ? '已回答' : '已失效', memo);
+}
+
+/**
+ * The card that replaces an administrator's picker once it is acted on.
+ *
+ * `summary` is the chosen Workspace or Session in words. A late tap on a page
+ * of the same group gets the same outcome, so a double tap never looks like a
+ * second action (and never runs one).
+ */
+export function adminSettledCards(outcome: AdminCardOutcome, summary: string | undefined, taskId: string): TemplateCard[] {
+  const said = summary ? cardText(summary, 120) : undefined;
+  switch (outcome) {
+    case 'created':
+      return settledCandidates('✅ 已创建会话', said ? `Workspace：${said}` : '新会话已创建并切换', taskId, '已创建');
+    case 'switched':
+      return settledCandidates('✅ 已切换会话', said ? `已切换到 ${said}` : '会话已切换', taskId, '已切换');
+    case 'selected':
+      return settledCandidates('✅ 已选择 Workspace', said ? `Workspace：${said}` : '已选择 Workspace', taskId, '已选择');
+    case 'creating':
+      return settledCandidates('⏳ 正在创建会话', said ? `Workspace：${said}` : '正在创建会话', taskId, '创建中');
+    case 'cancelled':
+      return settledCandidates('↩️ 已取消', '本次选择已取消', taskId, '已取消');
+    default:
+      return settledCandidates('⌛ 已失效', '请求已超时或已处理，请重新发送 /new 或 /session。', taskId, '已失效');
+  }
 }
 
 /** How a request ended, for a card that outlived it: what it was settled with and what to say. */

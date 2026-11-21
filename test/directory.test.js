@@ -28,7 +28,7 @@ test('a blank Session remains usable after creation but obeys live Workspace sco
   setScope([]);
   assert.equal(await directory.permitted('new-session'), true);
   assert.equal((await directory.describe('new-session')).workspacePath, '/w/alpha');
-  assert.deepEqual(await directory.groups(), [], 'blank Sessions do not enter /sessions');
+  assert.deepEqual(await directory.groups(), [], 'blank Sessions do not enter /session');
   assert.equal((await directory.resolve('new-session')).ok, false, 'blank Sessions are not selectable from the catalog');
 });
 

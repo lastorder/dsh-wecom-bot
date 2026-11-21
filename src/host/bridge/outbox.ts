@@ -18,7 +18,9 @@ export type NoticeKind =
   /** Sent by the page when an operator moves a sender to another group. */
   | 'group-assigned'
   /** Sent by the page when an operator adds somebody to the administrator list. */
-  | 'admin';
+  | 'admin'
+  /** A proactive reply or picker card for an administrator command. */
+  | 'admin-card';
 
 export interface Notice {
   readonly chat: string;

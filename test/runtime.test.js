@@ -29,8 +29,12 @@ async function withHome(run) {
 }
 
 function hostWithServices(overrides = {}) {
+  // A real directory: an administrator's `/new` picks a Workspace and DSH
+  // refuses to create a Session in one that does not exist.
+  const alpha = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-runtime-alpha-')));
   const ctx = fakeHost({
-    workspaces: [{ id: 'w1', path: '/w/alpha', title: 'Alpha', sessionIds: ['s1'] }],
+    workspaces: [{ id: 'w1', path: alpha, title: 'Alpha', sessionIds: ['s1'] }],
+    ...overrides,
   });
   const routes = new Map();
   const reads = [];
@@ -548,7 +552,7 @@ test('a moved administrator loses both the persisted Session and the temporary s
   client.emit('authenticated');
   await runtime.store.create('user', 'alice', { groupId: 'default', label: '爱丽丝' });
   await runtime.store.update('user:alice', { sessionId: 's1' });
-  client.emit('message', frame('/use s1'));
+  client.emit('message', frame('/session s1'));
   assert.ok(await until(() => client.replies.some(reply => /已切换到/.test(reply.content))));
   const group = await runtime.store.createGroup('新组');
   const path = mkdtempSync(join(home, 'group-'));

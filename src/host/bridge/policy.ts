@@ -9,7 +9,7 @@ import type { BindingKeyParts } from '../store.js';
  * settings page grants when it assigns a rejected sender to a group.
  * Administrators are the one exception in private chats: the store's settings
  * grant access to commands without creating membership. Plain messages still
- * need an explicit group or a Session chosen with `/new` or `/use`. An admin
+ * need an explicit group or a Session chosen with `/new` or `/session`. An admin
  * sending from an unassigned group chat never authorizes that shared chat.
  *
  * Routing is not decided here: which Session a conversation reaches comes from

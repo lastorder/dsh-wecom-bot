@@ -47,8 +47,8 @@ export interface SessionDescription {
 export interface SessionDirectory {
   /** Grouped by Workspace in DSH sidebar order; one Workspace when filtered. */
   groups(filter?: { readonly workspacePath?: string }): Promise<readonly OperableGroup[]>;
-  /** `token`: 1-based index into `listing`, a full Session id, or a unique id prefix (≥ 6 chars). */
-  resolve(token: string, listing?: readonly string[]): Promise<ResolveResult>;
+  /** `token`: a full Session id, or a unique id prefix (≥ 6 chars). */
+  resolve(token: string): Promise<ResolveResult>;
   permitted(sessionId: string): Promise<boolean>;
   describe(sessionId: string): Promise<SessionDescription>;
 }
@@ -90,7 +90,7 @@ export function createSessionDirectory(catalogs: CatalogService, options: Sessio
       }
       return [...result.values()];
     },
-    async resolve(token, listing) {
+    async resolve(token) {
       const value = token.trim();
       if (!value) return { ok: false, reason: 'not-found' };
       let catalog: SessionCatalog;
@@ -100,14 +100,8 @@ export function createSessionDirectory(catalogs: CatalogService, options: Sessio
         return { ok: false, reason: 'unavailable' };
       }
       const sessions = operable(catalog);
-      let candidates: OperableSession[] = [];
-      if (/^\d{1,3}$/.test(value) && listing) {
-        const id = listing[Number(value) - 1];
-        candidates = sessions.filter(session => session.sessionId === id);
-      } else {
-        const exact = sessions.filter(session => session.sessionId === value);
-        candidates = exact.length || value.length < 6 ? exact : sessions.filter(session => session.sessionId.startsWith(value));
-      }
+      const exact = sessions.filter(session => session.sessionId === value);
+      const candidates = exact.length || value.length < 6 ? exact : sessions.filter(session => session.sessionId.startsWith(value));
       if (candidates.length === 1) return { ok: true, session: candidates[0]! };
       if (candidates.length > 1) return { ok: false, reason: 'ambiguous' };
       const entry = catalog.get(value);

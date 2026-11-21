@@ -56,23 +56,35 @@ export function fakeClient() {
   const sends = [];
   const replies = [];
   const cardUpdates = [];
+  // Every card WeCom would show, in the order it was sent: a passive card
+  // reply (`replyTemplateCard`) or a proactive one (`sendMessage`).
+  const cards = [];
   // WeCom refuses a task_id it has already seen (errcode 42014, "taskid has existed").
   const taskIds = new Set();
+  const rememberCard = (chat, card) => {
+    const taskId = card?.task_id;
+    if (taskId !== undefined) {
+      if (taskIds.has(taskId)) throw new Error('errcode=42014, errmsg=taskid has existed or empty or exceed max len');
+      taskIds.add(taskId);
+    }
+    cards.push({ chat, card });
+  };
   const client = Object.assign(new EventEmitter(), {
-    sends, replies, cardUpdates,
+    sends, replies, cardUpdates, cards,
     connected: false,
     connect() { this.connected = true; return this; },
     disconnect() { this.connected = false; },
     async sendMessage(chat, body) {
-      const taskId = body?.template_card?.task_id;
-      if (taskId !== undefined) {
-        if (taskIds.has(taskId)) throw new Error('errcode=42014, errmsg=taskid has existed or empty or exceed max len');
-        taskIds.add(taskId);
-      }
+      if (body?.template_card) rememberCard(chat, body.template_card);
       sends.push({ chat, body });
       return { headers: { req_id: `send_${sends.length}` }, errcode: 0, errmsg: 'ok' };
     },
     async replyStream(frame, streamId, content, finish) { replies.push({ frame, streamId, content, finish }); return { headers: { req_id: frame.headers.req_id }, errcode: 0, errmsg: 'ok' }; },
+    async replyTemplateCard(frame, card) {
+      rememberCard(frame.body?.chatid ?? frame.body?.from?.userid ?? '', card);
+      replies.push({ frame, card });
+      return { headers: { req_id: frame.headers.req_id }, errcode: 0, errmsg: 'ok' };
+    },
     async updateTemplateCard(frame, card) { cardUpdates.push({ frame, card }); return { headers: { req_id: frame.headers.req_id }, errcode: 0, errmsg: 'ok' }; },
   });
   return client;
